@@ -9,6 +9,16 @@ public enum FindKind: Sendable, Hashable {
 }
 
 public extension FindKind {
+    /// Direction-flipped variant used by `,` (reverse-repeat last find).
+    var reversed: FindKind {
+        switch self {
+        case .forwardOnto: return .backwardOnto
+        case .backwardOnto: return .forwardOnto
+        case .forwardBefore: return .backwardAfter
+        case .backwardAfter: return .forwardBefore
+        }
+    }
+
     static func from(char: Character) -> FindKind? {
         switch char {
         case "f": return .forwardOnto

@@ -112,6 +112,10 @@ public enum VimEngine {
                 state.pendingFindKind = findKind
                 return Result(state: state, buffer: buffer)
             }
+            // Find-repeat (;) or reverse-repeat (,) as motion under operator.
+            if char == ";" || char == "," {
+                return resolveFindRepeat(char: char, state: state, buffer: buffer)
+            }
             // Otherwise interpret as a motion.
             if let motion = motion(for: char) {
                 state.pendingOperator = nil
@@ -135,6 +139,10 @@ public enum VimEngine {
         if let findKind = FindKind.from(char: char) {
             state.pendingFindKind = findKind
             return Result(state: state, buffer: buffer)
+        }
+        // Find-repeat (no operator).
+        if char == ";" || char == "," {
+            return resolveFindRepeat(char: char, state: state, buffer: buffer)
         }
 
         // Operators — set pending and wait for motion.
@@ -244,6 +252,10 @@ public enum VimEngine {
             if let findKind = FindKind.from(char: char) {
                 state.pendingFindKind = findKind
                 return Result(state: state, buffer: buffer)
+            }
+            // Find-repeat in visual mode.
+            if char == ";" || char == "," {
+                return resolveFindRepeatInVisual(char: char, state: state, buffer: buffer)
             }
 
             // Visual mode toggles
@@ -427,7 +439,8 @@ public enum VimEngine {
         findKind: FindKind,
         target: Character,
         state inState: VimState,
-        buffer inBuffer: TextBuffer
+        buffer inBuffer: TextBuffer,
+        recordAsLast: Bool = true
     ) -> Result {
         var state = inState
         var buffer = inBuffer
@@ -439,6 +452,9 @@ public enum VimEngine {
 
         guard let targetChar = findKind.locateTargetChar(in: buffer, target: target, count: count) else {
             return Result(state: state, buffer: buffer)
+        }
+        if recordAsLast {
+            state.lastFind = FindMemory(kind: findKind, target: target)
         }
 
         if let op = pending?.op {
@@ -454,7 +470,8 @@ public enum VimEngine {
         findKind: FindKind,
         target: Character,
         state inState: VimState,
-        buffer inBuffer: TextBuffer
+        buffer inBuffer: TextBuffer,
+        recordAsLast: Bool = true
     ) -> Result {
         var state = inState
         var buffer = inBuffer
@@ -465,8 +482,42 @@ public enum VimEngine {
         guard let targetChar = findKind.locateTargetChar(in: buffer, target: target, count: count) else {
             return Result(state: state, buffer: buffer)
         }
+        if recordAsLast {
+            state.lastFind = FindMemory(kind: findKind, target: target)
+        }
         buffer.cursor = findKind.cursorPosition(ofTargetChar: targetChar)
         return clamp(state: state, buffer: buffer)
+    }
+
+    /// Resolve `;` or `,` against the most recent find. `;` repeats with the
+    /// same direction; `,` reverses it. Recording is suppressed so the
+    /// memory still reflects the original find direction.
+    private static func resolveFindRepeat(
+        char: Character,
+        state inState: VimState,
+        buffer inBuffer: TextBuffer
+    ) -> Result {
+        var state = inState
+        let buffer = inBuffer
+        guard let last = state.lastFind else {
+            state.pendingOperator = nil
+            state.pendingCount = nil
+            return Result(state: state, buffer: buffer)
+        }
+        let kind = (char == ",") ? last.kind.reversed : last.kind
+        return resolveFind(findKind: kind, target: last.target, state: state, buffer: buffer, recordAsLast: false)
+    }
+
+    private static func resolveFindRepeatInVisual(
+        char: Character,
+        state inState: VimState,
+        buffer inBuffer: TextBuffer
+    ) -> Result {
+        let state = inState
+        let buffer = inBuffer
+        guard let last = state.lastFind else { return Result(state: state, buffer: buffer) }
+        let kind = (char == ",") ? last.kind.reversed : last.kind
+        return resolveFindInVisual(findKind: kind, target: last.target, state: state, buffer: buffer, recordAsLast: false)
     }
 
     private static func applyRangeOperator(

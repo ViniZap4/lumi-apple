@@ -14,6 +14,9 @@ public struct VimState: Sendable, Hashable {
     /// After `f F t T` (in any mode): which find variant we're awaiting a
     /// target character for.
     public var pendingFindKind: FindKind?
+    /// The most recent successful find/till. Used by `;` (repeat) and `,`
+    /// (reverse-repeat).
+    public var lastFind: FindMemory?
     /// Default ("unnamed") register — receives the most recent yank/delete.
     public var defaultRegister: Register
     public var history: VimHistory
@@ -24,6 +27,7 @@ public struct VimState: Sendable, Hashable {
         pendingOperator: PendingOperator? = nil,
         pendingTextObjectKind: TextObjectKind? = nil,
         pendingFindKind: FindKind? = nil,
+        lastFind: FindMemory? = nil,
         defaultRegister: Register = Register(),
         history: VimHistory = VimHistory()
     ) {
@@ -32,6 +36,7 @@ public struct VimState: Sendable, Hashable {
         self.pendingOperator = pendingOperator
         self.pendingTextObjectKind = pendingTextObjectKind
         self.pendingFindKind = pendingFindKind
+        self.lastFind = lastFind
         self.defaultRegister = defaultRegister
         self.history = history
     }
@@ -51,6 +56,17 @@ public struct PendingOperator: Sendable, Hashable {
     public init(op: VimOperator, count: Int = 1) {
         self.op = op
         self.count = count
+    }
+}
+
+/// Memory of the most recent f/F/t/T target. Used by `;` and `,`.
+public struct FindMemory: Sendable, Hashable {
+    public let kind: FindKind
+    public let target: Character
+
+    public init(kind: FindKind, target: Character) {
+        self.kind = kind
+        self.target = target
     }
 }
 

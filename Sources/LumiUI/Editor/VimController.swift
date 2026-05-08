@@ -2,6 +2,14 @@ import Foundation
 import Observation
 import LumiKit
 
+#if canImport(AppKit)
+import AppKit
+#endif
+
+#if canImport(UIKit)
+import UIKit
+#endif
+
 /// Thin observable wrapper that owns a `TextBuffer` + `VimState` and dispatches
 /// input events through the pure `VimEngine` reducer. The UI bridge holds one
 /// of these per editor instance.
@@ -25,9 +33,25 @@ public final class VimController {
     }
 
     public func send(_ input: VimInput) {
+        let previousRegister = state.defaultRegister
         let result = VimEngine.handle(input, state: state, buffer: buffer)
         state = result.state
         buffer = result.buffer
+
+        // Mirror yank/delete output to the system pasteboard so vim's `y` and
+        // `d` interoperate with Cmd+V outside the editor.
+        if state.defaultRegister != previousRegister, !state.defaultRegister.text.isEmpty {
+            writeToSystemPasteboard(state.defaultRegister.text)
+        }
+    }
+
+    private func writeToSystemPasteboard(_ text: String) {
+        #if canImport(AppKit)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        #elseif canImport(UIKit)
+        UIPasteboard.general.string = text
+        #endif
     }
 
     /// Cursor offset in UTF-16 code units, matching what UIKit/AppKit text
@@ -36,10 +60,26 @@ public final class VimController {
         utf16Offset(of: buffer.cursor)
     }
 
-    /// Selection to render in the platform text view. Collapsed range when
-    /// not in visual mode, the full visual selection otherwise.
+    /// Selection to render in the platform text view. Drives both the visual
+    /// highlight (in visual mode) and a single-character "block cursor" in
+    /// normal mode — UIKit/AppKit render the 1-char selection as a tinted
+    /// rectangle, which is exactly the vim block-cursor look without needing
+    /// custom drawing.
     public var selectionUTF16Range: NSRange {
         guard case let .visual(kind, anchor) = state.mode else {
+            // Normal mode: 1-char "block" if cursor is on a character.
+            // Insert mode (or empty buffer / past-end): collapsed caret.
+            if state.mode == .normal,
+               buffer.cursor < buffer.text.count,
+               !buffer.text.isEmpty
+            {
+                let cursorChar = buffer.text[buffer.cursorIndex]
+                if cursorChar != "\n" {
+                    let from = cursorUTF16Offset
+                    let to = utf16Offset(of: buffer.cursor + 1)
+                    return NSRange(location: from, length: to - from)
+                }
+            }
             return NSRange(location: cursorUTF16Offset, length: 0)
         }
         let cursor = buffer.cursor
