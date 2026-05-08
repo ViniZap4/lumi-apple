@@ -21,6 +21,21 @@ public struct VimState: Sendable, Hashable {
     public var defaultRegister: Register
     public var history: VimHistory
 
+    /// Most recent committed sequence of inputs that produced a buffer
+    /// modification. Replayed by `.` (dot-repeat).
+    public var lastChange: [VimInput]?
+    /// Inputs accumulated for the current command sequence. The recording
+    /// wrapper inside `VimEngine.handle` manages this — engine handlers
+    /// usually don't touch it. Meta-commands (undo, redo, dot itself) clear
+    /// it so they're not captured as changes.
+    public var recordingInputs: [VimInput]
+    /// `buffer.text` snapshot taken when recording started. Used to decide
+    /// whether the sequence actually modified anything.
+    public var recordingBaseline: String?
+    /// Set to `true` while a `.` replay is in progress. The wrapper bypasses
+    /// recording while this is on, so the replay doesn't clobber `lastChange`.
+    public var isReplaying: Bool
+
     public init(
         mode: VimMode = .normal,
         pendingCount: Int? = nil,
@@ -29,7 +44,11 @@ public struct VimState: Sendable, Hashable {
         pendingFindKind: FindKind? = nil,
         lastFind: FindMemory? = nil,
         defaultRegister: Register = Register(),
-        history: VimHistory = VimHistory()
+        history: VimHistory = VimHistory(),
+        lastChange: [VimInput]? = nil,
+        recordingInputs: [VimInput] = [],
+        recordingBaseline: String? = nil,
+        isReplaying: Bool = false
     ) {
         self.mode = mode
         self.pendingCount = pendingCount
@@ -39,6 +58,10 @@ public struct VimState: Sendable, Hashable {
         self.lastFind = lastFind
         self.defaultRegister = defaultRegister
         self.history = history
+        self.lastChange = lastChange
+        self.recordingInputs = recordingInputs
+        self.recordingBaseline = recordingBaseline
+        self.isReplaying = isReplaying
     }
 
     public static let initial = VimState()

@@ -15,6 +15,42 @@ public enum VimEngine {
     }
 
     public static func handle(_ input: VimInput, state: VimState, buffer: TextBuffer) -> Result {
+        // During a `.` replay, bypass recording entirely so the replay can't
+        // clobber `lastChange` with the inputs it's replaying.
+        if state.isReplaying {
+            return dispatch(input, state: state, buffer: buffer)
+        }
+
+        var preState = state
+        let beforeFresh = isFreshNormal(preState)
+        if beforeFresh {
+            preState.recordingInputs = [input]
+            preState.recordingBaseline = buffer.text
+        } else {
+            preState.recordingInputs.append(input)
+        }
+
+        var result = dispatch(input, state: preState, buffer: buffer)
+        let afterFresh = isFreshNormal(result.state)
+
+        if afterFresh {
+            // Sequence ended. Commit if any handler left recording intact and
+            // the buffer actually changed during the sequence. Meta-commands
+            // (undo, redo, dot replay) deliberately clear recordingInputs to
+            // skip the commit.
+            if !result.state.recordingInputs.isEmpty,
+               let baseline = result.state.recordingBaseline,
+               baseline != result.buffer.text
+            {
+                result.state.lastChange = result.state.recordingInputs
+            }
+            result.state.recordingInputs = []
+            result.state.recordingBaseline = nil
+        }
+        return result
+    }
+
+    private static func dispatch(_ input: VimInput, state: VimState, buffer: TextBuffer) -> Result {
         switch state.mode {
         case .normal:
             return handleNormal(input: input, state: state, buffer: buffer)
@@ -23,6 +59,14 @@ public enum VimEngine {
         case .visual:
             return handleVisual(input: input, state: state, buffer: buffer)
         }
+    }
+
+    private static func isFreshNormal(_ state: VimState) -> Bool {
+        state.mode == .normal &&
+            state.pendingOperator == nil &&
+            state.pendingTextObjectKind == nil &&
+            state.pendingFindKind == nil &&
+            state.pendingCount == nil
     }
 
     // MARK: Normal mode
@@ -170,6 +214,8 @@ public enum VimEngine {
             return openLine(below: false, state: state, buffer: buffer)
         case "u":
             return undo(state: state, buffer: buffer)
+        case ".":
+            return replayLastChange(state: state, buffer: buffer)
         case "v":
             state.mode = .visual(.characterwise, anchor: buffer.cursor)
             state.pendingCount = nil
@@ -812,7 +858,7 @@ public enum VimEngine {
         return Result(state: state, buffer: buffer)
     }
 
-    // MARK: Undo / redo
+    // MARK: Undo / redo / dot
 
     private static func undo(state inState: VimState, buffer inBuffer: TextBuffer) -> Result {
         var state = inState
@@ -820,6 +866,10 @@ public enum VimEngine {
         guard let snapshot = state.history.popUndo(current: current) else {
             return Result(state: state, buffer: inBuffer)
         }
+        // Undo is a meta-command: clear recording so the wrapper doesn't
+        // commit the undo-induced text change as a new "last change".
+        state.recordingInputs = []
+        state.recordingBaseline = nil
         return clamp(state: state, buffer: snapshot.asBuffer)
     }
 
@@ -829,7 +879,29 @@ public enum VimEngine {
         guard let snapshot = state.history.popRedo(current: current) else {
             return Result(state: state, buffer: inBuffer)
         }
+        state.recordingInputs = []
+        state.recordingBaseline = nil
         return clamp(state: state, buffer: snapshot.asBuffer)
+    }
+
+    private static func replayLastChange(state inState: VimState, buffer inBuffer: TextBuffer) -> Result {
+        guard let inputs = inState.lastChange, !inputs.isEmpty else {
+            return Result(state: inState, buffer: inBuffer)
+        }
+        var state = inState
+        var buffer = inBuffer
+        state.isReplaying = true
+        for input in inputs {
+            let r = handle(input, state: state, buffer: buffer)
+            state = r.state
+            buffer = r.buffer
+        }
+        state.isReplaying = false
+        // Skip commit: dot is a meta-command. lastChange must remain the
+        // original change, not `.` itself.
+        state.recordingInputs = []
+        state.recordingBaseline = nil
+        return Result(state: state, buffer: buffer)
     }
 
     // MARK: Clamps + lookups
