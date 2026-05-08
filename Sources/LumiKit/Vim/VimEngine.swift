@@ -66,7 +66,13 @@ public enum VimEngine {
             state.pendingOperator == nil &&
             state.pendingTextObjectKind == nil &&
             state.pendingFindKind == nil &&
-            state.pendingCount == nil
+            state.pendingCount == nil &&
+            state.pendingRegister == nil &&
+            !state.awaitingRegisterChar &&
+            !state.awaitingMarkSet &&
+            !state.awaitingMarkJumpLine &&
+            !state.awaitingMarkJumpExact &&
+            !state.awaitingGG
     }
 
     // MARK: Normal mode
@@ -79,6 +85,14 @@ public enum VimEngine {
         case .escape:
             state.pendingCount = nil
             state.pendingOperator = nil
+            state.pendingTextObjectKind = nil
+            state.pendingFindKind = nil
+            state.pendingRegister = nil
+            state.awaitingRegisterChar = false
+            state.awaitingMarkSet = false
+            state.awaitingMarkJumpLine = false
+            state.awaitingMarkJumpExact = false
+            state.awaitingGG = false
             return Result(state: state, buffer: buffer)
 
         case .return:
@@ -124,6 +138,49 @@ public enum VimEngine {
             return resolveTextObject(char: char, kind: toKind, state: state, buffer: buffer)
         }
 
+        // Register prefix: after `"`, the next char names the register.
+        if state.awaitingRegisterChar {
+            state.awaitingRegisterChar = false
+            if isValidRegister(char) {
+                state.pendingRegister = char
+            }
+            return Result(state: state, buffer: buffer)
+        }
+
+        // Mark commands: m sets, ' jumps to line, ` jumps to exact position.
+        if state.awaitingMarkSet {
+            state.awaitingMarkSet = false
+            if isValidMark(char) {
+                state.marks[char] = buffer.cursor
+            }
+            return Result(state: state, buffer: buffer)
+        }
+        if state.awaitingMarkJumpLine {
+            state.awaitingMarkJumpLine = false
+            return resolveMarkJump(name: char, exact: false, state: state, buffer: buffer)
+        }
+        if state.awaitingMarkJumpExact {
+            state.awaitingMarkJumpExact = false
+            return resolveMarkJump(name: char, exact: true, state: state, buffer: buffer)
+        }
+
+        // Two-key motion `gg` (file start). After first `g`, the next char
+        // is checked here.
+        if state.awaitingGG {
+            state.awaitingGG = false
+            if char == "g" {
+                if let pending = state.pendingOperator {
+                    state.pendingOperator = nil
+                    state.pendingCount = nil
+                    return applyOperator(pending.op, motion: .fileStart, count: 1, state: state, buffer: buffer)
+                }
+                buffer.cursor = 0
+                state.pendingCount = nil
+                return clamp(state: state, buffer: buffer)
+            }
+            // Different char — fall through and process normally.
+        }
+
         // Counts: leading digits accumulate. "0" alone is the line-start motion;
         // "0" after digits is part of the count.
         if char.isASCII, char.isNumber, !(char == "0" && state.pendingCount == nil) {
@@ -159,6 +216,15 @@ public enum VimEngine {
             // Find-repeat (;) or reverse-repeat (,) as motion under operator.
             if char == ";" || char == "," {
                 return resolveFindRepeat(char: char, state: state, buffer: buffer)
+            }
+            // Mark jump as motion under operator: d'a, d`a.
+            if char == "'" {
+                state.awaitingMarkJumpLine = true
+                return Result(state: state, buffer: buffer)
+            }
+            if char == "`" {
+                state.awaitingMarkJumpExact = true
+                return Result(state: state, buffer: buffer)
             }
             // Otherwise interpret as a motion.
             if let motion = motion(for: char) {
@@ -216,6 +282,18 @@ public enum VimEngine {
             return undo(state: state, buffer: buffer)
         case ".":
             return replayLastChange(state: state, buffer: buffer)
+        case "\"":
+            state.awaitingRegisterChar = true
+            return Result(state: state, buffer: buffer)
+        case "m":
+            state.awaitingMarkSet = true
+            return Result(state: state, buffer: buffer)
+        case "'":
+            state.awaitingMarkJumpLine = true
+            return Result(state: state, buffer: buffer)
+        case "`":
+            state.awaitingMarkJumpExact = true
+            return Result(state: state, buffer: buffer)
         case "v":
             state.mode = .visual(.characterwise, anchor: buffer.cursor)
             state.pendingCount = nil
@@ -225,10 +303,7 @@ public enum VimEngine {
             state.pendingCount = nil
             return Result(state: state, buffer: buffer)
         case "g":
-            // Two-key `gg` motion. We park it as a pending one-shot via a
-            // sentinel pending operator with no real op — simplest path is to
-            // treat the next 'g' as fileStart.
-            state.pendingOperator = PendingOperator(op: .yank, count: -1) // sentinel
+            state.awaitingGG = true
             return Result(state: state, buffer: buffer)
         default:
             state.pendingCount = nil
@@ -274,6 +349,18 @@ public enum VimEngine {
             // Awaiting text object selector (visual + i/a): consume as object marker.
             if let toKind = state.pendingTextObjectKind {
                 return resolveTextObjectInVisual(char: char, kind: toKind, state: state, buffer: buffer)
+            }
+            // Register prefix in visual mode: `"<letter>y` etc.
+            if state.awaitingRegisterChar {
+                state.awaitingRegisterChar = false
+                if isValidRegister(char) {
+                    state.pendingRegister = char
+                }
+                return Result(state: state, buffer: buffer)
+            }
+            if char == "\"" {
+                state.awaitingRegisterChar = true
+                return Result(state: state, buffer: buffer)
             }
 
             // Counts (digit prefix; bare 0 is line-start motion).
@@ -387,7 +474,7 @@ public enum VimEngine {
                 ..<
                 buffer.text.index(buffer.text.startIndex, offsetBy: upper)
             ])
-            state.defaultRegister = Register(text: yanked, kind: .characterwise)
+            writeRegister(text: yanked, kind: .characterwise, state: &state)
 
             switch op {
             case .yank:
@@ -430,6 +517,88 @@ public enum VimEngine {
         var b = buffer
         b.cursor = max(0, min(offset, b.text.count))
         return b.cursorLine
+    }
+
+    // MARK: Registers + marks
+
+    private static func isValidRegister(_ char: Character) -> Bool {
+        char.isLetter
+    }
+
+    private static func isValidMark(_ char: Character) -> Bool {
+        char.isLetter
+    }
+
+    /// Write `text` to the active register pair: always to the unnamed
+    /// register, and additionally to a named register if a `"<letter>` prefix
+    /// is pending. Consumes `pendingRegister`.
+    private static func writeRegister(text: String, kind: Register.Kind, state: inout VimState) {
+        let reg = Register(text: text, kind: kind)
+        state.defaultRegister = reg
+        if let key = state.pendingRegister {
+            state.registers[key] = reg
+        }
+        state.pendingRegister = nil
+    }
+
+    /// Read the active register: a named one if `pendingRegister` is set,
+    /// otherwise the unnamed register. Consumes `pendingRegister`.
+    private static func readRegister(state: inout VimState) -> Register {
+        if let key = state.pendingRegister {
+            state.pendingRegister = nil
+            return state.registers[key] ?? Register()
+        }
+        return state.defaultRegister
+    }
+
+    private static func resolveMarkJump(
+        name: Character,
+        exact: Bool,
+        state inState: VimState,
+        buffer inBuffer: TextBuffer
+    ) -> Result {
+        var state = inState
+        var buffer = inBuffer
+        let pending = state.pendingOperator
+        state.pendingOperator = nil
+        state.pendingCount = nil
+
+        guard let stored = state.marks[name] else {
+            return Result(state: state, buffer: buffer)
+        }
+        let safe = max(0, min(stored, buffer.text.count))
+
+        // For exact (` `) jumps the target is the saved offset itself; for
+        // line ('') jumps it's the start of the line containing the mark.
+        var targetBuffer = buffer
+        targetBuffer.cursor = safe
+        let target: Int
+        if exact {
+            target = safe
+        } else {
+            target = buffer.lineStart(of: targetBuffer.cursorLine)
+        }
+
+        if let op = pending?.op {
+            if exact {
+                let from = min(buffer.cursor, target)
+                let to = max(buffer.cursor, target)
+                let upper = min(to + 1, buffer.text.count)
+                return applyRangeOperator(op, fromOffset: from, toOffset: upper, state: state, buffer: buffer)
+            }
+            // Linewise: include both cursor's line and mark's line in full.
+            let cursorLine = lineForOffset(buffer: buffer, offset: buffer.cursor)
+            let markLine = lineForOffset(buffer: buffer, offset: safe)
+            let firstLine = min(cursorLine, markLine)
+            let lastLine = max(cursorLine, markLine)
+            let lineFrom = buffer.lineStart(of: firstLine)
+            var lineTo = buffer.lineEnd(of: lastLine)
+            if lineTo < buffer.text.count { lineTo += 1 }
+            return applyLinewiseRange(op, fromOffset: lineFrom, toOffset: lineTo, state: state, buffer: buffer)
+        }
+
+        buffer.cursor = target
+        return clamp(state: state, buffer: buffer)
     }
 
     // MARK: Text object + find resolution
@@ -583,7 +752,7 @@ public enum VimEngine {
             ..<
             buffer.text.index(buffer.text.startIndex, offsetBy: to)
         ])
-        state.defaultRegister = Register(text: yanked, kind: .characterwise)
+        writeRegister(text: yanked, kind: .characterwise, state: &state)
 
         switch op {
         case .yank:
@@ -680,7 +849,7 @@ public enum VimEngine {
             ..<
             buffer.text.index(buffer.text.startIndex, offsetBy: upper)
         ])
-        state.defaultRegister = Register(text: yanked, kind: .characterwise)
+        writeRegister(text: yanked, kind: .characterwise, state: &state)
 
         switch op {
         case .yank:
@@ -740,7 +909,7 @@ public enum VimEngine {
             ..<
             buffer.text.index(buffer.text.startIndex, offsetBy: to)
         ])
-        state.defaultRegister = Register(text: yanked, kind: .linewise)
+        writeRegister(text: yanked, kind: .linewise, state: &state)
 
         switch op {
         case .yank:
@@ -778,7 +947,7 @@ public enum VimEngine {
             ..<
             buffer.text.index(buffer.text.startIndex, offsetBy: to)
         ])
-        state.defaultRegister = Register(text: yanked, kind: .characterwise)
+        writeRegister(text: yanked, kind: .characterwise, state: &state)
         buffer.text.removeSubrange(
             buffer.text.index(buffer.text.startIndex, offsetBy: from)
             ..<
@@ -790,7 +959,7 @@ public enum VimEngine {
     private static func applyPaste(after: Bool, count: Int, state inState: VimState, buffer inBuffer: TextBuffer) -> Result {
         var state = inState
         var buffer = inBuffer
-        let reg = state.defaultRegister
+        let reg = readRegister(state: &state)
         guard !reg.text.isEmpty else { return Result(state: state, buffer: buffer) }
         state.history.push(.init(buffer: buffer))
 

@@ -19,6 +19,26 @@ public struct VimState: Sendable, Hashable {
     public var lastFind: FindMemory?
     /// Default ("unnamed") register — receives the most recent yank/delete.
     public var defaultRegister: Register
+    /// Named registers (`"a` … `"z`, `"A` … `"Z`). Yank/delete writes here in
+    /// addition to the default register; paste reads from here when prefixed.
+    public var registers: [Character: Register]
+    /// Set after `"<letter>`. Consumed by the next register-using operator.
+    public var pendingRegister: Character?
+    /// Set after `"` itself. The next character is interpreted as the
+    /// register name.
+    public var awaitingRegisterChar: Bool
+
+    /// Mark name → cursor offset. Mirrors vim's per-file marks (a-z, A-Z).
+    public var marks: [Character: Int]
+    /// Set after `m`. Next character names the mark to set.
+    public var awaitingMarkSet: Bool
+    /// Set after `'`. Next character names the mark to jump to (line).
+    public var awaitingMarkJumpLine: Bool
+    /// Set after `` ` ``. Next character names the mark to jump to (exact).
+    public var awaitingMarkJumpExact: Bool
+    /// Set after first `g`. The next `g` resolves to fileStart motion (`gg`).
+    public var awaitingGG: Bool
+
     public var history: VimHistory
 
     /// Most recent committed sequence of inputs that produced a buffer
@@ -44,6 +64,14 @@ public struct VimState: Sendable, Hashable {
         pendingFindKind: FindKind? = nil,
         lastFind: FindMemory? = nil,
         defaultRegister: Register = Register(),
+        registers: [Character: Register] = [:],
+        pendingRegister: Character? = nil,
+        awaitingRegisterChar: Bool = false,
+        marks: [Character: Int] = [:],
+        awaitingMarkSet: Bool = false,
+        awaitingMarkJumpLine: Bool = false,
+        awaitingMarkJumpExact: Bool = false,
+        awaitingGG: Bool = false,
         history: VimHistory = VimHistory(),
         lastChange: [VimInput]? = nil,
         recordingInputs: [VimInput] = [],
@@ -57,6 +85,14 @@ public struct VimState: Sendable, Hashable {
         self.pendingFindKind = pendingFindKind
         self.lastFind = lastFind
         self.defaultRegister = defaultRegister
+        self.registers = registers
+        self.pendingRegister = pendingRegister
+        self.awaitingRegisterChar = awaitingRegisterChar
+        self.marks = marks
+        self.awaitingMarkSet = awaitingMarkSet
+        self.awaitingMarkJumpLine = awaitingMarkJumpLine
+        self.awaitingMarkJumpExact = awaitingMarkJumpExact
+        self.awaitingGG = awaitingGG
         self.history = history
         self.lastChange = lastChange
         self.recordingInputs = recordingInputs
