@@ -91,6 +91,15 @@ struct VimTextViewBridge: UIViewRepresentable {
         textView.smartInsertDeleteType = .no
         textView.backgroundColor = .clear
         textView.textContainerInset = UIEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+
+        // Soft-keyboard accessory bar (ESC, :, /, ;, ,). Hardware keyboards
+        // surface the same bar as the iPadOS shortcut bar at the screen edge.
+        let bar = VimAccessoryBar()
+        bar.onTap = { [weak textView] action in
+            textView?.handleAccessory(action)
+        }
+        textView.accessoryBar = bar
+        textView.inputAccessoryView = bar
         return textView
     }
 
@@ -98,6 +107,7 @@ struct VimTextViewBridge: UIViewRepresentable {
         guard let view = textView as? VimUIKitTextView else { return }
         view.textColor = UIColor(theme.text)
         view.tintColor = UIColor(isInsertMode ? theme.primary : theme.accent)
+        view.applyAccessoryTheme(theme)
 
         if view.text != text {
             view.text = text
@@ -110,6 +120,24 @@ struct VimTextViewBridge: UIViewRepresentable {
 
 final class VimUIKitTextView: UITextView {
     weak var controller: VimController?
+    var accessoryBar: VimAccessoryBar?
+
+    func applyAccessoryTheme(_ theme: ThemeTokens) {
+        accessoryBar?.apply(theme: theme)
+    }
+
+    fileprivate func handleAccessory(_ action: VimAccessoryAction) {
+        guard let controller else { return }
+        let input: VimInput
+        switch action {
+        case .escape: input = .escape
+        case .colon: input = .character(":")
+        case .slash: input = .character("/")
+        case .semicolon: input = .character(";")
+        case .comma: input = .character(",")
+        }
+        controller.send(input)
+    }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         guard let controller else { super.pressesBegan(presses, with: event); return }
