@@ -1,0 +1,460 @@
+import Foundation
+
+/// Pure reducer for the vim engine. Calls into this are the only mutations
+/// allowed on `VimState` and `TextBuffer`. Every transition is a function from
+/// `(state, buffer, input) -> (state, buffer)`, which keeps testing trivial.
+public enum VimEngine {
+    public struct Result: Sendable, Hashable {
+        public var state: VimState
+        public var buffer: TextBuffer
+
+        public init(state: VimState, buffer: TextBuffer) {
+            self.state = state
+            self.buffer = buffer
+        }
+    }
+
+    public static func handle(_ input: VimInput, state: VimState, buffer: TextBuffer) -> Result {
+        switch state.mode {
+        case .normal:
+            return handleNormal(input: input, state: state, buffer: buffer)
+        case .insert:
+            return handleInsert(input: input, state: state, buffer: buffer)
+        case .visual:
+            // Visual mode is part of a follow-up phase. Treat any input as
+            // "ESC back to normal" to keep us recoverable.
+            var newState = state
+            newState.mode = .normal
+            newState.pendingCount = nil
+            newState.pendingOperator = nil
+            return Result(state: newState, buffer: buffer)
+        }
+    }
+
+    // MARK: Normal mode
+
+    private static func handleNormal(input: VimInput, state: VimState, buffer: TextBuffer) -> Result {
+        var state = state
+        var buffer = buffer
+
+        switch input {
+        case .escape:
+            state.pendingCount = nil
+            state.pendingOperator = nil
+            return Result(state: state, buffer: buffer)
+
+        case .return:
+            // <Enter> in normal mode = down-then-first-non-blank
+            buffer.cursor = Motion.down.resolve(in: buffer, count: state.effectiveCount)
+            buffer.cursor = Motion.lineFirstNonBlank.resolve(in: buffer, count: 1)
+            state.pendingCount = nil
+            return clamp(state: state, buffer: buffer)
+
+        case .backspace:
+            // <BS> in normal = h
+            buffer.cursor = Motion.left.resolve(in: buffer, count: state.effectiveCount)
+            state.pendingCount = nil
+            return clamp(state: state, buffer: buffer)
+
+        case .tab:
+            return Result(state: state, buffer: buffer)
+
+        case .controlR:
+            return redo(state: state, buffer: buffer)
+
+        case let .character(char):
+            return handleNormalCharacter(char, state: state, buffer: buffer)
+        }
+    }
+
+    private static func handleNormalCharacter(
+        _ char: Character,
+        state inState: VimState,
+        buffer inBuffer: TextBuffer
+    ) -> Result {
+        var state = inState
+        var buffer = inBuffer
+
+        // Counts: leading digits accumulate. "0" alone is the line-start motion;
+        // "0" after digits is part of the count.
+        if char.isASCII, char.isNumber, !(char == "0" && state.pendingCount == nil) {
+            let digit = Int(String(char)) ?? 0
+            state.pendingCount = (state.pendingCount ?? 0) * 10 + digit
+            return Result(state: state, buffer: buffer)
+        }
+
+        let count = state.pendingCount ?? 1
+
+        // If an operator is pending, this character should resolve it.
+        if let pending = state.pendingOperator {
+            // Doubled operator (`dd`, `yy`, `cc`) — line-wise.
+            if char == operatorChar(for: pending.op) {
+                state.pendingOperator = nil
+                state.pendingCount = nil
+                return applyLinewiseOperator(pending.op, lineCount: count * pending.count, state: state, buffer: buffer)
+            }
+            // Otherwise interpret as a motion.
+            if let motion = motion(for: char) {
+                state.pendingOperator = nil
+                state.pendingCount = nil
+                return applyOperator(pending.op, motion: motion, count: count * pending.count, state: state, buffer: buffer)
+            }
+            // Unknown follow-up — cancel the pending op.
+            state.pendingOperator = nil
+            state.pendingCount = nil
+            return Result(state: state, buffer: buffer)
+        }
+
+        // Plain motion (no operator)
+        if let motion = motion(for: char) {
+            buffer.cursor = motion.resolve(in: buffer, count: count)
+            state.pendingCount = nil
+            return clamp(state: state, buffer: buffer)
+        }
+
+        // Operators — set pending and wait for motion.
+        switch char {
+        case "d": state.pendingOperator = PendingOperator(op: .delete, count: count); state.pendingCount = nil
+        case "c": state.pendingOperator = PendingOperator(op: .change, count: count); state.pendingCount = nil
+        case "y": state.pendingOperator = PendingOperator(op: .yank, count: count); state.pendingCount = nil
+        case "x": return applyXDelete(count: count, state: state, buffer: buffer)
+        case "p": return applyPaste(after: true, count: count, state: state, buffer: buffer)
+        case "P": return applyPaste(after: false, count: count, state: state, buffer: buffer)
+        case "i": return enterInsert(at: buffer.cursor, state: state, buffer: buffer)
+        case "I":
+            let target = Motion.lineFirstNonBlank.resolve(in: buffer, count: 1)
+            return enterInsert(at: target, state: state, buffer: buffer)
+        case "a":
+            let target = min(buffer.text.count, buffer.cursor + 1)
+            return enterInsert(at: target, state: state, buffer: buffer)
+        case "A":
+            let line = buffer.cursorLine
+            let target = buffer.lineEnd(of: line)
+            return enterInsert(at: target, state: state, buffer: buffer)
+        case "o":
+            return openLine(below: true, state: state, buffer: buffer)
+        case "O":
+            return openLine(below: false, state: state, buffer: buffer)
+        case "u":
+            return undo(state: state, buffer: buffer)
+        case "g":
+            // Two-key `gg` motion. We park it as a pending one-shot via a
+            // sentinel pending operator with no real op — simplest path is to
+            // treat the next 'g' as fileStart.
+            state.pendingOperator = PendingOperator(op: .yank, count: -1) // sentinel
+            return Result(state: state, buffer: buffer)
+        default:
+            state.pendingCount = nil
+            return Result(state: state, buffer: buffer)
+        }
+        return Result(state: state, buffer: buffer)
+    }
+
+    // MARK: Insert mode
+
+    private static func handleInsert(input: VimInput, state: VimState, buffer: TextBuffer) -> Result {
+        var state = state
+        var buffer = buffer
+
+        switch input {
+        case .escape:
+            state.mode = .normal
+            // vim convention: cursor steps left when leaving insert (unless at line start)
+            let line = buffer.cursorLine
+            let lineStart = buffer.lineStart(of: line)
+            if buffer.cursor > lineStart {
+                buffer.cursor -= 1
+            }
+            return clamp(state: state, buffer: buffer)
+
+        case .return:
+            insertString("\n", state: &state, buffer: &buffer)
+            return Result(state: state, buffer: buffer)
+
+        case .backspace:
+            if buffer.cursor > 0 {
+                let idx = buffer.text.index(buffer.text.startIndex, offsetBy: buffer.cursor)
+                let before = buffer.text.index(before: idx)
+                buffer.text.removeSubrange(before..<idx)
+                buffer.cursor -= 1
+            }
+            return Result(state: state, buffer: buffer)
+
+        case .tab:
+            insertString("\t", state: &state, buffer: &buffer)
+            return Result(state: state, buffer: buffer)
+
+        case .controlR, .character:
+            if case let .character(char) = input {
+                insertString(String(char), state: &state, buffer: &buffer)
+            }
+            return Result(state: state, buffer: buffer)
+        }
+    }
+
+    private static func insertString(_ str: String, state: inout VimState, buffer: inout TextBuffer) {
+        let idx = buffer.text.index(buffer.text.startIndex, offsetBy: min(buffer.cursor, buffer.text.count))
+        buffer.text.insert(contentsOf: str, at: idx)
+        buffer.cursor += str.count
+    }
+
+    // MARK: Operators
+
+    private static func applyOperator(
+        _ op: VimOperator,
+        motion: Motion,
+        count: Int,
+        state inState: VimState,
+        buffer inBuffer: TextBuffer
+    ) -> Result {
+        var state = inState
+        var buffer = inBuffer
+
+        // Special: gg (handled via the sentinel above) — turn fileStart into linewise.
+        let target = motion.resolve(in: buffer, count: count)
+        let from = min(buffer.cursor, target)
+        let to = max(buffer.cursor, target)
+
+        let upper = motion.isInclusive ? min(to + 1, buffer.text.count) : to
+
+        if motion.isLinewise {
+            return applyLinewiseRange(op, fromOffset: from, toOffset: upper, state: state, buffer: buffer)
+        }
+
+        let yanked = String(buffer.text[
+            buffer.text.index(buffer.text.startIndex, offsetBy: from)
+            ..<
+            buffer.text.index(buffer.text.startIndex, offsetBy: upper)
+        ])
+        state.defaultRegister = Register(text: yanked, kind: .characterwise)
+
+        switch op {
+        case .yank:
+            return Result(state: state, buffer: buffer)
+        case .delete, .change:
+            state.history.push(.init(buffer: buffer))
+            buffer.text.removeSubrange(
+                buffer.text.index(buffer.text.startIndex, offsetBy: from)
+                ..<
+                buffer.text.index(buffer.text.startIndex, offsetBy: upper)
+            )
+            buffer.cursor = from
+            if op == .change {
+                state.mode = .insert
+            }
+            return clamp(state: state, buffer: buffer)
+        }
+    }
+
+    private static func applyLinewiseOperator(
+        _ op: VimOperator,
+        lineCount: Int,
+        state inState: VimState,
+        buffer inBuffer: TextBuffer
+    ) -> Result {
+        let buffer = inBuffer
+        let firstLine = buffer.cursorLine
+        let lastLine = min(buffer.lineCount - 1, firstLine + max(1, lineCount) - 1)
+        let from = buffer.lineStart(of: firstLine)
+        var to = buffer.lineEnd(of: lastLine)
+        // Include trailing newline if present, so `dd` removes a whole line
+        // and not just its content.
+        if to < buffer.text.count {
+            to += 1
+        } else if from > 0 {
+            // Last line — eat the preceding newline so we don't leave a stray
+            // blank line above.
+            return applyLinewiseRange(op, fromOffset: from - 1, toOffset: to, state: inState, buffer: buffer)
+        }
+        return applyLinewiseRange(op, fromOffset: from, toOffset: to, state: inState, buffer: buffer)
+    }
+
+    private static func applyLinewiseRange(
+        _ op: VimOperator,
+        fromOffset: Int,
+        toOffset: Int,
+        state inState: VimState,
+        buffer inBuffer: TextBuffer
+    ) -> Result {
+        var state = inState
+        var buffer = inBuffer
+        let from = max(0, min(fromOffset, buffer.text.count))
+        let to = max(from, min(toOffset, buffer.text.count))
+
+        let yanked = String(buffer.text[
+            buffer.text.index(buffer.text.startIndex, offsetBy: from)
+            ..<
+            buffer.text.index(buffer.text.startIndex, offsetBy: to)
+        ])
+        state.defaultRegister = Register(text: yanked, kind: .linewise)
+
+        switch op {
+        case .yank:
+            return Result(state: state, buffer: buffer)
+        case .delete, .change:
+            state.history.push(.init(buffer: buffer))
+            buffer.text.removeSubrange(
+                buffer.text.index(buffer.text.startIndex, offsetBy: from)
+                ..<
+                buffer.text.index(buffer.text.startIndex, offsetBy: to)
+            )
+            buffer.cursor = min(from, max(0, buffer.text.count - 1))
+            if op == .change {
+                state.mode = .insert
+                // For `cc`, leave a blank line and put us into insert mode
+                // at the start of it.
+                let lineEnd = buffer.lineEnd(of: buffer.cursorLine)
+                if buffer.cursor < lineEnd {
+                    // already on existing line; nothing to add.
+                }
+            }
+            return clamp(state: state, buffer: buffer)
+        }
+    }
+
+    private static func applyXDelete(count: Int, state inState: VimState, buffer inBuffer: TextBuffer) -> Result {
+        var state = inState
+        var buffer = inBuffer
+        guard !buffer.text.isEmpty else { return Result(state: state, buffer: buffer) }
+        state.history.push(.init(buffer: buffer))
+        let from = buffer.cursor
+        let to = min(buffer.text.count, from + max(1, count))
+        let yanked = String(buffer.text[
+            buffer.text.index(buffer.text.startIndex, offsetBy: from)
+            ..<
+            buffer.text.index(buffer.text.startIndex, offsetBy: to)
+        ])
+        state.defaultRegister = Register(text: yanked, kind: .characterwise)
+        buffer.text.removeSubrange(
+            buffer.text.index(buffer.text.startIndex, offsetBy: from)
+            ..<
+            buffer.text.index(buffer.text.startIndex, offsetBy: to)
+        )
+        return clamp(state: state, buffer: buffer)
+    }
+
+    private static func applyPaste(after: Bool, count: Int, state inState: VimState, buffer inBuffer: TextBuffer) -> Result {
+        var state = inState
+        var buffer = inBuffer
+        let reg = state.defaultRegister
+        guard !reg.text.isEmpty else { return Result(state: state, buffer: buffer) }
+        state.history.push(.init(buffer: buffer))
+
+        let times = max(1, count)
+        let toInsert = String(repeating: reg.text, count: times)
+
+        switch reg.kind {
+        case .characterwise:
+            let target = after ? min(buffer.text.count, buffer.cursor + 1) : buffer.cursor
+            let idx = buffer.text.index(buffer.text.startIndex, offsetBy: target)
+            buffer.text.insert(contentsOf: toInsert, at: idx)
+            buffer.cursor = target + toInsert.count - 1
+        case .linewise:
+            let line = buffer.cursorLine
+            let target: Int
+            var payload = toInsert
+            if !payload.hasSuffix("\n") { payload.append("\n") }
+            if after {
+                target = buffer.lineEnd(of: line)
+                let idx = buffer.text.index(buffer.text.startIndex, offsetBy: target)
+                buffer.text.insert("\n", at: idx)
+                buffer.text.insert(contentsOf: payload.dropLast(), at: buffer.text.index(buffer.text.startIndex, offsetBy: target + 1))
+                buffer.cursor = target + 1
+            } else {
+                target = buffer.lineStart(of: line)
+                let idx = buffer.text.index(buffer.text.startIndex, offsetBy: target)
+                buffer.text.insert(contentsOf: payload, at: idx)
+                buffer.cursor = target
+            }
+        }
+        return clamp(state: state, buffer: buffer)
+    }
+
+    // MARK: Insert entry helpers
+
+    private static func enterInsert(at target: Int, state inState: VimState, buffer inBuffer: TextBuffer) -> Result {
+        var state = inState
+        var buffer = inBuffer
+        state.history.push(.init(buffer: buffer))
+        state.mode = .insert
+        state.pendingCount = nil
+        state.pendingOperator = nil
+        buffer.cursor = max(0, min(buffer.text.count, target))
+        return Result(state: state, buffer: buffer)
+    }
+
+    private static func openLine(below: Bool, state inState: VimState, buffer inBuffer: TextBuffer) -> Result {
+        var state = inState
+        var buffer = inBuffer
+        state.history.push(.init(buffer: buffer))
+        let line = buffer.cursorLine
+        if below {
+            let lineEnd = buffer.lineEnd(of: line)
+            let insertAt = lineEnd
+            let idx = buffer.text.index(buffer.text.startIndex, offsetBy: insertAt)
+            buffer.text.insert("\n", at: idx)
+            buffer.cursor = insertAt + 1
+        } else {
+            let lineStart = buffer.lineStart(of: line)
+            let idx = buffer.text.index(buffer.text.startIndex, offsetBy: lineStart)
+            buffer.text.insert("\n", at: idx)
+            buffer.cursor = lineStart
+        }
+        state.mode = .insert
+        return Result(state: state, buffer: buffer)
+    }
+
+    // MARK: Undo / redo
+
+    private static func undo(state inState: VimState, buffer inBuffer: TextBuffer) -> Result {
+        var state = inState
+        let current = VimHistory.Snapshot(buffer: inBuffer)
+        guard let snapshot = state.history.popUndo(current: current) else {
+            return Result(state: state, buffer: inBuffer)
+        }
+        return clamp(state: state, buffer: snapshot.asBuffer)
+    }
+
+    private static func redo(state inState: VimState, buffer inBuffer: TextBuffer) -> Result {
+        var state = inState
+        let current = VimHistory.Snapshot(buffer: inBuffer)
+        guard let snapshot = state.history.popRedo(current: current) else {
+            return Result(state: state, buffer: inBuffer)
+        }
+        return clamp(state: state, buffer: snapshot.asBuffer)
+    }
+
+    // MARK: Clamps + lookups
+
+    private static func clamp(state: VimState, buffer inBuffer: TextBuffer) -> Result {
+        var buffer = inBuffer
+        let allowPastEnd = state.mode == .insert
+        buffer.cursor = buffer.clampedCursor(allowPastEnd: allowPastEnd)
+        return Result(state: state, buffer: buffer)
+    }
+
+    private static func motion(for char: Character) -> Motion? {
+        switch char {
+        case "h": return .left
+        case "j": return .down
+        case "k": return .up
+        case "l": return .right
+        case "w": return .wordForward
+        case "b": return .wordBack
+        case "e": return .wordEnd
+        case "0": return .lineStart
+        case "^": return .lineFirstNonBlank
+        case "$": return .lineEnd
+        case "G": return .fileEnd
+        default: return nil
+        }
+    }
+
+    private static func operatorChar(for op: VimOperator) -> Character {
+        switch op {
+        case .delete: return "d"
+        case .change: return "c"
+        case .yank: return "y"
+        }
+    }
+}

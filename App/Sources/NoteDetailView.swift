@@ -11,6 +11,7 @@ struct NoteDetailView: View {
     @Environment(\.theme) private var theme
 
     @State private var mode: Mode = .view
+    @State private var vimMode: VimMode = .normal
 
     enum Mode: Hashable { case view, edit }
 
@@ -20,6 +21,7 @@ struct NoteDetailView: View {
             DetailToolbar(
                 mode: $mode,
                 editor: editor,
+                vimMode: vimMode,
                 onSave: { editor.save() },
                 onReload: { editor.reloadFromDisk(vaultRoot: vaultRoot) },
                 onForceSave: { editor.forceSave() },
@@ -61,10 +63,13 @@ struct NoteDetailView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         case .edit:
-            PlainEditor(text: Binding(
-                get: { editor.currentText },
-                set: { editor.currentText = $0 }
-            ))
+            VimEditor(
+                text: Binding(
+                    get: { editor.currentText },
+                    set: { editor.currentText = $0 }
+                ),
+                onModeChange: { vimMode = $0 }
+            )
         }
     }
 }
@@ -72,6 +77,7 @@ struct NoteDetailView: View {
 private struct DetailToolbar: View {
     @Binding var mode: NoteDetailView.Mode
     let editor: EditorState
+    let vimMode: VimMode
     let onSave: () -> Void
     let onReload: () -> Void
     let onForceSave: () -> Void
@@ -88,6 +94,10 @@ private struct DetailToolbar: View {
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 140)
+
+                if mode == .edit {
+                    VimModeBadge(vimMode: vimMode)
+                }
 
                 Spacer()
 
@@ -114,6 +124,35 @@ private struct DetailToolbar: View {
             } else if case let .error(message) = editor.status {
                 ErrorBanner(message: message)
             }
+        }
+    }
+}
+
+private struct VimModeBadge: View {
+    let vimMode: VimMode
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        let (label, fg, bg) = parts(for: vimMode)
+        Text(label)
+            .font(.system(.caption2, design: .monospaced).weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(bg)
+            )
+            .foregroundStyle(fg)
+    }
+
+    private func parts(for mode: VimMode) -> (String, Color, Color) {
+        switch mode {
+        case .normal:
+            return (vimMode.label, theme.background, theme.accent)
+        case .insert:
+            return (vimMode.label, theme.background, theme.primary)
+        case .visual:
+            return (vimMode.label, theme.background, theme.warning)
         }
     }
 }
