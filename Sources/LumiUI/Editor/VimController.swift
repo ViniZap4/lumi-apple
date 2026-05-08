@@ -33,8 +33,46 @@ public final class VimController {
     /// Cursor offset in UTF-16 code units, matching what UIKit/AppKit text
     /// views use for `NSRange.location`.
     public var cursorUTF16Offset: Int {
-        let chars = buffer.text.prefix(buffer.cursor)
-        return chars.utf16.count
+        utf16Offset(of: buffer.cursor)
+    }
+
+    /// Selection to render in the platform text view. Collapsed range when
+    /// not in visual mode, the full visual selection otherwise.
+    public var selectionUTF16Range: NSRange {
+        guard case let .visual(kind, anchor) = state.mode else {
+            return NSRange(location: cursorUTF16Offset, length: 0)
+        }
+        let cursor = buffer.cursor
+        switch kind {
+        case .characterwise:
+            let from = min(anchor, cursor)
+            let to = min(buffer.text.count, max(anchor, cursor) + 1)
+            let utf16From = utf16Offset(of: from)
+            let utf16To = utf16Offset(of: to)
+            return NSRange(location: utf16From, length: utf16To - utf16From)
+        case .linewise:
+            let anchorLine = lineForOffset(anchor)
+            let cursorLine = lineForOffset(cursor)
+            let firstLine = min(anchorLine, cursorLine)
+            let lastLine = max(anchorLine, cursorLine)
+            let from = buffer.lineStart(of: firstLine)
+            var to = buffer.lineEnd(of: lastLine)
+            if to < buffer.text.count { to += 1 }
+            let utf16From = utf16Offset(of: from)
+            let utf16To = utf16Offset(of: to)
+            return NSRange(location: utf16From, length: utf16To - utf16From)
+        }
+    }
+
+    private func utf16Offset(of charOffset: Int) -> Int {
+        let safe = max(0, min(charOffset, buffer.text.count))
+        return buffer.text.prefix(safe).utf16.count
+    }
+
+    private func lineForOffset(_ offset: Int) -> Int {
+        var b = buffer
+        b.cursor = max(0, min(offset, b.text.count))
+        return b.cursorLine
     }
 
     /// Human-readable mode label for status lines (`NORMAL`, `INSERT`, …).
@@ -42,7 +80,7 @@ public final class VimController {
         switch state.mode {
         case .normal: return "NORMAL"
         case .insert: return "INSERT"
-        case let .visual(kind):
+        case let .visual(kind, _):
             switch kind {
             case .characterwise: return "VISUAL"
             case .linewise: return "V-LINE"

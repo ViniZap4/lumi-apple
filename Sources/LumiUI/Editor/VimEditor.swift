@@ -22,7 +22,7 @@ public struct VimEditor: View {
     public var body: some View {
         VimTextViewBridge(
             text: controller.buffer.text,
-            cursorOffset: controller.cursorUTF16Offset,
+            selection: controller.selectionUTF16Range,
             isInsertMode: controller.state.mode == .insert,
             controller: controller,
             theme: theme
@@ -54,7 +54,7 @@ public extension VimMode {
         switch self {
         case .normal: return "NORMAL"
         case .insert: return "INSERT"
-        case let .visual(kind):
+        case let .visual(kind, _):
             switch kind {
             case .characterwise: return "VISUAL"
             case .linewise: return "V-LINE"

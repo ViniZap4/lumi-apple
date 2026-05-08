@@ -21,13 +21,7 @@ public enum VimEngine {
         case .insert:
             return handleInsert(input: input, state: state, buffer: buffer)
         case .visual:
-            // Visual mode is part of a follow-up phase. Treat any input as
-            // "ESC back to normal" to keep us recoverable.
-            var newState = state
-            newState.mode = .normal
-            newState.pendingCount = nil
-            newState.pendingOperator = nil
-            return Result(state: newState, buffer: buffer)
+            return handleVisual(input: input, state: state, buffer: buffer)
         }
     }
 
@@ -137,6 +131,14 @@ public enum VimEngine {
             return openLine(below: false, state: state, buffer: buffer)
         case "u":
             return undo(state: state, buffer: buffer)
+        case "v":
+            state.mode = .visual(.characterwise, anchor: buffer.cursor)
+            state.pendingCount = nil
+            return Result(state: state, buffer: buffer)
+        case "V":
+            state.mode = .visual(.linewise, anchor: buffer.cursor)
+            state.pendingCount = nil
+            return Result(state: state, buffer: buffer)
         case "g":
             // Two-key `gg` motion. We park it as a pending one-shot via a
             // sentinel pending operator with no real op — simplest path is to
@@ -148,6 +150,172 @@ public enum VimEngine {
             return Result(state: state, buffer: buffer)
         }
         return Result(state: state, buffer: buffer)
+    }
+
+    // MARK: Visual mode
+
+    private static func handleVisual(input: VimInput, state inState: VimState, buffer inBuffer: TextBuffer) -> Result {
+        var state = inState
+        var buffer = inBuffer
+        guard case let .visual(kind, anchor) = state.mode else {
+            return Result(state: state, buffer: buffer)
+        }
+
+        switch input {
+        case .escape:
+            state.mode = .normal
+            state.pendingCount = nil
+            state.pendingOperator = nil
+            return clamp(state: state, buffer: buffer)
+
+        case .return:
+            buffer.cursor = Motion.down.resolve(in: buffer, count: state.effectiveCount)
+            state.pendingCount = nil
+            return clamp(state: state, buffer: buffer)
+
+        case .backspace:
+            buffer.cursor = Motion.left.resolve(in: buffer, count: state.effectiveCount)
+            state.pendingCount = nil
+            return clamp(state: state, buffer: buffer)
+
+        case .tab, .controlR:
+            return Result(state: state, buffer: buffer)
+
+        case let .character(char):
+            // Counts (digit prefix; bare 0 is line-start motion).
+            if char.isASCII, char.isNumber, !(char == "0" && state.pendingCount == nil) {
+                let digit = Int(String(char)) ?? 0
+                state.pendingCount = (state.pendingCount ?? 0) * 10 + digit
+                return Result(state: state, buffer: buffer)
+            }
+            let count = state.pendingCount ?? 1
+
+            // Visual mode toggles
+            if char == "v" {
+                if kind == .characterwise {
+                    state.mode = .normal
+                    state.pendingCount = nil
+                    return clamp(state: state, buffer: buffer)
+                }
+                state.mode = .visual(.characterwise, anchor: anchor)
+                state.pendingCount = nil
+                return Result(state: state, buffer: buffer)
+            }
+            if char == "V" {
+                if kind == .linewise {
+                    state.mode = .normal
+                    state.pendingCount = nil
+                    return clamp(state: state, buffer: buffer)
+                }
+                state.mode = .visual(.linewise, anchor: anchor)
+                state.pendingCount = nil
+                return Result(state: state, buffer: buffer)
+            }
+
+            // Swap anchor and cursor.
+            if char == "o" {
+                let newAnchor = buffer.cursor
+                buffer.cursor = anchor
+                state.mode = .visual(kind, anchor: newAnchor)
+                state.pendingCount = nil
+                return clamp(state: state, buffer: buffer)
+            }
+
+            // Operators consume the selection and exit visual mode.
+            if let op = visualOperator(for: char) {
+                return applyVisualOperator(
+                    op,
+                    kind: kind,
+                    anchor: anchor,
+                    state: state,
+                    buffer: buffer
+                )
+            }
+
+            // Motions extend selection.
+            if let motion = motion(for: char) {
+                buffer.cursor = motion.resolve(in: buffer, count: count)
+                state.pendingCount = nil
+                return clamp(state: state, buffer: buffer)
+            }
+
+            return Result(state: state, buffer: buffer)
+        }
+    }
+
+    private static func visualOperator(for char: Character) -> VimOperator? {
+        switch char {
+        case "d", "x": return .delete
+        case "c", "s": return .change
+        case "y": return .yank
+        default: return nil
+        }
+    }
+
+    private static func applyVisualOperator(
+        _ op: VimOperator,
+        kind: VimMode.VisualKind,
+        anchor: Int,
+        state inState: VimState,
+        buffer inBuffer: TextBuffer
+    ) -> Result {
+        var state = inState
+        var buffer = inBuffer
+
+        let from = min(anchor, buffer.cursor)
+        let to = max(anchor, buffer.cursor)
+
+        switch kind {
+        case .characterwise:
+            let upper = min(to + 1, buffer.text.count)
+            let yanked = String(buffer.text[
+                buffer.text.index(buffer.text.startIndex, offsetBy: from)
+                ..<
+                buffer.text.index(buffer.text.startIndex, offsetBy: upper)
+            ])
+            state.defaultRegister = Register(text: yanked, kind: .characterwise)
+
+            switch op {
+            case .yank:
+                buffer.cursor = from
+                state.mode = .normal
+                state.pendingCount = nil
+                return clamp(state: state, buffer: buffer)
+            case .delete, .change:
+                state.history.push(.init(buffer: buffer))
+                buffer.text.removeSubrange(
+                    buffer.text.index(buffer.text.startIndex, offsetBy: from)
+                    ..<
+                    buffer.text.index(buffer.text.startIndex, offsetBy: upper)
+                )
+                buffer.cursor = from
+                state.mode = (op == .change) ? .insert : .normal
+                state.pendingCount = nil
+                return clamp(state: state, buffer: buffer)
+            }
+
+        case .linewise:
+            let firstLine = min(lineForOffset(buffer: buffer, offset: anchor), buffer.cursorLine)
+            let lastLine = max(lineForOffset(buffer: buffer, offset: anchor), buffer.cursorLine)
+            let fromOffset = buffer.lineStart(of: firstLine)
+            var toOffset = buffer.lineEnd(of: lastLine)
+            if toOffset < buffer.text.count {
+                toOffset += 1
+            } else if fromOffset > 0 {
+                state.mode = (op == .change) ? .insert : .normal
+                state.pendingCount = nil
+                return applyLinewiseRange(op, fromOffset: fromOffset - 1, toOffset: toOffset, state: state, buffer: buffer)
+            }
+            state.mode = (op == .change) ? .insert : .normal
+            state.pendingCount = nil
+            return applyLinewiseRange(op, fromOffset: fromOffset, toOffset: toOffset, state: state, buffer: buffer)
+        }
+    }
+
+    private static func lineForOffset(buffer: TextBuffer, offset: Int) -> Int {
+        var b = buffer
+        b.cursor = max(0, min(offset, b.text.count))
+        return b.cursorLine
     }
 
     // MARK: Insert mode

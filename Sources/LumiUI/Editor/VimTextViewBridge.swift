@@ -10,7 +10,7 @@ import AppKit
 /// input pipeline.
 struct VimTextViewBridge: NSViewRepresentable {
     let text: String
-    let cursorOffset: Int
+    let selection: NSRange
     let isInsertMode: Bool
     let controller: VimController
     let theme: ThemeTokens
@@ -43,9 +43,8 @@ struct VimTextViewBridge: NSViewRepresentable {
         if textView.string != text {
             textView.string = text
         }
-        let target = NSRange(location: cursorOffset, length: 0)
-        if textView.selectedRange() != target {
-            textView.setSelectedRange(target)
+        if textView.selectedRange() != selection {
+            textView.setSelectedRange(selection)
         }
     }
 }
@@ -76,7 +75,7 @@ import UIKit
 /// iOS / iPadOS / visionOS bridge.
 struct VimTextViewBridge: UIViewRepresentable {
     let text: String
-    let cursorOffset: Int
+    let selection: NSRange
     let isInsertMode: Bool
     let controller: VimController
     let theme: ThemeTokens
@@ -103,9 +102,8 @@ struct VimTextViewBridge: UIViewRepresentable {
         if view.text != text {
             view.text = text
         }
-        let target = NSRange(location: cursorOffset, length: 0)
-        if view.selectedRange != target {
-            view.selectedRange = target
+        if view.selectedRange != selection {
+            view.selectedRange = selection
         }
     }
 }

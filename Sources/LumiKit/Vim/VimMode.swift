@@ -1,16 +1,26 @@
 import Foundation
 
-/// The vim mode the engine is currently in. Visual modes are reserved for a
-/// follow-up phase but listed here so the public API doesn't need to break
-/// when they land.
+/// The vim mode the engine is currently in. Visual modes carry the offset of
+/// the selection's anchor — the position where visual mode was entered. The
+/// "active end" of the selection is the buffer's regular cursor.
 public enum VimMode: Sendable, Hashable {
     case normal
     case insert
-    case visual(VisualKind)
+    case visual(VisualKind, anchor: Int)
 
     public enum VisualKind: Sendable, Hashable {
         case characterwise
         case linewise
+    }
+
+    public var visualKind: VisualKind? {
+        if case let .visual(kind, _) = self { return kind }
+        return nil
+    }
+
+    public var visualAnchor: Int? {
+        if case let .visual(_, anchor) = self { return anchor }
+        return nil
     }
 }
 
