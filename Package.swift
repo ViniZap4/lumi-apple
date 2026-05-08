@@ -12,9 +12,15 @@ let package = Package(
         .library(name: "LumiKit", targets: ["LumiKit"]),
         .library(name: "LumiUI", targets: ["LumiUI"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/swiftlang/swift-markdown.git", from: "0.5.0")
+    ],
     targets: [
         .target(
             name: "LumiKit",
+            dependencies: [
+                .product(name: "Markdown", package: "swift-markdown")
+            ],
             path: "Sources/LumiKit"
         ),
         .target(

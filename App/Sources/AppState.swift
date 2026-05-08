@@ -3,12 +3,18 @@ import Observation
 import LumiKit
 import LumiUI
 
-/// Root app state. Sub-stores will be split out as features land (VaultStore,
-/// EditorStore, SyncStore). For Phase A this is the single source.
 @Observable
 @MainActor
 final class AppState {
     var theme: LumiTheme = .defaultDark
-    var vaults: [Vault] = []
     var selectedVaultID: UUID?
+    var selectedNoteID: String?
+
+    /// Notes scanned from the currently selected vault. Cached here so the
+    /// detail view can resolve a selection by id without re-walking the disk.
+    var notes: [Note] = []
+
+    /// File:// URL of the currently active vault root. Used as the `baseURL`
+    /// when resolving relative media references.
+    var activeVaultURL: URL?
 }

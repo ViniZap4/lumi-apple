@@ -31,6 +31,8 @@ targets:
       - path: App/Sources
       - path: App/Resources
         buildPhase: resources
+        excludes:
+          - "*.entitlements"
     dependencies:
       - package: LumiPackages
         product: LumiKit
