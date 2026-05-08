@@ -1,0 +1,10 @@
+--swiftversion 6.0
+--indent 4
+--maxwidth 120
+--commas inline
+--trimwhitespace always
+--self remove
+--patternlet inline
+--stripunusedargs closure-only
+--ifdef no-indent
+--exclude .build,DerivedData,Lumi.xcodeproj

@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  spm:
+    name: SPM build & test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+      - name: Resolve packages
+        run: swift package resolve
+      - name: Build
+        run: swift build -v
+      - name: Test
+        run: swift test -v
+
+  app-build:
+    name: Build Lumi app (${{ matrix.platform }})
+    runs-on: macos-15
+    needs: spm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: iOS
+            destination: "generic/platform=iOS Simulator"
+          - platform: macOS
+            destination: "generic/platform=macOS"
+          - platform: visionOS
+            destination: "generic/platform=visionOS Simulator"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install xcodegen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Build (${{ matrix.platform }})
+        run: |
+          xcodebuild build \
+            -scheme Lumi \
+            -destination '${{ matrix.destination }}' \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO
+
+  lint:
+    name: SwiftLint + SwiftFormat
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: brew install swiftlint swiftformat
+      - name: SwiftLint
+        run: swiftlint --strict
+      - name: SwiftFormat (lint mode)
+        run: swiftformat --lint .
