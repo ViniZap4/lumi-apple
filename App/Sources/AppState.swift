@@ -7,6 +7,7 @@ import LumiUI
 @MainActor
 final class AppState {
     var theme: LumiTheme = .defaultDark
+
     var selectedVaultID: UUID?
     var selectedNoteID: String?
 
@@ -14,7 +15,17 @@ final class AppState {
     /// detail view can resolve a selection by id without re-walking the disk.
     var notes: [Note] = []
 
-    /// File:// URL of the currently active vault root. Used as the `baseURL`
-    /// when resolving relative media references.
-    var activeVaultURL: URL?
+    /// Active vault session — keeps security-scoped access alive while a vault
+    /// is selected. Nil when no vault is open.
+    var session: VaultSession?
+
+    /// Editor state for the currently open note. Reused across notes; switching
+    /// notes calls `load` to repopulate.
+    let editor = EditorState()
+
+    /// Replace the active session, closing the previous one to release scope.
+    func setSession(_ new: VaultSession?) {
+        session?.close()
+        session = new
+    }
 }

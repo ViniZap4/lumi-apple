@@ -25,15 +25,21 @@ struct RootView: View {
                 NoteListView(
                     vault: vault,
                     notes: appState.notes,
-                    selectedNoteID: $bound.selectedNoteID
+                    selectedNoteID: $bound.selectedNoteID,
+                    onSelect: selectNote
                 )
             } else {
                 EmptyVaultPanel(onAdd: addVault)
             }
         } detail: {
             if let noteID = appState.selectedNoteID,
-               let note = appState.notes.first(where: { $0.id == noteID }) {
-                NoteDetailView(note: note, baseURL: appState.activeVaultURL)
+               let note = appState.notes.first(where: { $0.id == noteID }),
+               let session = appState.session {
+                NoteDetailView(
+                    note: note,
+                    baseURL: session.resolve(note).deletingLastPathComponent(),
+                    vaultRoot: session.rootURL
+                )
             } else {
                 NoteDetailEmpty()
             }
@@ -47,16 +53,29 @@ struct RootView: View {
     }
 
     private func selectVault(_ record: VaultRecord) {
-        appState.selectedVaultID = record.id
         appState.selectedNoteID = nil
-        if let loaded = VaultLoader.load(record: record) {
-            appState.notes = loaded.notes
-            appState.activeVaultURL = loaded.vaultURL
-            record.lastOpenedAt = Date()
-        } else {
+        appState.editor.reset()
+
+        guard let session = VaultSession.open(record: record) else {
+            appState.setSession(nil)
             appState.notes = []
-            appState.activeVaultURL = nil
+            appState.selectedVaultID = nil
+            return
         }
+        appState.setSession(session)
+        appState.notes = session.scan()
+        appState.selectedVaultID = record.id
+        record.lastOpenedAt = Date()
+    }
+
+    private func selectNote(_ note: Note) {
+        guard let session = appState.session else { return }
+        if appState.editor.isDirty {
+            appState.editor.save()
+        }
+        let url = session.resolve(note)
+        appState.editor.load(noteID: note.id, at: url, vaultRoot: session.rootURL)
+        appState.selectedNoteID = note.id
     }
 
     private func addVault(url: URL) {

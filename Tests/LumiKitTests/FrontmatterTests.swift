@@ -57,4 +57,77 @@ struct FrontmatterParserTests {
         #expect(fm.updatedAt != nil)
         #expect(fm.updatedAt! > fm.createdAt!)
     }
+
+    @Test("preserves unknown keys verbatim")
+    func unknownKeys() {
+        let source = """
+        ---
+        title: T
+        custom: hello
+        another: 42
+        ---
+        body
+        """
+        let (fm, _) = FrontmatterParser.split(source)
+        #expect(fm.title == "T")
+        #expect(fm.unknownLines.contains("custom: hello"))
+        #expect(fm.unknownLines.contains("another: 42"))
+    }
+
+    @Test("preserves unknown list keys")
+    func unknownListKeys() {
+        let source = """
+        ---
+        title: T
+        aliases:
+          - one
+          - two
+        ---
+        """
+        let (fm, _) = FrontmatterParser.split(source)
+        #expect(fm.unknownLines.contains("aliases:"))
+        #expect(fm.unknownLines.contains("  - one"))
+        #expect(fm.unknownLines.contains("  - two"))
+    }
+
+    @Test("serialize emits known + unknown in stable order")
+    func serializeOrder() {
+        let fm = Frontmatter(
+            id: "n",
+            title: "Note",
+            tags: ["a", "b"],
+            unknownLines: ["custom: x"]
+        )
+        let out = FrontmatterParser.serialize(fm)
+        #expect(out.hasPrefix("---\n"))
+        #expect(out.contains("id: n"))
+        #expect(out.contains("title: Note"))
+        #expect(out.contains("  - a"))
+        #expect(out.contains("custom: x"))
+        #expect(out.hasSuffix("---\n"))
+    }
+
+    @Test("roundtrip preserves shape for typical note")
+    func roundtrip() {
+        let source = """
+        ---
+        id: abc
+        title: ABC
+        tags:
+          - x
+          - y
+        custom: hi
+        ---
+        # Body
+        text
+        """
+        let (fm, body) = FrontmatterParser.split(source)
+        let reserialized = FrontmatterParser.serialize(fm) + body
+        let (fm2, body2) = FrontmatterParser.split(reserialized)
+        #expect(fm2.id == fm.id)
+        #expect(fm2.title == fm.title)
+        #expect(fm2.tags == fm.tags)
+        #expect(fm2.unknownLines == fm.unknownLines)
+        #expect(body2 == body)
+    }
 }

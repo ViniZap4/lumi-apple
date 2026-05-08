@@ -6,6 +6,7 @@ struct NoteListView: View {
     let vault: VaultRecord
     let notes: [Note]
     @Binding var selectedNoteID: String?
+    let onSelect: (Note) -> Void
 
     @Environment(\.theme) private var theme
 
@@ -27,6 +28,8 @@ struct NoteListView: View {
                     ForEach(notes) { note in
                         NoteRow(note: note)
                             .tag(Optional(note.id))
+                            .contentShape(Rectangle())
+                            .onTapGesture { onSelect(note) }
                     }
                 }
                 .scrollContentBackground(.hidden)
