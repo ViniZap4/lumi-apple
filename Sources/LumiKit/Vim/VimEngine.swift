@@ -69,6 +69,17 @@ public enum VimEngine {
         var state = inState
         var buffer = inBuffer
 
+        // Awaiting find target (after f/F/t/T): consume this char as the target.
+        if let findKind = state.pendingFindKind {
+            return resolveFind(findKind: findKind, target: char, state: state, buffer: buffer)
+        }
+
+        // Awaiting text object selector (after operator + i/a, or visual + i/a):
+        // consume this char as the object marker.
+        if let toKind = state.pendingTextObjectKind {
+            return resolveTextObject(char: char, kind: toKind, state: state, buffer: buffer)
+        }
+
         // Counts: leading digits accumulate. "0" alone is the line-start motion;
         // "0" after digits is part of the count.
         if char.isASCII, char.isNumber, !(char == "0" && state.pendingCount == nil) {
@@ -87,6 +98,20 @@ public enum VimEngine {
                 state.pendingCount = nil
                 return applyLinewiseOperator(pending.op, lineCount: count * pending.count, state: state, buffer: buffer)
             }
+            // Text object suffix start: `i` (inner) or `a` (around).
+            if char == "i" {
+                state.pendingTextObjectKind = .inner
+                return Result(state: state, buffer: buffer)
+            }
+            if char == "a" {
+                state.pendingTextObjectKind = .around
+                return Result(state: state, buffer: buffer)
+            }
+            // Find/till as motion: dfx, dt;, df., …
+            if let findKind = FindKind.from(char: char) {
+                state.pendingFindKind = findKind
+                return Result(state: state, buffer: buffer)
+            }
             // Otherwise interpret as a motion.
             if let motion = motion(for: char) {
                 state.pendingOperator = nil
@@ -104,6 +129,12 @@ public enum VimEngine {
             buffer.cursor = motion.resolve(in: buffer, count: count)
             state.pendingCount = nil
             return clamp(state: state, buffer: buffer)
+        }
+
+        // Find/till as a cursor motion (no operator pending).
+        if let findKind = FindKind.from(char: char) {
+            state.pendingFindKind = findKind
+            return Result(state: state, buffer: buffer)
         }
 
         // Operators — set pending and wait for motion.
@@ -182,6 +213,15 @@ public enum VimEngine {
             return Result(state: state, buffer: buffer)
 
         case let .character(char):
+            // Awaiting find target (visual + f/F/t/T): consume as target.
+            if let findKind = state.pendingFindKind {
+                return resolveFindInVisual(findKind: findKind, target: char, state: state, buffer: buffer)
+            }
+            // Awaiting text object selector (visual + i/a): consume as object marker.
+            if let toKind = state.pendingTextObjectKind {
+                return resolveTextObjectInVisual(char: char, kind: toKind, state: state, buffer: buffer)
+            }
+
             // Counts (digit prefix; bare 0 is line-start motion).
             if char.isASCII, char.isNumber, !(char == "0" && state.pendingCount == nil) {
                 let digit = Int(String(char)) ?? 0
@@ -189,6 +229,22 @@ public enum VimEngine {
                 return Result(state: state, buffer: buffer)
             }
             let count = state.pendingCount ?? 1
+
+            // Text object trigger: `i` or `a` in visual sets pending kind.
+            if char == "i" {
+                state.pendingTextObjectKind = .inner
+                return Result(state: state, buffer: buffer)
+            }
+            if char == "a" {
+                state.pendingTextObjectKind = .around
+                return Result(state: state, buffer: buffer)
+            }
+
+            // Find/till in visual mode.
+            if let findKind = FindKind.from(char: char) {
+                state.pendingFindKind = findKind
+                return Result(state: state, buffer: buffer)
+            }
 
             // Visual mode toggles
             if char == "v" {
@@ -316,6 +372,139 @@ public enum VimEngine {
         var b = buffer
         b.cursor = max(0, min(offset, b.text.count))
         return b.cursorLine
+    }
+
+    // MARK: Text object + find resolution
+
+    private static func resolveTextObject(
+        char: Character,
+        kind: TextObjectKind,
+        state inState: VimState,
+        buffer inBuffer: TextBuffer
+    ) -> Result {
+        var state = inState
+        let buffer = inBuffer
+        let pending = state.pendingOperator
+        state.pendingTextObjectKind = nil
+        state.pendingOperator = nil
+        state.pendingCount = nil
+
+        guard
+            let textObject = TextObject.from(char: char),
+            let range = textObject.resolve(in: buffer, kind: kind),
+            let op = pending?.op
+        else {
+            return Result(state: state, buffer: buffer)
+        }
+        return applyRangeOperator(op, fromOffset: range.from, toOffset: range.to, state: state, buffer: buffer)
+    }
+
+    private static func resolveTextObjectInVisual(
+        char: Character,
+        kind: TextObjectKind,
+        state inState: VimState,
+        buffer inBuffer: TextBuffer
+    ) -> Result {
+        var state = inState
+        var buffer = inBuffer
+        state.pendingTextObjectKind = nil
+
+        guard
+            let textObject = TextObject.from(char: char),
+            let range = textObject.resolve(in: buffer, kind: kind),
+            case let .visual(visualKind, _) = state.mode
+        else {
+            return Result(state: state, buffer: buffer)
+        }
+        // Set anchor to range start, cursor to last char of range (inclusive).
+        let cursor = max(range.from, range.to - 1)
+        state.mode = .visual(visualKind, anchor: range.from)
+        buffer.cursor = cursor
+        return clamp(state: state, buffer: buffer)
+    }
+
+    private static func resolveFind(
+        findKind: FindKind,
+        target: Character,
+        state inState: VimState,
+        buffer inBuffer: TextBuffer
+    ) -> Result {
+        var state = inState
+        var buffer = inBuffer
+        let count = state.effectiveCount
+        let pending = state.pendingOperator
+        state.pendingFindKind = nil
+        state.pendingCount = nil
+        state.pendingOperator = nil
+
+        guard let targetChar = findKind.locateTargetChar(in: buffer, target: target, count: count) else {
+            return Result(state: state, buffer: buffer)
+        }
+
+        if let op = pending?.op {
+            let range = findKind.operatorRange(cursor: buffer.cursor, targetChar: targetChar)
+            return applyRangeOperator(op, fromOffset: range.from, toOffset: range.to, state: state, buffer: buffer)
+        }
+
+        buffer.cursor = findKind.cursorPosition(ofTargetChar: targetChar)
+        return clamp(state: state, buffer: buffer)
+    }
+
+    private static func resolveFindInVisual(
+        findKind: FindKind,
+        target: Character,
+        state inState: VimState,
+        buffer inBuffer: TextBuffer
+    ) -> Result {
+        var state = inState
+        var buffer = inBuffer
+        let count = state.effectiveCount
+        state.pendingFindKind = nil
+        state.pendingCount = nil
+
+        guard let targetChar = findKind.locateTargetChar(in: buffer, target: target, count: count) else {
+            return Result(state: state, buffer: buffer)
+        }
+        buffer.cursor = findKind.cursorPosition(ofTargetChar: targetChar)
+        return clamp(state: state, buffer: buffer)
+    }
+
+    private static func applyRangeOperator(
+        _ op: VimOperator,
+        fromOffset: Int,
+        toOffset: Int,
+        state inState: VimState,
+        buffer inBuffer: TextBuffer
+    ) -> Result {
+        var state = inState
+        var buffer = inBuffer
+        let from = max(0, min(fromOffset, buffer.text.count))
+        let to = max(from, min(toOffset, buffer.text.count))
+
+        let yanked = String(buffer.text[
+            buffer.text.index(buffer.text.startIndex, offsetBy: from)
+            ..<
+            buffer.text.index(buffer.text.startIndex, offsetBy: to)
+        ])
+        state.defaultRegister = Register(text: yanked, kind: .characterwise)
+
+        switch op {
+        case .yank:
+            buffer.cursor = from
+            return clamp(state: state, buffer: buffer)
+        case .delete, .change:
+            state.history.push(.init(buffer: buffer))
+            buffer.text.removeSubrange(
+                buffer.text.index(buffer.text.startIndex, offsetBy: from)
+                ..<
+                buffer.text.index(buffer.text.startIndex, offsetBy: to)
+            )
+            buffer.cursor = from
+            if op == .change {
+                state.mode = .insert
+            }
+            return clamp(state: state, buffer: buffer)
+        }
     }
 
     // MARK: Insert mode

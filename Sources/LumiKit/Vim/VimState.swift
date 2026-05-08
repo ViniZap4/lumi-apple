@@ -7,6 +7,13 @@ public struct VimState: Sendable, Hashable {
     public var mode: VimMode
     public var pendingCount: Int?
     public var pendingOperator: PendingOperator?
+    /// After `i` or `a` in operator-pending or visual mode: which kind of text
+    /// object the user is about to specify. Cleared once the object selector
+    /// (`w`, `"`, `(`, …) arrives.
+    public var pendingTextObjectKind: TextObjectKind?
+    /// After `f F t T` (in any mode): which find variant we're awaiting a
+    /// target character for.
+    public var pendingFindKind: FindKind?
     /// Default ("unnamed") register — receives the most recent yank/delete.
     public var defaultRegister: Register
     public var history: VimHistory
@@ -15,12 +22,16 @@ public struct VimState: Sendable, Hashable {
         mode: VimMode = .normal,
         pendingCount: Int? = nil,
         pendingOperator: PendingOperator? = nil,
+        pendingTextObjectKind: TextObjectKind? = nil,
+        pendingFindKind: FindKind? = nil,
         defaultRegister: Register = Register(),
         history: VimHistory = VimHistory()
     ) {
         self.mode = mode
         self.pendingCount = pendingCount
         self.pendingOperator = pendingOperator
+        self.pendingTextObjectKind = pendingTextObjectKind
+        self.pendingFindKind = pendingFindKind
         self.defaultRegister = defaultRegister
         self.history = history
     }
