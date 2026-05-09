@@ -39,6 +39,28 @@ public struct VimState: Sendable, Hashable {
     /// Set after first `g`. The next `g` resolves to fileStart motion (`gg`).
     public var awaitingGG: Bool
 
+    /// Macros keyed by register name. Distinct from text registers because
+    /// they hold a typed sequence of `VimInput`, not a string.
+    public var macros: [Character: [VimInput]]
+    /// Register being recorded into (set after `q<letter>`). Nil when not
+    /// recording. While set, the engine wrapper appends every input.
+    public var recordingMacro: Character?
+    /// Inputs accumulated for the active macro recording.
+    public var recordingMacroInputs: [VimInput]
+    /// Set after a bare `q` press (no active recording). The next letter
+    /// becomes the register name and recording starts.
+    public var awaitingMacroRegister: Bool
+    /// Set after `@`. The next char is the register to play (or `@` for
+    /// repeat-last-played).
+    public var awaitingMacroPlay: Bool
+    /// True while a macro is being played back. Suppresses re-recording into
+    /// any active outer macro and skips re-capturing as the played inputs.
+    public var isPlayingMacro: Bool
+    /// Depth of nested macro playback. Guards against runaway recursion.
+    public var macroDepth: Int
+    /// Last successfully invoked macro name. Used by `@@`.
+    public var lastPlayedMacro: Character?
+
     public var history: VimHistory
 
     /// Most recent committed sequence of inputs that produced a buffer
@@ -72,6 +94,14 @@ public struct VimState: Sendable, Hashable {
         awaitingMarkJumpLine: Bool = false,
         awaitingMarkJumpExact: Bool = false,
         awaitingGG: Bool = false,
+        macros: [Character: [VimInput]] = [:],
+        recordingMacro: Character? = nil,
+        recordingMacroInputs: [VimInput] = [],
+        awaitingMacroRegister: Bool = false,
+        awaitingMacroPlay: Bool = false,
+        isPlayingMacro: Bool = false,
+        macroDepth: Int = 0,
+        lastPlayedMacro: Character? = nil,
         history: VimHistory = VimHistory(),
         lastChange: [VimInput]? = nil,
         recordingInputs: [VimInput] = [],
@@ -93,6 +123,14 @@ public struct VimState: Sendable, Hashable {
         self.awaitingMarkJumpLine = awaitingMarkJumpLine
         self.awaitingMarkJumpExact = awaitingMarkJumpExact
         self.awaitingGG = awaitingGG
+        self.macros = macros
+        self.recordingMacro = recordingMacro
+        self.recordingMacroInputs = recordingMacroInputs
+        self.awaitingMacroRegister = awaitingMacroRegister
+        self.awaitingMacroPlay = awaitingMacroPlay
+        self.isPlayingMacro = isPlayingMacro
+        self.macroDepth = macroDepth
+        self.lastPlayedMacro = lastPlayedMacro
         self.history = history
         self.lastChange = lastChange
         self.recordingInputs = recordingInputs

@@ -22,6 +22,13 @@ public enum VimEngine {
         }
 
         var preState = state
+        // Macro recording: capture every input while a macro is being recorded.
+        // Skipped during macro playback so the played inputs don't get re-captured
+        // by an outer recording session.
+        if preState.recordingMacro != nil, !preState.isPlayingMacro {
+            preState.recordingMacroInputs.append(input)
+        }
+
         let beforeFresh = isFreshNormal(preState)
         if beforeFresh {
             preState.recordingInputs = [input]
@@ -72,7 +79,9 @@ public enum VimEngine {
             !state.awaitingMarkSet &&
             !state.awaitingMarkJumpLine &&
             !state.awaitingMarkJumpExact &&
-            !state.awaitingGG
+            !state.awaitingGG &&
+            !state.awaitingMacroRegister &&
+            !state.awaitingMacroPlay
     }
 
     // MARK: Normal mode
@@ -93,6 +102,8 @@ public enum VimEngine {
             state.awaitingMarkJumpLine = false
             state.awaitingMarkJumpExact = false
             state.awaitingGG = false
+            state.awaitingMacroRegister = false
+            state.awaitingMacroPlay = false
             return Result(state: state, buffer: buffer)
 
         case .return:
@@ -126,6 +137,39 @@ public enum VimEngine {
     ) -> Result {
         var state = inState
         var buffer = inBuffer
+
+        // Macro recording stop: `q` while recording finalizes the macro. Must
+        // run before any other handler so `q` isn't interpreted as a normal key.
+        if char == "q", state.recordingMacro != nil {
+            return finalizeMacroRecording(state: state, buffer: buffer)
+        }
+
+        // Awaiting macro register name (after first `q`).
+        if state.awaitingMacroRegister {
+            state.awaitingMacroRegister = false
+            if char.isLetter {
+                state.recordingMacro = char
+                state.recordingMacroInputs = []
+            }
+            return Result(state: state, buffer: buffer)
+        }
+
+        // Awaiting macro playback target (after `@`).
+        if state.awaitingMacroPlay {
+            state.awaitingMacroPlay = false
+            let count = state.effectiveCount
+            state.pendingCount = nil
+            if char == "@" {
+                if let last = state.lastPlayedMacro {
+                    return playMacro(name: last, count: count, state: state, buffer: buffer)
+                }
+                return Result(state: state, buffer: buffer)
+            }
+            if char.isLetter {
+                return playMacro(name: char, count: count, state: state, buffer: buffer)
+            }
+            return Result(state: state, buffer: buffer)
+        }
 
         // Awaiting find target (after f/F/t/T): consume this char as the target.
         if let findKind = state.pendingFindKind {
@@ -304,6 +348,12 @@ public enum VimEngine {
             return Result(state: state, buffer: buffer)
         case "g":
             state.awaitingGG = true
+            return Result(state: state, buffer: buffer)
+        case "q":
+            state.awaitingMacroRegister = true
+            return Result(state: state, buffer: buffer)
+        case "@":
+            state.awaitingMacroPlay = true
             return Result(state: state, buffer: buffer)
         default:
             state.pendingCount = nil
@@ -517,6 +567,69 @@ public enum VimEngine {
         var b = buffer
         b.cursor = max(0, min(offset, b.text.count))
         return b.cursorLine
+    }
+
+    // MARK: Macros
+
+    /// Depth limit for nested macro playback. Each level adds several Swift
+    /// call frames (handle → dispatch → handleNormalCharacter → playMacro)
+    /// plus a copy of `VimState` (which now carries dictionaries), so we keep
+    /// this small.
+    private static let macroDepthLimit = 5
+
+    private static func finalizeMacroRecording(state inState: VimState, buffer inBuffer: TextBuffer) -> Result {
+        var state = inState
+        guard let regName = state.recordingMacro else {
+            return Result(state: state, buffer: inBuffer)
+        }
+        var inputs = state.recordingMacroInputs
+        // The wrapper just appended this `q`; trim it from the saved sequence.
+        if !inputs.isEmpty {
+            inputs.removeLast()
+        }
+        state.macros[regName] = inputs
+        state.recordingMacro = nil
+        state.recordingMacroInputs = []
+        return Result(state: state, buffer: inBuffer)
+    }
+
+    private static func playMacro(
+        name: Character,
+        count: Int,
+        state inState: VimState,
+        buffer inBuffer: TextBuffer
+    ) -> Result {
+        var state = inState
+        var buffer = inBuffer
+        guard let inputs = state.macros[name], !inputs.isEmpty else {
+            // Even an empty/nonexistent macro records as the last-played name
+            // so `@@` works after a missed name.
+            state.lastPlayedMacro = name
+            return Result(state: state, buffer: buffer)
+        }
+        if state.macroDepth >= macroDepthLimit {
+            return Result(state: state, buffer: buffer)
+        }
+        state.lastPlayedMacro = name
+        state.macroDepth += 1
+        state.isPlayingMacro = true
+
+        let times = max(1, count)
+        for _ in 0..<times {
+            for input in inputs {
+                let r = handle(input, state: state, buffer: buffer)
+                state = r.state
+                buffer = r.buffer
+                if state.macroDepth >= macroDepthLimit { break }
+            }
+            if state.macroDepth >= macroDepthLimit { break }
+        }
+
+        state.macroDepth = max(0, state.macroDepth - 1)
+        if state.macroDepth == 0 {
+            state.isPlayingMacro = false
+        }
+        return Result(state: state, buffer: buffer)
     }
 
     // MARK: Registers + marks
