@@ -37,32 +37,32 @@ private func run(_ keys: String, on text: String, cursor: Int = 0) -> ExRun {
 
 @Suite("Vim — ex commands: :w, :wq, :q")
 struct VimExCommandTests {
-    @Test(":w⏎ emits save effect and exits to normal")
+    @Test(":w⏎ emits save(force:false)")
     func write() {
         let r = run(":w⏎", on: "hello")
-        #expect(r.lastEffect == .save)
+        #expect(r.lastEffect == .save(force: false))
         #expect(r.state.mode == .normal)
         #expect(r.buffer.text == "hello")
         #expect(r.buffer.cursor == 0)
     }
 
-    @Test(":wq⏎ emits saveAndClose effect")
+    @Test(":wq⏎ emits saveAndClose(force:false)")
     func writeQuit() {
         let r = run(":wq⏎", on: "hello")
-        #expect(r.lastEffect == .saveAndClose)
+        #expect(r.lastEffect == .saveAndClose(force: false))
         #expect(r.state.mode == .normal)
     }
 
     @Test(":x⏎ is an alias for :wq")
     func xAlias() {
         let r = run(":x⏎", on: "hello")
-        #expect(r.lastEffect == .saveAndClose)
+        #expect(r.lastEffect == .saveAndClose(force: false))
     }
 
-    @Test(":q⏎ emits close effect")
+    @Test(":q⏎ emits close(force:false)")
     func quit() {
         let r = run(":q⏎", on: "hello")
-        #expect(r.lastEffect == .close)
+        #expect(r.lastEffect == .close(force: false))
         #expect(r.state.mode == .normal)
     }
 
@@ -103,15 +103,39 @@ struct VimExCommandTests {
     @Test("leading whitespace in ex buffer is tolerated")
     func leadingWhitespace() {
         let r = run(": w⏎", on: "hello")
-        #expect(r.lastEffect == .save)
+        #expect(r.lastEffect == .save(force: false))
     }
 
     @Test(":w inside a macro emits save when the macro runs")
     func macroEmitsEffect() {
         // Record qa:w⏎q (save macro), then play with @a.
         let r = run("qa:w⏎q@a", on: "hello")
-        #expect(r.lastEffect == .save)
+        #expect(r.lastEffect == .save(force: false))
         #expect(r.state.macros["a"]?.isEmpty == false)
+    }
+
+    @Test(":w! emits save(force:true)")
+    func writeBang() {
+        let r = run(":w!⏎", on: "hello")
+        #expect(r.lastEffect == .save(force: true))
+    }
+
+    @Test(":wq! emits saveAndClose(force:true)")
+    func writeQuitBang() {
+        let r = run(":wq!⏎", on: "hello")
+        #expect(r.lastEffect == .saveAndClose(force: true))
+    }
+
+    @Test(":q! emits close(force:true)")
+    func quitBang() {
+        let r = run(":q!⏎", on: "hello")
+        #expect(r.lastEffect == .close(force: true))
+    }
+
+    @Test(":x! emits saveAndClose(force:true)")
+    func xBang() {
+        let r = run(":x!⏎", on: "hello")
+        #expect(r.lastEffect == .saveAndClose(force: true))
     }
 
     @Test("empty `:⏎` (no command) is a no-op with no effect")

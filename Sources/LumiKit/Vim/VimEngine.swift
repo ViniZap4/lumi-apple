@@ -1058,15 +1058,18 @@ public enum VimEngine {
         case noHighlight
     }
 
-    /// Parse the buffer of a `:` command-line. Whitespace is trimmed. Unknown
-    /// commands → nil (silent no-op, same as a bad search regex). Bang
-    /// variants (`:q!`, `:wq!`) deferred.
+    /// Parse the buffer of a `:` command-line. Whitespace is trimmed. Bang
+    /// variants (`:q!`, `:w!`, `:wq!`) emit force-flagged effects. Unknown
+    /// commands → nil (silent no-op, same as a bad search regex).
     private static func parseExCommand(_ buffer: String) -> ExCommand? {
         let trimmed = buffer.trimmingCharacters(in: .whitespaces)
         switch trimmed {
-        case "w": return .effect(.save)
-        case "wq", "x": return .effect(.saveAndClose)
-        case "q": return .effect(.close)
+        case "w": return .effect(.save(force: false))
+        case "w!": return .effect(.save(force: true))
+        case "wq", "x": return .effect(.saveAndClose(force: false))
+        case "wq!", "x!": return .effect(.saveAndClose(force: true))
+        case "q": return .effect(.close(force: false))
+        case "q!": return .effect(.close(force: true))
         case "noh", "nohl", "nohlsearch": return .noHighlight
         default: return nil
         }

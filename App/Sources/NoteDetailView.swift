@@ -78,12 +78,27 @@ struct NoteDetailView: View {
 
     private func handleVimEffect(_ effect: VimEffect, editor: EditorState) {
         switch effect {
-        case .save:
+        case .save(force: false):
             editor.save()
-        case .saveAndClose:
-            editor.save()
+        case .save(force: true):
+            editor.forceSave()
+        case .saveAndClose(let force):
+            if force { editor.forceSave() } else { editor.save() }
+            // Only switch to view when the save settled cleanly (not in a
+            // conflict). Non-force :wq with a conflict keeps the user in edit
+            // so they can resolve it.
+            if case .conflict = editor.status {
+                return
+            }
             mode = .view
-        case .close:
+        case .close(force: false):
+            // Vim's :q refuses to quit a dirty buffer. Mirror that by staying
+            // in edit mode; the user can :q! to discard or :w to save first.
+            if !editor.isDirty {
+                mode = .view
+            }
+        case .close(force: true):
+            editor.discard()
             mode = .view
         }
     }
