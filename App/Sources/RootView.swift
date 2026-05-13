@@ -16,7 +16,7 @@ struct RootView: View {
                 vaults: vaults,
                 selectedVaultID: $bound.selectedVaultID,
                 onAdd: addVault,
-                onSelect: selectVault
+                onSelect: selectLocalVault
             )
             .navigationTitle("Vaults")
         } content: {
@@ -28,6 +28,9 @@ struct RootView: View {
                     selectedNoteID: $bound.selectedNoteID,
                     onSelect: selectNote
                 )
+            } else if let remoteID = appState.selectedRemoteVaultID,
+                      let remote = appState.remoteVaultsStore.vaults.first(where: { $0.id == remoteID }) {
+                RemoteVaultDetailView(vault: remote)
             } else {
                 EmptyVaultPanel(onAdd: addVault)
             }
@@ -54,6 +57,23 @@ struct RootView: View {
             }
         }
         .task { await appState.authService.restore() }
+        // When sign-in lands a session, fetch the vault list. On sign-out,
+        // wipe everything so the next sign-in starts clean.
+        .onChange(of: appState.authService.currentSession) { _, new in
+            if new != nil {
+                Task { await appState.remoteVaultsStore.refresh() }
+            } else {
+                appState.selectedRemoteVaultID = nil
+                appState.remoteVaultsStore.clear()
+            }
+        }
+    }
+
+    private func selectLocalVault(_ record: VaultRecord) {
+        // Clear any active server-vault selection so the detail panel isn't
+        // dual-bound. This is a no-op when no server selection is active.
+        appState.selectedRemoteVaultID = nil
+        selectVault(record)
     }
 
     private func selectVault(_ record: VaultRecord) {

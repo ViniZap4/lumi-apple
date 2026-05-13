@@ -50,6 +50,29 @@ public actor LumiAPIClient {
         try await request(method: "GET", path: "/api/users/me", body: nil as EmptyBody?, requireToken: true)
     }
 
+    /// `GET /api/vaults` — list vaults the authenticated user is a member of.
+    public func listVaults() async throws(LumiAPIError) -> [RemoteVault] {
+        let envelope: VaultListResponse = try await request(method: "GET", path: "/api/vaults", body: nil as EmptyBody?, requireToken: true)
+        return envelope.vaults
+    }
+
+    /// `GET /api/vaults/:vault` — vault detail.
+    public func vaultDetail(id: UUID) async throws(LumiAPIError) -> RemoteVault {
+        try await request(method: "GET", path: "/api/vaults/\(id.uuidString.lowercased())", body: nil as EmptyBody?, requireToken: true)
+    }
+
+    /// `GET /api/vaults/:vault/members`.
+    public func listMembers(vaultID: UUID) async throws(LumiAPIError) -> [RemoteMember] {
+        let envelope: MemberListResponse = try await request(method: "GET", path: "/api/vaults/\(vaultID.uuidString.lowercased())/members", body: nil as EmptyBody?, requireToken: true)
+        return envelope.members
+    }
+
+    /// `GET /api/vaults/:vault/roles`.
+    public func listRoles(vaultID: UUID) async throws(LumiAPIError) -> [RemoteRole] {
+        let envelope: RoleListResponse = try await request(method: "GET", path: "/api/vaults/\(vaultID.uuidString.lowercased())/roles", body: nil as EmptyBody?, requireToken: true)
+        return envelope.roles
+    }
+
     private func request<Body: Encodable & Sendable, Response: Decodable & Sendable>(
         method: String,
         path: String,
@@ -204,6 +227,18 @@ public struct UserDTO: Codable, Sendable, Equatable, Hashable {
 struct ServerErrorEnvelope: Decodable, Sendable {
     let error: String
     let detail: String?
+}
+
+struct VaultListResponse: Decodable, Sendable {
+    let vaults: [RemoteVault]
+}
+
+struct MemberListResponse: Decodable, Sendable {
+    let members: [RemoteMember]
+}
+
+struct RoleListResponse: Decodable, Sendable {
+    let roles: [RemoteRole]
 }
 
 struct EmptyBody: Codable, Sendable {}

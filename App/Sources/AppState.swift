@@ -26,7 +26,22 @@ final class AppState {
     /// Server connection state. Empty `currentSession` means the app is
     /// running in local-only mode; later phases (vault discovery, note sync)
     /// gate themselves on this being populated.
-    let authService = AuthService()
+    let authService: AuthService
+
+    /// Server-vault discovery cache (E.1.1). Populated on sign-in via
+    /// `remoteVaultsStore.refresh()`; cleared on sign-out.
+    let remoteVaultsStore: RemoteVaultsStore
+
+    /// Selection in the sidebar's "server" section. Independent of
+    /// `selectedVaultID` (local) — selecting one clears the other so the
+    /// detail panel doesn't conflict.
+    var selectedRemoteVaultID: UUID?
+
+    init() {
+        let auth = AuthService()
+        self.authService = auth
+        self.remoteVaultsStore = RemoteVaultsStore(client: auth.apiClient)
+    }
 
     /// Replace the active session, closing the previous one to release scope.
     func setSession(_ new: VaultSession?) {

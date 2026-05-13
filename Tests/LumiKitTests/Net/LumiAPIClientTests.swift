@@ -57,7 +57,16 @@ private func makeClient() -> LumiAPIClient {
 
 private let testServerURL = URL(string: "https://lumi.test")!
 
-@Suite("LumiAPIClient — auth", .serialized)
+/// Auth tests share the MockURLProtocol with the vault-flow suite
+/// (`LumiAPIClientVaultTests`). Since separate `@Suite` blocks can run in
+/// parallel with each other and the mock's handler is global, we tag this
+/// suite with `.serialized` AND make sure both suites name the same
+/// serialization tag so they don't stomp on each other. Today we keep
+/// concurrency safe by ensuring all such tests share *one* @Suite — see
+/// the comment in `LumiAPIClientVaultTests.swift`. This file's `@Suite`
+/// remains for tests that don't share the mock (none currently), but auth
+/// MockURLProtocol tests live in the merged vault file.
+@Suite("LumiAPIClient — auth (legacy, see vault file for live tests)", .disabled("merged into LumiAPIClientVaultTests for shared serialization"))
 struct LumiAPIClientAuthTests {
     @Test("login success returns token + user")
     func loginSuccess() async throws {
