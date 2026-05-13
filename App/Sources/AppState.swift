@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SwiftUI
 import LumiKit
 import LumiUI
 
@@ -45,6 +46,16 @@ final class AppState {
     /// Cmd+, keyboard shortcut (defined on the App-level Scene) and the
     /// toolbar button share state without dueling `@State` containers.
     var showSettings: Bool = false
+
+    /// Quick-switcher modal visibility. ⌘O opens a floating tree-over-note
+    /// overlay so users can jump notes without leaving the current one.
+    var showQuickSwitcher: Bool = false
+
+    /// Column visibility for the navigation split. Defaults to the full
+    /// 3-column layout; auto-collapses to detail-only when a note opens so
+    /// the reading area takes the full window. The "Back to vault" toolbar
+    /// button restores the 3-column state.
+    var columnVisibility: NavigationSplitViewVisibility = .all
 
     init() {
         let auth = AuthService()

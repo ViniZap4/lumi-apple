@@ -207,7 +207,9 @@ private struct TreeRowView: View {
             .tag(Optional(item.id))
         case .note(let note):
             NoteRow(note: note)
-                .tag(Optional("note:" + note.id))
+                // Match LocalTreeItem.id (path-based) — same reasoning: id
+                // collisions on duplicate titles break selection.
+                .tag(Optional("note:" + note.path))
                 .contentShape(Rectangle())
                 .onTapGesture { onSelect(note) }
         }

@@ -11,7 +11,7 @@ struct RootView: View {
 
     var body: some View {
         @Bindable var bound = appState
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $bound.columnVisibility) {
             VaultSidebar(
                 vaults: vaults,
                 selectedVaultID: $bound.selectedVaultID,
@@ -36,8 +36,12 @@ struct RootView: View {
                 EmptyVaultPanel(onAdd: addVault)
             }
         } detail: {
-            if let noteID = appState.selectedNoteID,
-               let note = appState.notes.first(where: { $0.id == noteID }),
+            if let notePath = appState.selectedNoteID,
+               // Selection uses note.path (unique per file), not note.id
+               // (title slug, may collide). Match by path here so the
+               // detail view picks the *clicked* note, not whichever happens
+               // to slug-collide first.
+               let note = appState.notes.first(where: { $0.path == notePath }),
                let session = appState.session {
                 NoteDetailView(
                     note: note,
@@ -50,6 +54,29 @@ struct RootView: View {
         }
         .background(theme.background)
         .toolbar {
+            // "Back to navigation" appears only when we've collapsed away
+            // from the 3-column layout (i.e. a note is open full-screen).
+            #if os(macOS)
+            if appState.columnVisibility == .detailOnly {
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        appState.columnVisibility = .all
+                    } label: {
+                        Label("Back to vault", systemImage: "chevron.left")
+                    }
+                    .keyboardShortcut(.escape, modifiers: [])
+                }
+            }
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    appState.showQuickSwitcher = true
+                } label: {
+                    Label("Quick switcher", systemImage: "magnifyingglass")
+                }
+                .keyboardShortcut("o", modifiers: [.command])
+                .disabled(appState.notes.isEmpty)
+            }
+            #endif
             ToolbarItem(placement: .primaryAction) {
                 ServerMenu()
             }
@@ -63,6 +90,17 @@ struct RootView: View {
                     Image(systemName: "gearshape")
                 }
             }
+        }
+        .sheet(isPresented: $bound.showQuickSwitcher) {
+            QuickSwitcherSheet(
+                notes: appState.notes,
+                onSelect: { note in
+                    appState.showQuickSwitcher = false
+                    selectNote(note)
+                }
+            )
+            .environment(appState)
+            .environment(\.theme, theme)
         }
         .sheet(isPresented: $bound.showSettings) {
             SettingsSheet()
@@ -112,7 +150,14 @@ struct RootView: View {
         }
         let url = session.resolve(note)
         appState.editor.load(noteID: note.id, at: url, vaultRoot: session.rootURL)
-        appState.selectedNoteID = note.id
+        // Track the *path*, not the id — see RootView.detail lookup for why.
+        appState.selectedNoteID = note.path
+        // Yazi-style focus: opening a note collapses the navigation columns
+        // so the read/edit pane fills the window. The "Back to vault"
+        // toolbar entry or `⎋` restores the 3-column layout.
+        #if os(macOS)
+        appState.columnVisibility = .detailOnly
+        #endif
     }
 
     private func addVault(url: URL) {

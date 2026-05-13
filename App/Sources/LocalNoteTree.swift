@@ -79,8 +79,14 @@ enum LocalNoteTree {
         // Notes directly in this folder, sorted by title.
         let folderNotes = (notes[prefix] ?? []).sorted { $0.title.lowercased() < $1.title.lowercased() }
         let noteItems: [LocalTreeItem] = folderNotes.map { note in
+            // Use `note.path` (file-system relative path) as the unique key —
+            // not `note.id`, which is derived from the title and collides
+            // whenever two notes share a title. Title collisions are common
+            // (untitled drafts, "todo.md" everywhere) and ForEach + duplicate
+            // ids ends in undefined behavior: rows fail to open or open the
+            // wrong note.
             LocalTreeItem(
-                id: "note:" + note.id,
+                id: "note:" + note.path,
                 name: note.title,
                 kind: .note(note),
                 children: nil
