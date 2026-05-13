@@ -67,9 +67,12 @@ public final class VimController {
     /// custom drawing.
     public var selectionUTF16Range: NSRange {
         guard case let .visual(kind, anchor) = state.mode else {
-            // Normal mode: 1-char "block" if cursor is on a character.
-            // Insert mode (or empty buffer / past-end): collapsed caret.
-            if state.mode == .normal,
+            // Normal *or* command-line mode: 1-char "block" if cursor is on a
+            // character. (Command-line mode keeps the editor cursor parked
+            // exactly where it was when search began; the pattern is rendered
+            // separately in the overlay/accessory bar.)
+            let showsBlock = state.mode == .normal || state.mode.commandLinePrefix != nil
+            if showsBlock,
                buffer.cursor < buffer.text.count,
                !buffer.text.isEmpty
             {
@@ -125,6 +128,8 @@ public final class VimController {
             case .characterwise: return "VISUAL"
             case .linewise: return "V-LINE"
             }
+        case let .commandLine(prefix, buffer):
+            return "\(prefix)\(buffer)"
         }
     }
 }

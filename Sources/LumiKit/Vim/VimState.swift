@@ -17,6 +17,9 @@ public struct VimState: Sendable, Hashable {
     /// The most recent successful find/till. Used by `;` (repeat) and `,`
     /// (reverse-repeat).
     public var lastFind: FindMemory?
+    /// The most recent successful search. Used by `n` (repeat) and `N`
+    /// (reverse-repeat), and by `/<CR>` / `?<CR>` empty-pattern reuse.
+    public var lastSearch: SearchMemory?
     /// Default ("unnamed") register — receives the most recent yank/delete.
     public var defaultRegister: Register
     /// Named registers (`"a` … `"z`, `"A` … `"Z`). Yank/delete writes here in
@@ -85,6 +88,7 @@ public struct VimState: Sendable, Hashable {
         pendingTextObjectKind: TextObjectKind? = nil,
         pendingFindKind: FindKind? = nil,
         lastFind: FindMemory? = nil,
+        lastSearch: SearchMemory? = nil,
         defaultRegister: Register = Register(),
         registers: [Character: Register] = [:],
         pendingRegister: Character? = nil,
@@ -114,6 +118,7 @@ public struct VimState: Sendable, Hashable {
         self.pendingTextObjectKind = pendingTextObjectKind
         self.pendingFindKind = pendingFindKind
         self.lastFind = lastFind
+        self.lastSearch = lastSearch
         self.defaultRegister = defaultRegister
         self.registers = registers
         self.pendingRegister = pendingRegister

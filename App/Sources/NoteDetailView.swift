@@ -153,6 +153,8 @@ private struct VimModeBadge: View {
             return (vimMode.label, theme.background, theme.primary)
         case .visual:
             return (vimMode.label, theme.background, theme.warning)
+        case .commandLine:
+            return (vimMode.label, theme.background, theme.accent)
         }
     }
 }

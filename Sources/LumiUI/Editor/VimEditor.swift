@@ -20,13 +20,18 @@ public struct VimEditor: View {
     @Environment(\.theme) private var theme
 
     public var body: some View {
-        VimTextViewBridge(
-            text: controller.buffer.text,
-            selection: controller.selectionUTF16Range,
-            isInsertMode: controller.state.mode == .insert,
-            controller: controller,
-            theme: theme
-        )
+        VStack(spacing: 0) {
+            VimTextViewBridge(
+                text: controller.buffer.text,
+                selection: controller.selectionUTF16Range,
+                isInsertMode: controller.state.mode == .insert,
+                controller: controller,
+                theme: theme
+            )
+            if case let .commandLine(prefix, buffer) = controller.state.mode {
+                VimCommandLineOverlay(prefix: prefix, buffer: buffer)
+            }
+        }
         .onChange(of: text) { _, new in
             if new != controller.buffer.text {
                 controller.replace(text: new)
@@ -59,6 +64,8 @@ public extension VimMode {
             case .characterwise: return "VISUAL"
             case .linewise: return "V-LINE"
             }
+        case let .commandLine(prefix, buffer):
+            return "\(prefix)\(buffer)"
         }
     }
 }

@@ -65,6 +65,8 @@ public enum VimEngine {
             return handleInsert(input: input, state: state, buffer: buffer)
         case .visual:
             return handleVisual(input: input, state: state, buffer: buffer)
+        case .commandLine:
+            return handleCommandLine(input: input, state: state, buffer: buffer)
         }
     }
 
@@ -261,6 +263,16 @@ public enum VimEngine {
             if char == ";" || char == "," {
                 return resolveFindRepeat(char: char, state: state, buffer: buffer)
             }
+            // Search as motion: d/foo<CR>, d?foo<CR>. Keep pendingOperator and
+            // pendingCount intact — `handleCommandLine` consumes them on Enter.
+            if char == "/" || char == "?" {
+                state.mode = .commandLine(prefix: char, buffer: "")
+                return Result(state: state, buffer: buffer)
+            }
+            // Search-repeat as motion under operator: dn, dN.
+            if char == "n" || char == "N" {
+                return resolveSearchRepeat(char: char, state: state, buffer: buffer)
+            }
             // Mark jump as motion under operator: d'a, d`a.
             if char == "'" {
                 state.awaitingMarkJumpLine = true
@@ -297,6 +309,16 @@ public enum VimEngine {
         // Find-repeat (no operator).
         if char == ";" || char == "," {
             return resolveFindRepeat(char: char, state: state, buffer: buffer)
+        }
+        // Search entry (no operator): `/` forward, `?` backward.
+        if char == "/" || char == "?" {
+            state.mode = .commandLine(prefix: char, buffer: "")
+            state.pendingCount = nil
+            return Result(state: state, buffer: buffer)
+        }
+        // Search-repeat (no operator): `n` same direction, `N` reversed.
+        if char == "n" || char == "N" {
+            return resolveSearchRepeat(char: char, state: state, buffer: buffer)
         }
 
         // Operators — set pending and wait for motion.
@@ -834,6 +856,133 @@ public enum VimEngine {
         }
         let kind = (char == ",") ? last.kind.reversed : last.kind
         return resolveFind(findKind: kind, target: last.target, state: state, buffer: buffer, recordAsLast: false)
+    }
+
+    // MARK: Command-line mode (search; ex commands later)
+
+    private static func handleCommandLine(input: VimInput, state inState: VimState, buffer inBuffer: TextBuffer) -> Result {
+        var state = inState
+        let buffer = inBuffer
+        guard case let .commandLine(prefix, currentBuffer) = state.mode else {
+            return Result(state: state, buffer: buffer)
+        }
+
+        switch input {
+        case .escape:
+            // Cancel: drop any pending operator/count and return to normal.
+            state.mode = .normal
+            state.pendingOperator = nil
+            state.pendingCount = nil
+            return Result(state: state, buffer: buffer)
+
+        case .backspace:
+            if currentBuffer.isEmpty {
+                // Backspace on an empty pattern exits command-line mode (real
+                // vim behavior), also cancelling any pending operator.
+                state.mode = .normal
+                state.pendingOperator = nil
+                state.pendingCount = nil
+                return Result(state: state, buffer: buffer)
+            }
+            var newBuffer = currentBuffer
+            newBuffer.removeLast()
+            state.mode = .commandLine(prefix: prefix, buffer: newBuffer)
+            return Result(state: state, buffer: buffer)
+
+        case .return:
+            // Execute. Direction comes from the prefix; pattern from buffer (or
+            // lastSearch when empty).
+            let direction: SearchDirection = (prefix == "?") ? .backward : .forward
+            state.mode = .normal
+
+            if currentBuffer.isEmpty {
+                guard let last = state.lastSearch else {
+                    state.pendingOperator = nil
+                    state.pendingCount = nil
+                    return Result(state: state, buffer: buffer)
+                }
+                return resolveSearch(direction: direction, pattern: last.pattern, state: state, buffer: buffer)
+            }
+            return resolveSearch(direction: direction, pattern: currentBuffer, state: state, buffer: buffer)
+
+        case .tab, .controlR:
+            // Ignored while typing a pattern.
+            return Result(state: state, buffer: buffer)
+
+        case let .character(char):
+            var newBuffer = currentBuffer
+            newBuffer.append(char)
+            state.mode = .commandLine(prefix: prefix, buffer: newBuffer)
+            return Result(state: state, buffer: buffer)
+        }
+    }
+
+    /// Execute a search. Honors `state.effectiveCount` (repeats the jump N
+    /// times). On success, updates `lastSearch` (unless `recordAsLast == false`,
+    /// used by `n`/`N` so they don't clobber the original direction). On
+    /// failure (no match or bad regex), leaves cursor unchanged and clears any
+    /// pending operator/count.
+    private static func resolveSearch(
+        direction: SearchDirection,
+        pattern: String,
+        state inState: VimState,
+        buffer inBuffer: TextBuffer,
+        recordAsLast: Bool = true
+    ) -> Result {
+        var state = inState
+        var buffer = inBuffer
+        let count = state.effectiveCount
+        let pending = state.pendingOperator
+        state.pendingOperator = nil
+        state.pendingCount = nil
+
+        var matchRange: Range<Int>?
+        var fromOffset = buffer.cursor
+        for _ in 0..<max(1, count) {
+            guard let r = nextMatch(in: buffer.text, pattern: pattern, from: fromOffset, direction: direction) else {
+                matchRange = nil
+                break
+            }
+            matchRange = r
+            fromOffset = r.lowerBound
+        }
+
+        guard let range = matchRange else {
+            return Result(state: state, buffer: buffer)
+        }
+        if recordAsLast {
+            state.lastSearch = SearchMemory(pattern: pattern, direction: direction)
+        }
+
+        if let op = pending?.op {
+            // Operator range: from cursor to match start (or vice versa for
+            // backward search). Characterwise — same semantics as vim's `d/`.
+            let from = min(buffer.cursor, range.lowerBound)
+            let to = max(buffer.cursor, range.lowerBound)
+            return applyRangeOperator(op, fromOffset: from, toOffset: to, state: state, buffer: buffer)
+        }
+
+        buffer.cursor = range.lowerBound
+        return clamp(state: state, buffer: buffer)
+    }
+
+    /// Resolve `n` or `N` against `lastSearch`. `n` repeats in the original
+    /// direction; `N` flips it. `recordAsLast: false` so the memory's direction
+    /// isn't perturbed by an `N`.
+    private static func resolveSearchRepeat(
+        char: Character,
+        state inState: VimState,
+        buffer inBuffer: TextBuffer
+    ) -> Result {
+        var state = inState
+        let buffer = inBuffer
+        guard let last = state.lastSearch else {
+            state.pendingOperator = nil
+            state.pendingCount = nil
+            return Result(state: state, buffer: buffer)
+        }
+        let direction: SearchDirection = (char == "N") ? last.direction.reversed : last.direction
+        return resolveSearch(direction: direction, pattern: last.pattern, state: state, buffer: buffer, recordAsLast: false)
     }
 
     private static func resolveFindRepeatInVisual(

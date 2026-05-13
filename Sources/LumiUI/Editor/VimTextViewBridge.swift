@@ -99,6 +99,15 @@ struct VimTextViewBridge: UIViewRepresentable {
             textView?.handleAccessory(action)
         }
         textView.accessoryBar = bar
+
+        // Alternate bar shown while in command-line mode: prefix + buffer
+        // mirror plus Cancel/Done.
+        let cmdBar = VimCommandLineAccessoryBar()
+        cmdBar.onTap = { [weak textView] action in
+            textView?.handleCommandLineAccessory(action)
+        }
+        textView.commandLineBar = cmdBar
+
         textView.inputAccessoryView = bar
         return textView
     }
@@ -115,15 +124,32 @@ struct VimTextViewBridge: UIViewRepresentable {
         if view.selectedRange != selection {
             view.selectedRange = selection
         }
+
+        // Swap accessory views based on the engine mode.
+        if case let .commandLine(prefix, buffer) = controller.state.mode {
+            view.commandLineBar?.prefix = prefix
+            view.commandLineBar?.buffer = buffer
+            if view.inputAccessoryView !== view.commandLineBar {
+                view.inputAccessoryView = view.commandLineBar
+                view.reloadInputViews()
+            }
+        } else {
+            if view.inputAccessoryView !== view.accessoryBar {
+                view.inputAccessoryView = view.accessoryBar
+                view.reloadInputViews()
+            }
+        }
     }
 }
 
 final class VimUIKitTextView: UITextView {
     weak var controller: VimController?
     var accessoryBar: VimAccessoryBar?
+    var commandLineBar: VimCommandLineAccessoryBar?
 
     func applyAccessoryTheme(_ theme: ThemeTokens) {
         accessoryBar?.apply(theme: theme)
+        commandLineBar?.apply(theme: theme)
     }
 
     fileprivate func handleAccessory(_ action: VimAccessoryAction) {
@@ -137,6 +163,14 @@ final class VimUIKitTextView: UITextView {
         case .comma: input = .character(",")
         }
         controller.send(input)
+    }
+
+    fileprivate func handleCommandLineAccessory(_ action: VimCommandLineAccessoryAction) {
+        guard let controller else { return }
+        switch action {
+        case .cancel: controller.send(.escape)
+        case .done: controller.send(.return)
+        }
     }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
