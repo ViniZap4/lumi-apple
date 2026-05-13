@@ -87,7 +87,7 @@ struct VimSearchTests {
         #expect(r.state.defaultRegister.text == "foo bar ")
     }
 
-    @Test("typing / starts command-line mode without moving cursor")
+    @Test("typing / starts command-line mode with buffer accumulating")
     func commandLineInProgress() {
         let r = run("/ba", on: "foo bar")
         if case let .commandLine(prefix, buffer) = r.state.mode {
@@ -96,7 +96,10 @@ struct VimSearchTests {
         } else {
             Issue.record("expected commandLine mode, got \(r.state.mode)")
         }
-        #expect(r.buffer.cursor == 0)
+        // Cursor moves to the live-preview match (incsearch) — VimIncsearchTests
+        // covers the preview-position contract; here we just confirm the mode
+        // shape didn't regress.
+        #expect(r.buffer.cursor == 4)
     }
 
     @Test("ESC mid-pattern cancels search, leaves cursor and lastSearch alone")

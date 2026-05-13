@@ -271,8 +271,10 @@ public enum VimEngine {
             }
             // Search as motion: d/foo<CR>, d?foo<CR>. Keep pendingOperator and
             // pendingCount intact — `handleCommandLine` consumes them on Enter.
+            // Snapshot cursor for incsearch + operator anchor.
             if char == "/" || char == "?" {
                 state.mode = .commandLine(prefix: char, buffer: "")
+                state.commandLineEntryCursor = buffer.cursor
                 return Result(state: state, buffer: buffer)
             }
             // Search-repeat as motion under operator: dn, dN.
@@ -319,6 +321,7 @@ public enum VimEngine {
         // Search entry (no operator): `/` forward, `?` backward.
         if char == "/" || char == "?" {
             state.mode = .commandLine(prefix: char, buffer: "")
+            state.commandLineEntryCursor = buffer.cursor
             state.pendingCount = nil
             return Result(state: state, buffer: buffer)
         }
@@ -879,14 +882,19 @@ public enum VimEngine {
 
     private static func handleCommandLine(input: VimInput, state inState: VimState, buffer inBuffer: TextBuffer) -> Result {
         var state = inState
-        let buffer = inBuffer
+        var buffer = inBuffer
         guard case let .commandLine(prefix, currentBuffer) = state.mode else {
             return Result(state: state, buffer: buffer)
         }
 
         switch input {
         case .escape:
-            // Cancel: drop any pending operator/count and return to normal.
+            // Cancel: restore cursor to where the user pressed `/` or `?`,
+            // drop any pending operator/count, return to normal.
+            if let snap = state.commandLineEntryCursor {
+                buffer.cursor = snap
+            }
+            state.commandLineEntryCursor = nil
             state.mode = .normal
             state.pendingOperator = nil
             state.pendingCount = nil
@@ -895,7 +903,12 @@ public enum VimEngine {
         case .backspace:
             if currentBuffer.isEmpty {
                 // Backspace on an empty pattern exits command-line mode (real
-                // vim behavior), also cancelling any pending operator.
+                // vim behavior), also cancelling any pending operator and
+                // restoring the entry cursor.
+                if let snap = state.commandLineEntryCursor {
+                    buffer.cursor = snap
+                }
+                state.commandLineEntryCursor = nil
                 state.mode = .normal
                 state.pendingOperator = nil
                 state.pendingCount = nil
@@ -904,6 +917,7 @@ public enum VimEngine {
             var newBuffer = currentBuffer
             newBuffer.removeLast()
             state.mode = .commandLine(prefix: prefix, buffer: newBuffer)
+            updateIncrementalPreview(prefix: prefix, pattern: newBuffer, state: &state, buffer: &buffer)
             return Result(state: state, buffer: buffer)
 
         case .return:
@@ -917,6 +931,15 @@ public enum VimEngine {
                 let effect = parseExCommand(currentBuffer)
                 return Result(state: state, buffer: buffer, effect: effect)
             }
+
+            // Search: restore cursor to the snapshot before resolving so
+            // (a) the search runs from the original position, and (b) any
+            // pending operator's range is anchored at the snapshot, not the
+            // live-preview position.
+            if let snap = state.commandLineEntryCursor {
+                buffer.cursor = snap
+            }
+            state.commandLineEntryCursor = nil
 
             let direction: SearchDirection = (prefix == "?") ? .backward : .forward
             if currentBuffer.isEmpty {
@@ -937,7 +960,34 @@ public enum VimEngine {
             var newBuffer = currentBuffer
             newBuffer.append(char)
             state.mode = .commandLine(prefix: prefix, buffer: newBuffer)
+            updateIncrementalPreview(prefix: prefix, pattern: newBuffer, state: &state, buffer: &buffer)
             return Result(state: state, buffer: buffer)
+        }
+    }
+
+    /// Incsearch live preview. Called whenever the pattern buffer changes
+    /// (char append or backspace) while in command-line search mode. Always
+    /// runs the search from the snapshot cursor — never the previous preview
+    /// position — so each keystroke is an idempotent function of the pattern.
+    /// On empty pattern or no match: cursor returns to the snapshot.
+    /// `:` ex commands skip this entirely.
+    private static func updateIncrementalPreview(
+        prefix: Character,
+        pattern: String,
+        state: inout VimState,
+        buffer: inout TextBuffer
+    ) {
+        guard prefix == "/" || prefix == "?",
+              let snap = state.commandLineEntryCursor
+        else { return }
+
+        // Restart every preview from the entry position.
+        buffer.cursor = snap
+        guard !pattern.isEmpty else { return }
+
+        let direction: SearchDirection = (prefix == "?") ? .backward : .forward
+        if let range = nextMatch(in: buffer.text, pattern: pattern, from: snap, direction: direction) {
+            buffer.cursor = range.lowerBound
         }
     }
 

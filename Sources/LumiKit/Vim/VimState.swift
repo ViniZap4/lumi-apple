@@ -20,6 +20,13 @@ public struct VimState: Sendable, Hashable {
     /// The most recent successful search. Used by `n` (repeat) and `N`
     /// (reverse-repeat), and by `/<CR>` / `?<CR>` empty-pattern reuse.
     public var lastSearch: SearchMemory?
+    /// Snapshot of `buffer.cursor` taken when entering command-line mode via
+    /// `/` or `?` (search). Used by incsearch to (a) restart each preview
+    /// search from the original position, (b) restore the cursor on ESC, and
+    /// (c) anchor the operator range on `<CR>` when an operator is pending —
+    /// otherwise the live-preview cursor movement would collapse the range.
+    /// Not set for `:` ex commands (they don't preview).
+    public var commandLineEntryCursor: Int?
     /// Default ("unnamed") register — receives the most recent yank/delete.
     public var defaultRegister: Register
     /// Named registers (`"a` … `"z`, `"A` … `"Z`). Yank/delete writes here in
@@ -89,6 +96,7 @@ public struct VimState: Sendable, Hashable {
         pendingFindKind: FindKind? = nil,
         lastFind: FindMemory? = nil,
         lastSearch: SearchMemory? = nil,
+        commandLineEntryCursor: Int? = nil,
         defaultRegister: Register = Register(),
         registers: [Character: Register] = [:],
         pendingRegister: Character? = nil,
@@ -119,6 +127,7 @@ public struct VimState: Sendable, Hashable {
         self.pendingFindKind = pendingFindKind
         self.lastFind = lastFind
         self.lastSearch = lastSearch
+        self.commandLineEntryCursor = commandLineEntryCursor
         self.defaultRegister = defaultRegister
         self.registers = registers
         self.pendingRegister = pendingRegister
