@@ -183,6 +183,17 @@ public actor LumiAPIClient {
         )
     }
 
+    /// `GET /api/vaults/:vault/audit?limit=&offset=` — capability `audit.read`
+    /// required. Returns the paginated audit log.
+    public func listAuditEntries(vaultID: UUID, limit: Int = 50, offset: Int = 0) async throws(LumiAPIError) -> AuditListResponse {
+        var path = "/api/vaults/\(vaultID.uuidString.lowercased())/audit"
+        var query: [String] = []
+        if limit > 0 { query.append("limit=\(limit)") }
+        if offset > 0 { query.append("offset=\(offset)") }
+        if !query.isEmpty { path += "?" + query.joined(separator: "&") }
+        return try await request(method: "GET", path: path, body: nil as EmptyBody?, requireToken: true)
+    }
+
     private func request<Body: Encodable & Sendable, Response: Decodable & Sendable>(
         method: String,
         path: String,

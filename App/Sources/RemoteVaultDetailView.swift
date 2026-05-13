@@ -18,6 +18,7 @@ struct RemoteVaultDetailView: View {
                 memberSection
                 roleSection
                 inviteSection
+                auditSection
                 placeholder
             }
             .padding(.horizontal, 32)
@@ -31,6 +32,118 @@ struct RemoteVaultDetailView: View {
                 .environment(appState)
                 .environment(\.theme, theme)
         }
+    }
+
+    @ViewBuilder
+    private var auditSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionTitle("Audit log")
+            if !canReadAudit && appState.remoteVaultsStore.auditEntries.isEmpty {
+                Text("not visible (audit.read required)")
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundStyle(theme.textDim)
+            } else if appState.remoteVaultsStore.auditEntries.isEmpty {
+                Text(appState.remoteVaultsStore.isLoading ? "loading…" : "no audit entries yet")
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundStyle(theme.textDim)
+            } else {
+                ForEach(appState.remoteVaultsStore.auditEntries) { entry in
+                    auditRow(entry)
+                }
+                if appState.remoteVaultsStore.auditHasMore {
+                    Button {
+                        Task { await appState.remoteVaultsStore.loadMoreAudit() }
+                    } label: {
+                        Label("Load more", systemImage: "arrow.down.circle")
+                            .font(.system(.callout, design: .monospaced))
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(theme.primary)
+                }
+            }
+        }
+    }
+
+    /// `audit.read` capability check against the current session's member row.
+    private var canReadAudit: Bool {
+        guard let session = appState.authService.currentSession else { return false }
+        let me = appState.remoteVaultsStore.members.first { $0.username == session.user.username }
+        guard let caps = me?.capabilities else { return false }
+        return caps.contains { $0 == "*" || $0 == "audit.*" || $0 == "audit.read" || $0 == "vault.*" }
+    }
+
+    @ViewBuilder
+    private func auditRow(_ entry: AuditEntry) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Image(systemName: "list.bullet.rectangle")
+                    .foregroundStyle(theme.accent)
+                Text(entry.action)
+                    .font(.system(.body, design: .monospaced).weight(.semibold))
+                    .foregroundStyle(theme.text)
+                Spacer()
+                if let when = entry.createdAt {
+                    Text(when.formatted(.relative(presentation: .named)))
+                        .font(.caption2)
+                        .foregroundStyle(theme.textDim)
+                }
+            }
+            HStack(spacing: 8) {
+                if let actor = userLabel(for: entry.userID) {
+                    Text(actor)
+                        .font(.caption)
+                        .foregroundStyle(theme.textDim)
+                }
+                if let ip = entry.ip, !ip.isEmpty {
+                    Text("· \(ip)")
+                        .font(.caption2)
+                        .foregroundStyle(theme.textDim)
+                }
+            }
+            if !entry.payload.isEmpty {
+                FlowLayout(spacing: 6) {
+                    ForEach(entry.payload.keys.sorted(), id: \.self) { key in
+                        if let value = entry.payload[key] {
+                            payloadChip(key: key, value: value)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(theme.overlayBackground)
+        )
+    }
+
+    /// Resolve a user ID to a display label using the loaded members list.
+    /// Falls back to a short UUID prefix when the user isn't in the vault's
+    /// member list (e.g. a former member whose row was scrubbed).
+    private func userLabel(for id: UUID?) -> String? {
+        guard let id else { return nil }
+        if let member = appState.remoteVaultsStore.members.first(where: { $0.userID == id }) {
+            return "@\(member.username)"
+        }
+        return "user \(id.uuidString.prefix(8).lowercased())"
+    }
+
+    private func payloadChip(key: String, value: AuditJSONValue) -> some View {
+        HStack(spacing: 4) {
+            Text(key)
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(theme.textDim)
+            Text(value.preview)
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(theme.text)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(theme.background)
+        .clipShape(Capsule())
     }
 
     @ViewBuilder

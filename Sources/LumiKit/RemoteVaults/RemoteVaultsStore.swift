@@ -18,8 +18,14 @@ public final class RemoteVaultsStore {
     public private(set) var members: [RemoteMember] = []
     public private(set) var roles: [RemoteRole] = []
     public private(set) var invites: [VaultInvite] = []
+    public private(set) var auditEntries: [AuditEntry] = []
+    /// True once we've loaded *less* than a full page — paginated views use
+    /// this to decide whether to render a "Load more" button.
+    public private(set) var auditHasMore: Bool = false
     public private(set) var isLoading: Bool = false
     public private(set) var lastError: LumiAPIError?
+
+    private let auditPageSize: Int = 50
 
     private let client: LumiAPIClient
 
@@ -40,14 +46,16 @@ public final class RemoteVaultsStore {
         isLoading = false
     }
 
-    /// Select a vault by id and load its members + roles + invites. Passing
-    /// `nil` clears the selection and the cached arrays.
+    /// Select a vault by id and load its members + roles + invites + audit
+    /// entries. Passing `nil` clears the selection and the cached arrays.
     public func selectVault(_ id: UUID?) async {
         guard let id else {
             selectedVaultID = nil
             members = []
             roles = []
             invites = []
+            auditEntries = []
+            auditHasMore = false
             return
         }
         selectedVaultID = id
@@ -56,25 +64,57 @@ public final class RemoteVaultsStore {
         members = []
         roles = []
         invites = []
+        auditEntries = []
+        auditHasMore = false
         // Sequential rather than `async let` — Swift 6 typed throws don't
         // propagate through `async let` bindings, and serializing a few short
         // requests is fine for the UI flow.
         do {
             members = try await client.listMembers(vaultID: id)
             roles = try await client.listRoles(vaultID: id)
-            // Invite listing requires the `members.invite` capability; for
-            // members without it the server returns 403. Treat that as
-            // "no invites visible to me" rather than poisoning lastError.
+            // Invite listing requires the `members.invite` capability; audit
+            // listing requires `audit.read`. For members without either, the
+            // server returns 403. Treat as "nothing visible to me" rather
+            // than poisoning lastError.
             do {
                 invites = try await client.listInvites(vaultID: id)
             } catch let error where isForbidden(error) {
                 invites = []
-                _ = error // explicit ignore
+                _ = error
+            }
+            do {
+                let resp = try await client.listAuditEntries(vaultID: id, limit: auditPageSize, offset: 0)
+                auditEntries = resp.entries
+                auditHasMore = resp.entries.count >= auditPageSize
+            } catch let error where isForbidden(error) {
+                auditEntries = []
+                auditHasMore = false
+                _ = error
             }
         } catch {
             lastError = error
         }
         isLoading = false
+    }
+
+    /// Append the next page of audit entries. Caller-driven — typically a
+    /// "Load more" button hooked up to this method.
+    public func loadMoreAudit() async {
+        guard let id = selectedVaultID, auditHasMore else { return }
+        do {
+            let resp = try await client.listAuditEntries(
+                vaultID: id,
+                limit: auditPageSize,
+                offset: auditEntries.count
+            )
+            auditEntries.append(contentsOf: resp.entries)
+            auditHasMore = resp.entries.count >= auditPageSize
+        } catch let error where isForbidden(error) {
+            auditHasMore = false
+        } catch {
+            lastError = error
+            auditHasMore = false
+        }
     }
 
     /// Refresh just the invites list for the selected vault. Used after
@@ -133,6 +173,8 @@ public final class RemoteVaultsStore {
         members = []
         roles = []
         invites = []
+        auditEntries = []
+        auditHasMore = false
         lastError = nil
         isLoading = false
     }

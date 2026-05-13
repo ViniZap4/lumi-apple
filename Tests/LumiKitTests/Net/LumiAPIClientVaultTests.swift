@@ -355,6 +355,70 @@ struct LumiAPIClientVaultTests {
         try await client.revokeInvite(vaultID: vaultID, token: "abc")
     }
 
+    @Test("listAuditEntries decodes entries + pagination meta")
+    func auditList() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/vaults/3f2504e0-4f89-11d3-9a0c-0305e82c3301/audit")
+            // Query string carries pagination.
+            let query = request.url?.query ?? ""
+            #expect(query.contains("limit=25"))
+            #expect(request.value(forHTTPHeaderField: "X-Lumi-Token") == "tok")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = """
+            {"entries":[
+              {"id":1,"user_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3302",
+               "vault_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301",
+               "action":"invite.created",
+               "payload":{"role_name":"Editor","max_uses":3,"email_hint":"a@e.com"},
+               "ip":"127.0.0.1","user_agent":"test","created_at":"2026-05-13T10:00:00Z"},
+              {"id":2,"user_id":null,"vault_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301",
+               "action":"vault.created","created_at":"2026-05-13T09:00:00Z"}
+            ],"limit":25,"offset":0}
+            """.data(using: .utf8)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let resp = try await client.listAuditEntries(vaultID: vaultID, limit: 25, offset: 0)
+        #expect(resp.entries.count == 2)
+        #expect(resp.entries[0].action == "invite.created")
+        if case let .string(s) = resp.entries[0].payload["role_name"] {
+            #expect(s == "Editor")
+        } else {
+            Issue.record("expected role_name string in payload")
+        }
+        if case let .number(n) = resp.entries[0].payload["max_uses"] {
+            #expect(n == 3)
+        } else {
+            Issue.record("expected max_uses number")
+        }
+        #expect(resp.entries[1].userID == nil)
+        #expect(resp.limit == 25)
+    }
+
+    @Test("listAuditEntries without audit.read surfaces .server forbidden")
+    func auditForbidden() async throws {
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!
+            return (response, #"{"error":"forbidden"}"#.data(using: .utf8)!)
+        }
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let thrown = await catchAPIError {
+            _ = try await client.listAuditEntries(vaultID: vaultID)
+        }
+        if case let .server(status, code, _) = thrown {
+            #expect(status == 403)
+            #expect(code == "forbidden")
+        } else {
+            Issue.record("expected .server forbidden, got \(String(describing: thrown))")
+        }
+    }
+
     @Test("createInvite without members.invite cap surfaces .server forbidden")
     func createForbidden() async throws {
         MockURLProtocol.setHandler { request in
