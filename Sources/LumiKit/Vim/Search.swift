@@ -155,6 +155,32 @@ func analyzeCaseFlags(_ pattern: String) -> CaseFlagAnalysis {
     return CaseFlagAnalysis(effectivePattern: stripped, caseInsensitive: caseInsensitive)
 }
 
+/// Enumerate every match of `pattern` in `text`, returning character-offset
+/// ranges. Same case-flag rules as `nextMatch` (smartcase + `\C` / `\c`).
+/// Used by hlsearch to highlight all occurrences, not just the cursor's
+/// destination.
+public func allMatches(in text: String, pattern: String) -> [Range<Int>] {
+    guard !pattern.isEmpty else { return [] }
+    let analysis = analyzeCaseFlags(pattern)
+    guard !analysis.effectivePattern.isEmpty else { return [] }
+    let options: NSRegularExpression.Options = analysis.caseInsensitive ? [.caseInsensitive] : []
+    guard let regex = try? NSRegularExpression(pattern: analysis.effectivePattern, options: options) else {
+        return []
+    }
+    let nsText = text as NSString
+    let fullRange = NSRange(location: 0, length: nsText.length)
+    guard fullRange.length > 0 else { return [] }
+
+    var results: [Range<Int>] = []
+    regex.enumerateMatches(in: text, options: [], range: fullRange) { match, _, _ in
+        guard let match, match.range.length > 0 else { return }
+        if let range = characterRange(in: text, utf16Range: match.range) {
+            results.append(range)
+        }
+    }
+    return results
+}
+
 private func firstMatch(regex: NSRegularExpression, in text: NSString, range: NSRange) -> NSTextCheckingResult? {
     guard range.length > 0 else { return nil }
     return regex.firstMatch(in: text as String, options: [], range: range)

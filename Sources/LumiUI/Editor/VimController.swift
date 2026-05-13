@@ -120,6 +120,29 @@ public final class VimController {
         return buffer.text.prefix(safe).utf16.count
     }
 
+    /// hlsearch: every occurrence of the active search pattern as a UTF-16
+    /// `NSRange`. During `/` or `?` typing this mirrors the in-progress buffer
+    /// (so highlights track the user's keystrokes); otherwise it reflects
+    /// `state.lastSearch?.pattern`. Empty when there's no active search.
+    public var searchHighlights: [NSRange] {
+        guard let pattern = activeSearchPattern, !pattern.isEmpty else { return [] }
+        return allMatches(in: buffer.text, pattern: pattern).map { range in
+            let from = utf16Offset(of: range.lowerBound)
+            let to = utf16Offset(of: range.upperBound)
+            return NSRange(location: from, length: to - from)
+        }
+    }
+
+    private var activeSearchPattern: String? {
+        if case let .commandLine(prefix, currentBuffer) = state.mode,
+           (prefix == "/" || prefix == "?"),
+           !currentBuffer.isEmpty
+        {
+            return currentBuffer
+        }
+        return state.lastSearch?.pattern
+    }
+
     private func lineForOffset(_ offset: Int) -> Int {
         var b = buffer
         b.cursor = max(0, min(offset, b.text.count))

@@ -31,6 +31,7 @@ public struct VimEditor: View {
                 text: controller.buffer.text,
                 selection: controller.selectionUTF16Range,
                 isInsertMode: controller.state.mode == .insert,
+                highlights: controller.searchHighlights,
                 controller: controller,
                 theme: theme
             )

@@ -12,6 +12,7 @@ struct VimTextViewBridge: NSViewRepresentable {
     let text: String
     let selection: NSRange
     let isInsertMode: Bool
+    let highlights: [NSRange]
     let controller: VimController
     let theme: ThemeTokens
 
@@ -43,8 +44,18 @@ struct VimTextViewBridge: NSViewRepresentable {
         if textView.string != text {
             textView.string = text
         }
+        applyHighlights(to: textView.textStorage, color: NSColor(theme.warning).withAlphaComponent(0.35))
         if textView.selectedRange() != selection {
             textView.setSelectedRange(selection)
+        }
+    }
+
+    private func applyHighlights(to storage: NSTextStorage?, color: NSColor) {
+        guard let storage else { return }
+        let fullRange = NSRange(location: 0, length: storage.length)
+        storage.removeAttribute(.backgroundColor, range: fullRange)
+        for highlight in highlights where NSMaxRange(highlight) <= storage.length {
+            storage.addAttribute(.backgroundColor, value: color, range: highlight)
         }
     }
 }
@@ -77,6 +88,7 @@ struct VimTextViewBridge: UIViewRepresentable {
     let text: String
     let selection: NSRange
     let isInsertMode: Bool
+    let highlights: [NSRange]
     let controller: VimController
     let theme: ThemeTokens
 
@@ -121,6 +133,7 @@ struct VimTextViewBridge: UIViewRepresentable {
         if view.text != text {
             view.text = text
         }
+        applyHighlights(to: view.textStorage, color: UIColor(theme.warning).withAlphaComponent(0.35))
         if view.selectedRange != selection {
             view.selectedRange = selection
         }
@@ -187,6 +200,16 @@ final class VimUIKitTextView: UITextView {
             }
         }
         super.pressesBegan(presses, with: event)
+    }
+}
+
+private extension VimTextViewBridge {
+    func applyHighlights(to storage: NSTextStorage, color: UIColor) {
+        let fullRange = NSRange(location: 0, length: storage.length)
+        storage.removeAttribute(.backgroundColor, range: fullRange)
+        for highlight in highlights where NSMaxRange(highlight) <= storage.length {
+            storage.addAttribute(.backgroundColor, value: color, range: highlight)
+        }
     }
 }
 
