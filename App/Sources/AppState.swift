@@ -23,6 +23,11 @@ final class AppState {
     /// notes calls `load` to repopulate.
     let editor = EditorState()
 
+    /// Server connection state. Empty `currentSession` means the app is
+    /// running in local-only mode; later phases (vault discovery, note sync)
+    /// gate themselves on this being populated.
+    let authService = AuthService()
+
     /// Replace the active session, closing the previous one to release scope.
     func setSession(_ new: VaultSession?) {
         session?.close()

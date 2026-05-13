@@ -47,9 +47,13 @@ struct RootView: View {
         .background(theme.background)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
+                ServerMenu()
+            }
+            ToolbarItem(placement: .primaryAction) {
                 ThemeMenu(selection: $bound.theme)
             }
         }
+        .task { await appState.authService.restore() }
     }
 
     private func selectVault(_ record: VaultRecord) {
