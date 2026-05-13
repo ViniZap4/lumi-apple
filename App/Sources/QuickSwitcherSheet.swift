@@ -1,17 +1,15 @@
 import SwiftUI
 import LumiKit
 
-/// Floating note picker. Opens over the current view (⌘O on macOS) so the
-/// user can jump notes without leaving the editor. Modeled after web's
-/// SearchModal / CommandModal — a single search field at the top with a
-/// live-filtered flat list underneath, navigable with j/k or arrow keys.
-///
-/// We render a flat search-friendly list (not the recursive tree) because
-/// the modal's purpose is fast lookup, not browsing. If the search field is
-/// empty we show every note ordered by recency.
+/// Floating note picker. Search field + live-filtered list. Walks the
+/// currently-loaded portion of the vault tree to collect candidate notes
+/// — does NOT eagerly load every subfolder, so opening this sheet stays
+/// cheap on giant vaults. If the user types a query that matches a note
+/// they haven't expanded into yet, we offer a "Load deeper folders" button
+/// that walks one more depth level.
 struct QuickSwitcherSheet: View {
-    let notes: [Note]
-    let onSelect: (Note) -> Void
+    let rootFolder: FolderNode?
+    let onSelect: (NoteEntry) -> Void
 
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
@@ -21,15 +19,34 @@ struct QuickSwitcherSheet: View {
     @State private var selectedIndex: Int = 0
     @FocusState private var fieldFocused: Bool
 
-    private var filtered: [Note] {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            return notes.sorted { $0.updatedAt > $1.updatedAt }
+    /// All notes currently visible in the loaded tree, depth-first.
+    /// Memoized on (query, root identity) — recomputed cheaply when the
+    /// user types or expands a folder.
+    private var allEntries: [NoteEntry] {
+        guard let root = rootFolder else { return [] }
+        var out: [NoteEntry] = []
+        collect(root, into: &out)
+        return out
+    }
+
+    private func collect(_ folder: FolderNode, into out: inout [NoteEntry]) {
+        guard let items = folder.items else { return }
+        for item in items {
+            switch item {
+            case .note(let n): out.append(n)
+            case .folder(let f): collect(f, into: &out)
+            }
         }
+    }
+
+    private var filtered: [NoteEntry] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = allEntries.sorted { $0.updatedAt > $1.updatedAt }
+        guard !trimmed.isEmpty else { return base }
         let q = trimmed.lowercased()
-        return notes
-            .filter { $0.title.lowercased().contains(q) || $0.path.lowercased().contains(q) }
-            .sorted { $0.updatedAt > $1.updatedAt }
+        return base.filter {
+            $0.title.lowercased().contains(q) || $0.relativePath.lowercased().contains(q)
+        }
     }
 
     var body: some View {
@@ -65,14 +82,25 @@ struct QuickSwitcherSheet: View {
             Divider().background(theme.border)
 
             if filtered.isEmpty {
-                Text(query.isEmpty ? "no notes in this vault yet" : "no matches for \"\(query)\"")
-                    .font(.system(.callout, design: .monospaced))
-                    .foregroundStyle(theme.textDim)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack(spacing: 10) {
+                    Text(query.isEmpty ? "no notes loaded yet" : "no matches for \"\(query)\"")
+                        .font(.system(.callout, design: .monospaced))
+                        .foregroundStyle(theme.textDim)
+                    if let root = rootFolder {
+                        Button {
+                            walkDepth(root, depth: 2)
+                        } label: {
+                            Label("Search deeper folders", systemImage: "arrow.down.to.line")
+                                .font(.system(.caption, design: .monospaced))
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollViewReader { proxy in
                     List {
-                        ForEach(Array(filtered.enumerated()), id: \.element.path) { idx, note in
+                        ForEach(Array(filtered.enumerated()), id: \.element.relativePath) { idx, note in
                             row(note: note, isSelected: idx == selectedIndex)
                                 .id(idx)
                                 .contentShape(Rectangle())
@@ -88,15 +116,9 @@ struct QuickSwitcherSheet: View {
                     #if os(macOS)
                     .onKeyPress(phases: .down) { press in
                         switch press.key {
-                        case .downArrow:
-                            move(by: 1, proxy: proxy)
-                            return .handled
-                        case .upArrow:
-                            move(by: -1, proxy: proxy)
-                            return .handled
-                        case .return:
-                            commitSelection()
-                            return .handled
+                        case .downArrow: move(by: 1, proxy: proxy); return .handled
+                        case .upArrow: move(by: -1, proxy: proxy); return .handled
+                        case .return: commitSelection(); return .handled
                         default: break
                         }
                         switch press.characters {
@@ -119,7 +141,7 @@ struct QuickSwitcherSheet: View {
     }
 
     @ViewBuilder
-    private func row(note: Note, isSelected: Bool) -> some View {
+    private func row(note: NoteEntry, isSelected: Bool) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 8) {
                 Image(systemName: "doc.text")
@@ -132,7 +154,7 @@ struct QuickSwitcherSheet: View {
                     .font(.caption2)
                     .foregroundStyle(theme.textDim)
             }
-            Text(note.path)
+            Text(note.relativePath)
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(theme.textDim)
                 .lineLimit(1)
@@ -161,6 +183,18 @@ struct QuickSwitcherSheet: View {
         }
     }
     #endif
+
+    /// One-shot recursive expansion up to `depth` levels. Used when the
+    /// user wants to broaden the search beyond what they've already
+    /// browsed. Bounded so a "Search deeper" tap on a million-note vault
+    /// doesn't lock the UI.
+    private func walkDepth(_ folder: FolderNode, depth: Int) {
+        folder.loadIfNeeded()
+        guard depth > 0, let items = folder.items else { return }
+        for item in items {
+            if case .folder(let f) = item { walkDepth(f, depth: depth - 1) }
+        }
+    }
 
     private func commitSelection() {
         guard !filtered.isEmpty else { return }

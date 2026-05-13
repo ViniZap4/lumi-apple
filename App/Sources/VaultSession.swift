@@ -46,8 +46,16 @@ final class VaultSession {
         rootURL.appending(path: note.path)
     }
 
-    /// Walks the vault's filesystem and produces fresh Note records.
-    func scan() -> [Note] {
-        VaultScanner.scan(at: rootURL)
+    /// Resolve a NoteEntry to an absolute URL. NoteEntry already carries the
+    /// URL, so this is a passthrough; provided for symmetry with `resolve(_:)`.
+    func resolve(_ entry: NoteEntry) -> URL {
+        entry.url
+    }
+
+    /// Build a `FolderNode` rooted at the vault. The node is empty until
+    /// `loadIfNeeded()` is called — keeping vault-open cheap regardless of
+    /// vault size.
+    func rootFolder() -> FolderNode {
+        FolderNode(url: rootURL, relativePath: "", name: rootURL.lastPathComponent)
     }
 }

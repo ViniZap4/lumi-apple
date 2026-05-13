@@ -10,11 +10,21 @@ final class AppState {
     var theme: LumiTheme = .defaultDark
 
     var selectedVaultID: UUID?
+    /// Path (vault-relative) of the currently selected note. Stored as a
+    /// string so it survives across selection changes without holding a
+    /// reference into the lazy folder tree. `nil` means no note open.
     var selectedNoteID: String?
 
-    /// Notes scanned from the currently selected vault. Cached here so the
-    /// detail view can resolve a selection by id without re-walking the disk.
-    var notes: [Note] = []
+    /// Lazy file-system root for the active vault. Folders enumerate their
+    /// children on demand (FolderNode.loadIfNeeded) so vault-open stays
+    /// cheap even when the vault has millions of notes.
+    var rootFolder: FolderNode?
+
+    /// Currently selected note's lightweight handle. Set by tree row taps
+    /// (or quick-switcher selection); read by the detail view to drive the
+    /// editor load. Holding the entry here means the detail view doesn't
+    /// have to scan the lazy tree to resolve a selection.
+    var selectedEntry: NoteEntry?
 
     /// Active vault session — keeps security-scoped access alive while a vault
     /// is selected. Nil when no vault is open.

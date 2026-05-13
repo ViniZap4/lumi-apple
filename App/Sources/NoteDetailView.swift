@@ -3,9 +3,19 @@ import LumiKit
 import LumiUI
 
 struct NoteDetailView: View {
-    let note: Note
+    let entry: NoteEntry
     let baseURL: URL?
     let vaultRoot: URL
+
+    /// Display title: prefer the editor's parsed frontmatter title when
+    /// available, fall back to the filename-derived NoteEntry.title.
+    private var displayTitle: String {
+        appState.editor.frontmatter.title ?? entry.title
+    }
+
+    private var displayTags: [String] {
+        appState.editor.frontmatter.tags
+    }
 
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
@@ -31,7 +41,7 @@ struct NoteDetailView: View {
             content(editor: editor)
         }
         .background(theme.background)
-        .navigationTitle(note.title)
+        .navigationTitle(displayTitle)
         #if os(iOS) || os(visionOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -43,18 +53,17 @@ struct NoteDetailView: View {
         case .view:
             ReadModeScroll(jkEnabled: appState.preferences.jkScrollInView) {
                 VStack(alignment: .leading, spacing: 18) {
-                    Text(note.title)
+                    Text(displayTitle)
                         .font(.system(size: 32, weight: .semibold))
                         .foregroundStyle(theme.text)
-                    if !note.tags.isEmpty {
+                    if !displayTags.isEmpty {
                         HStack(spacing: 6) {
-                            ForEach(note.tags, id: \.self) { tag in
+                            ForEach(displayTags, id: \.self) { tag in
                                 TagChip(tag: tag)
                             }
                         }
                     }
-                    let source = editor.isDirty ? editor.currentText : note.content
-                    let document = MarkdownParser.parse(source, baseURL: baseURL)
+                    let document = MarkdownParser.parse(editor.currentText, baseURL: baseURL)
                     MarkdownView(document)
                 }
                 .padding(.horizontal, 32)
