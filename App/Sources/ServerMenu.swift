@@ -52,21 +52,40 @@ private struct SignInSheet: View {
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
 
+    enum Mode: String, CaseIterable, Identifiable {
+        case signIn = "Sign In"
+        case register = "Create Account"
+        var id: String { rawValue }
+    }
+
+    @State private var mode: Mode = .signIn
     @State private var serverURL: String = ""
     @State private var username: String = ""
     @State private var password: String = ""
+    @State private var displayName: String = ""
+    @State private var tosVersion: String = ""
+    @State private var privacyVersion: String = ""
+    @State private var agreedToTerms: Bool = false
     @State private var errorMessage: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text("Sign in to lumi server")
+                Text(mode == .signIn ? "Sign in to lumi server" : "Create lumi account")
                     .font(.headline)
                     .foregroundStyle(theme.text)
                 Spacer()
                 Button("Cancel") { dismiss() }
                     .buttonStyle(.borderless)
             }
+
+            Picker("Mode", selection: $mode) {
+                ForEach(Mode.allCases) { m in
+                    Text(m.rawValue).tag(m)
+                }
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: mode) { _, _ in errorMessage = nil }
 
             VStack(alignment: .leading, spacing: 8) {
                 fieldLabel("Server URL")
@@ -91,7 +110,44 @@ private struct SignInSheet: View {
                 fieldLabel("Password")
                 SecureField("•••••••••", text: $password)
                     .textFieldStyle(.roundedBorder)
-                    .textContentType(.password)
+                    .textContentType(mode == .signIn ? .password : .newPassword)
+
+                if mode == .register {
+                    fieldLabel("Display name")
+                    TextField("Alice", text: $displayName)
+                        .textFieldStyle(.roundedBorder)
+
+                    DisclosureGroup("Consent (advanced)") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Required only when the server enforces TOS/Privacy versions. Paste the strings from your server operator.")
+                                .font(.caption)
+                                .foregroundStyle(theme.textDim)
+                            fieldLabel("ToS version")
+                            TextField("v1", text: $tosVersion)
+                                .textFieldStyle(.roundedBorder)
+                                .autocorrectionDisabled()
+                                #if os(iOS) || os(visionOS)
+                                .textInputAutocapitalization(.never)
+                                #endif
+                            fieldLabel("Privacy version")
+                            TextField("v1", text: $privacyVersion)
+                                .textFieldStyle(.roundedBorder)
+                                .autocorrectionDisabled()
+                                #if os(iOS) || os(visionOS)
+                                .textInputAutocapitalization(.never)
+                                #endif
+                        }
+                        .padding(.top, 6)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(theme.text)
+
+                    Toggle(isOn: $agreedToTerms) {
+                        Text("I agree to the server's Terms of Service and Privacy Policy")
+                            .font(.caption)
+                            .foregroundStyle(theme.text)
+                    }
+                }
             }
 
             if let errorMessage {
@@ -109,7 +165,7 @@ private struct SignInSheet: View {
                     if appState.authService.isBusy {
                         ProgressView().controlSize(.small)
                     } else {
-                        Text("Sign In")
+                        Text(mode == .signIn ? "Sign In" : "Create Account")
                     }
                 }
                 .buttonStyle(.borderedProminent)
@@ -122,10 +178,15 @@ private struct SignInSheet: View {
     }
 
     private var canSubmit: Bool {
-        !appState.authService.isBusy
-            && URL(string: serverURL) != nil
-            && !username.isEmpty
-            && !password.isEmpty
+        guard !appState.authService.isBusy,
+              URL(string: serverURL) != nil,
+              !username.isEmpty,
+              !password.isEmpty
+        else { return false }
+        if mode == .register {
+            return !displayName.isEmpty && agreedToTerms
+        }
+        return true
     }
 
     private func submit() async {
@@ -135,7 +196,19 @@ private struct SignInSheet: View {
             return
         }
         do {
-            _ = try await appState.authService.signIn(serverURL: url, username: username, password: password)
+            switch mode {
+            case .signIn:
+                _ = try await appState.authService.signIn(serverURL: url, username: username, password: password)
+            case .register:
+                _ = try await appState.authService.register(
+                    serverURL: url,
+                    username: username,
+                    password: password,
+                    displayName: displayName,
+                    tosVersion: tosVersion,
+                    privacyVersion: privacyVersion
+                )
+            }
             dismiss()
         } catch let error as LumiAPIError {
             errorMessage = describe(error)
@@ -157,7 +230,21 @@ private struct SignInSheet: View {
         case .network(let message):
             return "network error — \(message)"
         case .server(_, let code, let detail):
-            return detail ?? code
+            // Friendly translations for the common register-failure codes.
+            switch code {
+            case "registration_closed":
+                return "this server doesn't allow new accounts here — you may need an invite link"
+            case "consent_required":
+                return "the server requires you to agree to its current Terms of Service and Privacy Policy (set the version strings under Consent (advanced))"
+            case "validation_failed":
+                return detail ?? "the server rejected the form — check your inputs"
+            case "username_taken":
+                return "that username is taken"
+            case "invalid_credentials":
+                return "incorrect username or password"
+            default:
+                return detail ?? code
+            }
         case .invalidResponse(let status):
             return "unexpected server response (HTTP \(status))"
         case .decoding(let message):

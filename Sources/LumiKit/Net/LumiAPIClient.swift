@@ -39,6 +39,29 @@ public actor LumiAPIClient {
         return try await request(method: "POST", path: "/api/auth/login", body: body, requireToken: false)
     }
 
+    /// `POST /api/auth/register` — only allowed when the server's
+    /// `RegistrationPolicy` is `open`; otherwise a 403 with code
+    /// `registration_closed` is returned. `consent` is required if the server
+    /// has `tos_version` / `privacy_version` configured — the values must
+    /// match the server's current versions exactly (no legal-fetch endpoint
+    /// exists yet on the server side). Pass empty strings when the server
+    /// doesn't require consent.
+    public func register(
+        username: String,
+        password: String,
+        displayName: String,
+        tosVersion: String,
+        privacyVersion: String
+    ) async throws(LumiAPIError) -> SessionResponse {
+        let body = RegisterRequest(
+            username: username,
+            password: password,
+            displayName: displayName,
+            consent: ConsentBody(tosVersion: tosVersion, privacyVersion: privacyVersion)
+        )
+        return try await request(method: "POST", path: "/api/auth/register", body: body, requireToken: false)
+    }
+
     /// `POST /api/auth/logout` — invalidates the current token server-side.
     /// Caller is still responsible for clearing local state.
     public func logout() async throws(LumiAPIError) {
@@ -153,6 +176,30 @@ public actor LumiAPIClient {
 public struct LoginRequest: Codable, Sendable {
     public let username: String
     public let password: String
+}
+
+public struct RegisterRequest: Codable, Sendable {
+    public let username: String
+    public let password: String
+    public let displayName: String
+    public let consent: ConsentBody
+
+    enum CodingKeys: String, CodingKey {
+        case username
+        case password
+        case displayName = "display_name"
+        case consent
+    }
+}
+
+public struct ConsentBody: Codable, Sendable, Equatable {
+    public let tosVersion: String
+    public let privacyVersion: String
+
+    enum CodingKeys: String, CodingKey {
+        case tosVersion = "tos_version"
+        case privacyVersion = "privacy_version"
+    }
 }
 
 public struct SessionResponse: Codable, Sendable, Equatable {

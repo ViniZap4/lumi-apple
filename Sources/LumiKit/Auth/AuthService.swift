@@ -62,13 +62,49 @@ public final class AuthService {
         await client.setBaseURL(serverURL)
         await client.setToken(nil)
         let resp = try await client.login(username: username, password: password)
+        return try await persist(serverURL: serverURL, response: resp)
+    }
+
+    /// Create a new account against `serverURL`. Only works when the server's
+    /// `RegistrationPolicy` is `open` — a closed server returns
+    /// `.server(status: 403, code: "registration_closed", …)`. `tosVersion`
+    /// and `privacyVersion` must match the server's configured versions if it
+    /// requires consent; pass empty strings otherwise.
+    @discardableResult
+    public func register(
+        serverURL: URL,
+        username: String,
+        password: String,
+        displayName: String,
+        tosVersion: String,
+        privacyVersion: String
+    ) async throws(LumiAPIError) -> AuthSession {
+        isBusy = true
+        defer { isBusy = false }
+        await client.setBaseURL(serverURL)
+        await client.setToken(nil)
+        let resp = try await client.register(
+            username: username,
+            password: password,
+            displayName: displayName,
+            tosVersion: tosVersion,
+            privacyVersion: privacyVersion
+        )
+        return try await persist(serverURL: serverURL, response: resp)
+    }
+
+    /// Common tail of `signIn` and `register`: store the token in the
+    /// Keychain, mirror to the API client + UserDefaults, publish the
+    /// `currentSession`. Awaits the actor's token write before returning so
+    /// the next outbound request is authenticated.
+    private func persist(serverURL: URL, response: SessionResponse) async throws(LumiAPIError) -> AuthSession {
         do {
-            try Keychain.set(resp.token, account: serverURL.absoluteString)
+            try Keychain.set(response.token, account: serverURL.absoluteString)
         } catch {
             throw LumiAPIError.network(message: "keychain write failed: \(error)")
         }
-        await client.setToken(resp.token)
-        let session = AuthSession(serverURL: serverURL, user: resp.user, expiresAt: resp.expiresAt)
+        await client.setToken(response.token)
+        let session = AuthSession(serverURL: serverURL, user: response.user, expiresAt: response.expiresAt)
         currentSession = session
         if let data = try? JSONEncoder().encode(session) {
             defaults.set(data, forKey: sessionDefaultsKey)

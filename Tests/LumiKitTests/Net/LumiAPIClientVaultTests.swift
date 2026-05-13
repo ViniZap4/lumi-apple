@@ -135,6 +135,67 @@ struct LumiAPIClientVaultTests {
         }
     }
 
+    @Test("register success returns session (201)")
+    func registerSuccess() async throws {
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/auth/register")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil)!
+            let body = """
+            {"token":"new-tok","expires_at":"2026-12-31T23:59:59Z",
+             "user":{"id":"u9","username":"bob","display_name":"Bob"}}
+            """.data(using: .utf8)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        let session = try await client.register(username: "bob", password: "pw", displayName: "Bob", tosVersion: "", privacyVersion: "")
+        #expect(session.user.username == "bob")
+        #expect(session.token == "new-tok")
+    }
+
+    @Test("register on closed server surfaces registration_closed")
+    func registerClosed() async throws {
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!
+            let body = #"{"error":"registration_closed"}"#.data(using: .utf8)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        do {
+            _ = try await client.register(username: "bob", password: "pw", displayName: "Bob", tosVersion: "", privacyVersion: "")
+            Issue.record("expected throw")
+        } catch let error as LumiAPIError {
+            if case let .server(status, code, _) = error {
+                #expect(status == 403)
+                #expect(code == "registration_closed")
+            } else {
+                Issue.record("expected .server, got \(error)")
+            }
+        }
+    }
+
+    @Test("register with stale consent surfaces consent_required")
+    func registerConsentRequired() async throws {
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!
+            let body = #"{"error":"consent_required"}"#.data(using: .utf8)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        do {
+            _ = try await client.register(username: "bob", password: "pw", displayName: "Bob", tosVersion: "old", privacyVersion: "old")
+            Issue.record("expected throw")
+        } catch let error as LumiAPIError {
+            if case let .server(_, code, _) = error {
+                #expect(code == "consent_required")
+            } else {
+                Issue.record("expected .server, got \(error)")
+            }
+        }
+    }
+
     // MARK: - Vault flows
 
     @Test("listVaults decodes the envelope")
