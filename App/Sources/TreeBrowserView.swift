@@ -32,11 +32,21 @@ struct TreeBrowserView: View {
             Divider().background(theme.border)
             HStack(spacing: 0) {
                 parentColumn
+                    .id("parent-\(state.pathStack.count)")
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .leading).combined(with: .opacity),
+                        removal: .move(edge: .leading).combined(with: .opacity)
+                    ))
                 Divider().background(theme.border)
                 currentColumn
+                    .id("current-\(state.pathStack.count)")
                 Divider().background(theme.border)
                 previewColumn
+                    .id("preview-\(state.selectedItem?.id ?? "-")")
+                    .transition(.opacity)
             }
+            .animation(.easeInOut(duration: 0.16), value: state.pathStack.count)
+            .animation(.easeInOut(duration: 0.12), value: state.selectedItem?.id)
         }
         .background(theme.background)
         #if os(macOS)

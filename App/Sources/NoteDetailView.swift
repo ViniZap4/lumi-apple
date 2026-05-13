@@ -268,12 +268,18 @@ private struct ReadModeScroll<Content: View>: View {
             .focusable()
             .focused($focused)
             .onAppear { focused = true }
-            .onKeyPress(phases: .down) { press in
+            // `.repeat` catches the auto-fired keydowns when the user
+            // *holds* j or k, so scrolling continues smoothly rather than
+            // stuttering one line per discrete press. We pass animated:
+            // false on repeat so each nudge happens immediately — chained
+            // 100ms animations from holding the key would stutter.
+            .onKeyPress(phases: [.down, .repeat]) { press in
                 guard jkEnabled else { return .ignored }
                 let lineStep: CGFloat = 24
+                let animated = press.phase == .down
                 switch press.characters {
-                case "j": host.coordinator.scroll(by: lineStep); return .handled
-                case "k": host.coordinator.scroll(by: -lineStep); return .handled
+                case "j": host.coordinator.scroll(by: lineStep, animated: animated); return .handled
+                case "k": host.coordinator.scroll(by: -lineStep, animated: animated); return .handled
                 case "d": host.coordinator.scrollHalfPage(direction: 1); return .handled
                 case "u": host.coordinator.scrollHalfPage(direction: -1); return .handled
                 case "g": host.coordinator.scrollTo(.top); return .handled
@@ -352,7 +358,7 @@ private struct NativeScrollHost<Content: View>: NSViewRepresentable {
 
         enum Edge { case top, bottom }
 
-        func scroll(by dy: CGFloat) {
+        func scroll(by dy: CGFloat, animated: Bool = true) {
             guard let view = scrollView,
                   let doc = view.documentView
             else { return }
@@ -360,19 +366,24 @@ private struct NativeScrollHost<Content: View>: NSViewRepresentable {
             let current = clip.bounds.origin
             let maxY = max(0, doc.bounds.height - clip.bounds.height)
             let nextY = max(0, min(maxY, current.y + dy))
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.10
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                clip.animator().setBoundsOrigin(NSPoint(x: current.x, y: nextY))
-            } completionHandler: { [weak view] in
-                view?.reflectScrolledClipView(clip)
+            if animated {
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 0.10
+                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    clip.animator().setBoundsOrigin(NSPoint(x: current.x, y: nextY))
+                } completionHandler: { [weak view] in
+                    view?.reflectScrolledClipView(clip)
+                }
+            } else {
+                clip.setBoundsOrigin(NSPoint(x: current.x, y: nextY))
+                view.reflectScrolledClipView(clip)
             }
         }
 
         func scrollHalfPage(direction sign: CGFloat) {
             guard let view = scrollView else { return }
             let page = view.bounds.height - 40
-            scroll(by: sign * page / 2)
+            scroll(by: sign * page / 2, animated: true)
         }
 
         func scrollTo(_ edge: Edge) {

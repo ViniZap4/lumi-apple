@@ -39,15 +39,83 @@ struct VimTextViewBridge: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? VimAppKitTextView else { return }
         textView.textColor = NSColor(theme.text)
-        textView.insertionPointColor = NSColor(isInsertMode ? theme.primary : theme.accent)
+        // In normal mode the cursor is rendered as a block (a one-char
+        // selection — see VimController.selectionUTF16Range). Hiding the
+        // insertion-point caret keeps the block from competing with a
+        // thin blinking line; coloring the selection background gives the
+        // cursor its vim look. Insert mode shows the conventional caret.
+        textView.insertionPointColor = isInsertMode
+            ? NSColor(theme.primary)
+            : .clear
+        textView.selectedTextAttributes = [
+            .backgroundColor: isInsertMode
+                ? NSColor(theme.primary).withAlphaComponent(0.30)
+                : NSColor(theme.accent).withAlphaComponent(0.55)
+        ]
 
         if textView.string != text {
             textView.string = text
+            applySyntaxHighlighting(to: textView.textStorage, text: text)
         }
         applyHighlights(to: textView.textStorage, color: NSColor(theme.warning).withAlphaComponent(0.35))
         if textView.selectedRange() != selection {
             textView.setSelectedRange(selection)
         }
+    }
+
+    /// Cheap, line-by-line markdown highlighting. Avoids running the full
+    /// MarkdownParser on every keystroke; instead it scans regex-friendly
+    /// patterns (heading prefix, fenced/inline code, bold/italic, link
+    /// brackets) and applies foreground colors via the text storage's
+    /// attribute system. Heavy parsing happens only in the read pane.
+    private func applySyntaxHighlighting(to storage: NSTextStorage?, text: String) {
+        guard let storage else { return }
+        let ns = storage.mutableString
+        let fullRange = NSRange(location: 0, length: ns.length)
+        // Start from base text color — clears any stale highlights from a
+        // previous edit. (Background hlsearch decoration runs afterwards.)
+        storage.beginEditing()
+        storage.addAttribute(.foregroundColor, value: NSColor(theme.text), range: fullRange)
+
+        let baseFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        storage.addAttribute(.font, value: baseFont, range: fullRange)
+
+        for (pattern, color, fontWeight) in Self.markdownPatterns(theme: theme) {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) else { continue }
+            regex.enumerateMatches(in: text, options: [], range: fullRange) { match, _, _ in
+                guard let r = match?.range else { return }
+                storage.addAttribute(.foregroundColor, value: color, range: r)
+                if let weight = fontWeight {
+                    storage.addAttribute(.font, value: NSFont.monospacedSystemFont(ofSize: 13, weight: weight), range: r)
+                }
+            }
+        }
+        storage.endEditing()
+    }
+
+    private static func markdownPatterns(theme: ThemeTokens) -> [(String, NSColor, NSFont.Weight?)] {
+        let primary = NSColor(theme.primary)
+        let accent = NSColor(theme.accent)
+        let dim = NSColor(theme.textDim)
+        let warning = NSColor(theme.warning)
+        return [
+            // Heading lines: `^#+ heading text` → accent, bold.
+            ("^#{1,6} .*$", accent, .semibold),
+            // Bold via **text**.
+            ("\\*\\*[^*\\n]+\\*\\*", primary, .bold),
+            // Inline code via `code`.
+            ("`[^`\\n]+`", warning, nil),
+            // Fenced code block delimiters.
+            ("^```.*$", dim, nil),
+            // Block-quote markers and lines.
+            ("^>\\s.*$", dim, nil),
+            // Markdown link `[text](url)`.
+            ("\\[[^\\]]+\\]\\([^)]+\\)", primary, nil),
+            // List bullets at line start.
+            ("^\\s*[-*+]\\s", dim, nil),
+            // Frontmatter delimiters.
+            ("^---$", dim, nil),
+        ]
     }
 
     private func applyHighlights(to storage: NSTextStorage?, color: NSColor) {
@@ -127,11 +195,16 @@ struct VimTextViewBridge: UIViewRepresentable {
     func updateUIView(_ textView: UITextView, context: Context) {
         guard let view = textView as? VimUIKitTextView else { return }
         view.textColor = UIColor(theme.text)
+        // tintColor drives both the insertion caret AND the selection
+        // background on UITextView, so normal-mode block cursor (1-char
+        // selection from VimController.selectionUTF16Range) appears in
+        // accent; insert-mode caret in primary.
         view.tintColor = UIColor(isInsertMode ? theme.primary : theme.accent)
         view.applyAccessoryTheme(theme)
 
         if view.text != text {
             view.text = text
+            applySyntaxHighlightingIOS(to: view.textStorage, text: text)
         }
         applyHighlights(to: view.textStorage, color: UIColor(theme.warning).withAlphaComponent(0.35))
         if view.selectedRange != selection {
@@ -210,6 +283,43 @@ private extension VimTextViewBridge {
         for highlight in highlights where NSMaxRange(highlight) <= storage.length {
             storage.addAttribute(.backgroundColor, value: color, range: highlight)
         }
+    }
+
+    /// iOS variant of the markdown syntax highlighter. Same patterns as
+    /// macOS; uses UIFont + UIColor.
+    func applySyntaxHighlightingIOS(to storage: NSTextStorage, text: String) {
+        let ns = storage.mutableString
+        let fullRange = NSRange(location: 0, length: ns.length)
+        storage.beginEditing()
+        storage.addAttribute(.foregroundColor, value: UIColor(theme.text), range: fullRange)
+        let baseFont = UIFont.monospacedSystemFont(ofSize: 16, weight: .regular)
+        storage.addAttribute(.font, value: baseFont, range: fullRange)
+
+        let primary = UIColor(theme.primary)
+        let accent = UIColor(theme.accent)
+        let dim = UIColor(theme.textDim)
+        let warning = UIColor(theme.warning)
+        let patterns: [(String, UIColor, UIFont.Weight?)] = [
+            ("^#{1,6} .*$", accent, .semibold),
+            ("\\*\\*[^*\\n]+\\*\\*", primary, .bold),
+            ("`[^`\\n]+`", warning, nil),
+            ("^```.*$", dim, nil),
+            ("^>\\s.*$", dim, nil),
+            ("\\[[^\\]]+\\]\\([^)]+\\)", primary, nil),
+            ("^\\s*[-*+]\\s", dim, nil),
+            ("^---$", dim, nil),
+        ]
+        for (pattern, color, fontWeight) in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) else { continue }
+            regex.enumerateMatches(in: text, options: [], range: fullRange) { match, _, _ in
+                guard let r = match?.range else { return }
+                storage.addAttribute(.foregroundColor, value: color, range: r)
+                if let weight = fontWeight {
+                    storage.addAttribute(.font, value: UIFont.monospacedSystemFont(ofSize: 16, weight: weight), range: r)
+                }
+            }
+        }
+        storage.endEditing()
     }
 }
 
