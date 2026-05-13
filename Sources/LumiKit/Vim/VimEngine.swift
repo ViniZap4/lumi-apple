@@ -928,8 +928,15 @@ public enum VimEngine {
             if prefix == ":" {
                 state.pendingOperator = nil
                 state.pendingCount = nil
-                let effect = parseExCommand(currentBuffer)
-                return Result(state: state, buffer: buffer, effect: effect)
+                switch parseExCommand(currentBuffer) {
+                case .effect(let e):
+                    return Result(state: state, buffer: buffer, effect: e)
+                case .noHighlight:
+                    state.hlsearchSuspended = true
+                    return Result(state: state, buffer: buffer)
+                case nil:
+                    return Result(state: state, buffer: buffer)
+                }
             }
 
             // Search: restore cursor to the snapshot before resolving so
@@ -1027,6 +1034,9 @@ public enum VimEngine {
         if recordAsLast {
             state.lastSearch = SearchMemory(pattern: pattern, direction: direction)
         }
+        // Any successful search reactivates hlsearch (matches vim's behavior
+        // where `n` / `N` / `/foo` after `:noh` bring highlighting back).
+        state.hlsearchSuspended = false
 
         if let op = pending?.op {
             // Operator range: from cursor to match start (or vice versa for
@@ -1040,15 +1050,24 @@ public enum VimEngine {
         return clamp(state: state, buffer: buffer)
     }
 
-    /// Parse the buffer of a `:` command-line into a `VimEffect`. Whitespace is
-    /// trimmed. Unknown commands → nil (silent no-op, same as a bad search
-    /// regex). Bang variants (`:q!`, `:wq!`) deferred.
-    private static func parseExCommand(_ buffer: String) -> VimEffect? {
+    /// Parsed `:` command. Some are external effects the host must carry out
+    /// (`:w` → save), others are pure engine-state mutations (`:noh` →
+    /// suspend hlsearch). Unknown / empty input → nil at the parser level.
+    private enum ExCommand: Sendable, Hashable {
+        case effect(VimEffect)
+        case noHighlight
+    }
+
+    /// Parse the buffer of a `:` command-line. Whitespace is trimmed. Unknown
+    /// commands → nil (silent no-op, same as a bad search regex). Bang
+    /// variants (`:q!`, `:wq!`) deferred.
+    private static func parseExCommand(_ buffer: String) -> ExCommand? {
         let trimmed = buffer.trimmingCharacters(in: .whitespaces)
         switch trimmed {
-        case "w": return .save
-        case "wq", "x": return .saveAndClose
-        case "q": return .close
+        case "w": return .effect(.save)
+        case "wq", "x": return .effect(.saveAndClose)
+        case "q": return .effect(.close)
+        case "noh", "nohl", "nohlsearch": return .noHighlight
         default: return nil
         }
     }

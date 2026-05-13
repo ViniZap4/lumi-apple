@@ -134,12 +134,15 @@ public final class VimController {
     }
 
     private var activeSearchPattern: String? {
+        // Incsearch highlights always show live during /  ? typing, regardless
+        // of :noh — pressing / re-engages search.
         if case let .commandLine(prefix, currentBuffer) = state.mode,
            (prefix == "/" || prefix == "?"),
            !currentBuffer.isEmpty
         {
             return currentBuffer
         }
+        guard !state.hlsearchSuspended else { return nil }
         return state.lastSearch?.pattern
     }
 

@@ -27,6 +27,10 @@ public struct VimState: Sendable, Hashable {
     /// otherwise the live-preview cursor movement would collapse the range.
     /// Not set for `:` ex commands (they don't preview).
     public var commandLineEntryCursor: Int?
+    /// Toggled true by `:noh` (no-highlight). When set, hlsearch hides all
+    /// match decorations without forgetting `lastSearch` — so `n`/`N` keep
+    /// working. Any successful search clears the flag back to false.
+    public var hlsearchSuspended: Bool
     /// Default ("unnamed") register — receives the most recent yank/delete.
     public var defaultRegister: Register
     /// Named registers (`"a` … `"z`, `"A` … `"Z`). Yank/delete writes here in
@@ -97,6 +101,7 @@ public struct VimState: Sendable, Hashable {
         lastFind: FindMemory? = nil,
         lastSearch: SearchMemory? = nil,
         commandLineEntryCursor: Int? = nil,
+        hlsearchSuspended: Bool = false,
         defaultRegister: Register = Register(),
         registers: [Character: Register] = [:],
         pendingRegister: Character? = nil,
@@ -128,6 +133,7 @@ public struct VimState: Sendable, Hashable {
         self.lastFind = lastFind
         self.lastSearch = lastSearch
         self.commandLineEntryCursor = commandLineEntryCursor
+        self.hlsearchSuspended = hlsearchSuspended
         self.defaultRegister = defaultRegister
         self.registers = registers
         self.pendingRegister = pendingRegister

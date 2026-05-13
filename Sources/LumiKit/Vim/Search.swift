@@ -74,31 +74,30 @@ public func nextMatch(
 
     let cursorUTF16 = utf16Offset(in: text, characterOffset: charOffset)
 
+    let allMatches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: totalUTF16))
     switch direction {
     case .forward:
-        // Scan forward from just past the cursor, wrap to BOF if no hit.
-        let startSearchAt = min(totalUTF16, cursorUTF16 + 1)
-        if let m = firstMatch(regex: regex, in: nsText, range: NSRange(location: startSearchAt, length: totalUTF16 - startSearchAt)) {
+        // Vim forward semantics: first match whose start is strictly *after*
+        // the cursor (matches at the cursor itself are skipped). If none,
+        // wrap to BOF and return the first match anywhere — this naturally
+        // finds the cursor's match again when it's the only one.
+        if let m = allMatches.first(where: { $0.range.location > cursorUTF16 }) {
             return characterRange(in: text, utf16Range: m.range)
         }
-        // Wrap: scan from BOF up through the cursor position (inclusive in
-        // UTF-16, so a match starting at the cursor itself is found on wrap).
-        if let m = firstMatch(regex: regex, in: nsText, range: NSRange(location: 0, length: min(totalUTF16, cursorUTF16 + 1))) {
+        if let m = allMatches.first {
             return characterRange(in: text, utf16Range: m.range)
         }
         return nil
 
     case .backward:
         // Vim backward semantics: the match whose START is the largest offset
-        // strictly less than the cursor wins. We enumerate matches across the
-        // full buffer because a match can start before the cursor and extend
-        // past it (e.g. `?bar` from cursor 10 on "bar foo bar" should find the
-        // 'bar' at offset 8 even though it extends to 11).
-        let allMatches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: totalUTF16))
+        // strictly less than the cursor wins. A match can start before the
+        // cursor and extend past it (e.g. `?bar` from cursor 10 on
+        // "bar foo bar" should find 'bar' at offset 8 even though it
+        // extends to 11) — that's why we enumerate over the full buffer.
         if let m = allMatches.last(where: { $0.range.location < cursorUTF16 }) {
             return characterRange(in: text, utf16Range: m.range)
         }
-        // Wrap: last match anywhere.
         if let m = allMatches.last {
             return characterRange(in: text, utf16Range: m.range)
         }
