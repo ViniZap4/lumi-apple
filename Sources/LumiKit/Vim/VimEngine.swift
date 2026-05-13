@@ -7,10 +7,16 @@ public enum VimEngine {
     public struct Result: Sendable, Hashable {
         public var state: VimState
         public var buffer: TextBuffer
+        /// Side-effect requested by this input — set by ex commands (`:w` etc.).
+        /// The host consumes it via `VimController.onEffect` and the engine
+        /// produces a fresh nil on the next input. Effects do not persist
+        /// across `handle` calls.
+        public var effect: VimEffect?
 
-        public init(state: VimState, buffer: TextBuffer) {
+        public init(state: VimState, buffer: TextBuffer, effect: VimEffect? = nil) {
             self.state = state
             self.buffer = buffer
+            self.effect = effect
         }
     }
 
@@ -312,6 +318,15 @@ public enum VimEngine {
         }
         // Search entry (no operator): `/` forward, `?` backward.
         if char == "/" || char == "?" {
+            state.mode = .commandLine(prefix: char, buffer: "")
+            state.pendingCount = nil
+            return Result(state: state, buffer: buffer)
+        }
+        // Ex command entry (no operator): `:` opens the command-line. Same
+        // mode as search but with a `:` prefix; `handleCommandLine` branches on
+        // it. Counts before `:` aren't supported (vim's `:` is its own beast
+        // and ignores leading counts in our subset).
+        if char == ":" {
             state.mode = .commandLine(prefix: char, buffer: "")
             state.pendingCount = nil
             return Result(state: state, buffer: buffer)
@@ -637,11 +652,13 @@ public enum VimEngine {
         state.isPlayingMacro = true
 
         let times = max(1, count)
+        var lastEffect: VimEffect?
         for _ in 0..<times {
             for input in inputs {
                 let r = handle(input, state: state, buffer: buffer)
                 state = r.state
                 buffer = r.buffer
+                if let e = r.effect { lastEffect = e }
                 if state.macroDepth >= macroDepthLimit { break }
             }
             if state.macroDepth >= macroDepthLimit { break }
@@ -651,7 +668,7 @@ public enum VimEngine {
         if state.macroDepth == 0 {
             state.isPlayingMacro = false
         }
-        return Result(state: state, buffer: buffer)
+        return Result(state: state, buffer: buffer, effect: lastEffect)
     }
 
     // MARK: Registers + marks
@@ -890,11 +907,18 @@ public enum VimEngine {
             return Result(state: state, buffer: buffer)
 
         case .return:
-            // Execute. Direction comes from the prefix; pattern from buffer (or
-            // lastSearch when empty).
-            let direction: SearchDirection = (prefix == "?") ? .backward : .forward
+            // Execute. Branch on the prefix: `:` is an ex command (no buffer
+            // motion, may emit a host effect); `/` and `?` are search.
             state.mode = .normal
 
+            if prefix == ":" {
+                state.pendingOperator = nil
+                state.pendingCount = nil
+                let effect = parseExCommand(currentBuffer)
+                return Result(state: state, buffer: buffer, effect: effect)
+            }
+
+            let direction: SearchDirection = (prefix == "?") ? .backward : .forward
             if currentBuffer.isEmpty {
                 guard let last = state.lastSearch else {
                     state.pendingOperator = nil
@@ -964,6 +988,19 @@ public enum VimEngine {
 
         buffer.cursor = range.lowerBound
         return clamp(state: state, buffer: buffer)
+    }
+
+    /// Parse the buffer of a `:` command-line into a `VimEffect`. Whitespace is
+    /// trimmed. Unknown commands → nil (silent no-op, same as a bad search
+    /// regex). Bang variants (`:q!`, `:wq!`) deferred.
+    private static func parseExCommand(_ buffer: String) -> VimEffect? {
+        let trimmed = buffer.trimmingCharacters(in: .whitespaces)
+        switch trimmed {
+        case "w": return .save
+        case "wq", "x": return .saveAndClose
+        case "q": return .close
+        default: return nil
+        }
     }
 
     /// Resolve `n` or `N` against `lastSearch`. `n` repeats in the original

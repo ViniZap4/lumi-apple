@@ -18,6 +18,10 @@ import UIKit
 public final class VimController {
     public var buffer: TextBuffer
     public var state: VimState
+    /// Fires whenever the engine emits a side-effect (ex command). The host
+    /// translates `.save` / `.saveAndClose` / `.close` into app-level actions.
+    /// Stored non-Observable via `_` to avoid Observable diff churn on assignment.
+    @ObservationIgnored public var onEffect: ((VimEffect) -> Void)?
 
     public init(initialText: String = "") {
         self.buffer = TextBuffer(text: initialText, cursor: 0)
@@ -42,6 +46,10 @@ public final class VimController {
         // `d` interoperate with Cmd+V outside the editor.
         if state.defaultRegister != previousRegister, !state.defaultRegister.text.isEmpty {
             writeToSystemPasteboard(state.defaultRegister.text)
+        }
+
+        if let effect = result.effect {
+            onEffect?(effect)
         }
     }
 

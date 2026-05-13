@@ -68,8 +68,23 @@ struct NoteDetailView: View {
                     get: { editor.currentText },
                     set: { editor.currentText = $0 }
                 ),
-                onModeChange: { vimMode = $0 }
+                onModeChange: { vimMode = $0 },
+                onEffect: { effect in
+                    handleVimEffect(effect, editor: editor)
+                }
             )
+        }
+    }
+
+    private func handleVimEffect(_ effect: VimEffect, editor: EditorState) {
+        switch effect {
+        case .save:
+            editor.save()
+        case .saveAndClose:
+            editor.save()
+            mode = .view
+        case .close:
+            mode = .view
         }
     }
 }

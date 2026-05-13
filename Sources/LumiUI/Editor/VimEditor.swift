@@ -8,12 +8,18 @@ import LumiKit
 public struct VimEditor: View {
     @Binding var text: String
     let onModeChange: ((VimMode) -> Void)?
+    let onEffect: ((VimEffect) -> Void)?
 
     @State private var controller: VimController
 
-    public init(text: Binding<String>, onModeChange: ((VimMode) -> Void)? = nil) {
+    public init(
+        text: Binding<String>,
+        onModeChange: ((VimMode) -> Void)? = nil,
+        onEffect: ((VimEffect) -> Void)? = nil
+    ) {
         self._text = text
         self.onModeChange = onModeChange
+        self.onEffect = onEffect
         self._controller = State(initialValue: VimController(initialText: text.wrappedValue))
     }
 
@@ -46,6 +52,7 @@ public struct VimEditor: View {
             onModeChange?(mode)
         }
         .onAppear {
+            controller.onEffect = onEffect
             onModeChange?(controller.state.mode)
         }
         .background(theme.background)
