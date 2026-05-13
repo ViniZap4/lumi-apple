@@ -72,7 +72,7 @@ final class VimAppKitTextView: NSTextView {
             return
         }
 
-        if let input = VimKeyMapper.map(event: event) {
+        if let input = VimKeyMapper.map(event: event, mode: controller.state.mode) {
             Task { @MainActor in controller.send(input) }
             return
         }
@@ -194,7 +194,7 @@ final class VimUIKitTextView: UITextView {
                 super.pressesBegan(presses, with: event)
                 return
             }
-            if let input = VimKeyMapper.map(key: key) {
+            if let input = VimKeyMapper.map(key: key, mode: controller.state.mode) {
                 Task { @MainActor in controller.send(input) }
                 return
             }

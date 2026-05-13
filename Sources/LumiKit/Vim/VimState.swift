@@ -31,6 +31,20 @@ public struct VimState: Sendable, Hashable {
     /// match decorations without forgetting `lastSearch` — so `n`/`N` keep
     /// working. Any successful search clears the flag back to false.
     public var hlsearchSuspended: Bool
+    /// Ex command history (`:` only). Oldest→newest; bounded by
+    /// `VimState.commandLineHistoryLimit`. Appended on `<CR>`; skips empty
+    /// and duplicates of the most-recent entry.
+    public var exHistory: [String]
+    /// Search history (`/` and `?` share). Same shape as `exHistory`.
+    public var searchHistory: [String]
+    /// While the user is walking command-line history with arrow keys, the
+    /// index into the active history (`exHistory` for `:`, `searchHistory`
+    /// for `/` `?`). `nil` means not walking — typing or `<CR>` clears it.
+    public var commandLineHistoryIndex: Int?
+    /// Saved buffer at the moment the user first pressed up-arrow during a
+    /// command-line session. Restored when arrow-down walks past the newest
+    /// entry. `nil` once navigation ends.
+    public var commandLineHistoryDraft: String?
     /// Default ("unnamed") register — receives the most recent yank/delete.
     public var defaultRegister: Register
     /// Named registers (`"a` … `"z`, `"A` … `"Z`). Yank/delete writes here in
@@ -102,6 +116,10 @@ public struct VimState: Sendable, Hashable {
         lastSearch: SearchMemory? = nil,
         commandLineEntryCursor: Int? = nil,
         hlsearchSuspended: Bool = false,
+        exHistory: [String] = [],
+        searchHistory: [String] = [],
+        commandLineHistoryIndex: Int? = nil,
+        commandLineHistoryDraft: String? = nil,
         defaultRegister: Register = Register(),
         registers: [Character: Register] = [:],
         pendingRegister: Character? = nil,
@@ -134,6 +152,10 @@ public struct VimState: Sendable, Hashable {
         self.lastSearch = lastSearch
         self.commandLineEntryCursor = commandLineEntryCursor
         self.hlsearchSuspended = hlsearchSuspended
+        self.exHistory = exHistory
+        self.searchHistory = searchHistory
+        self.commandLineHistoryIndex = commandLineHistoryIndex
+        self.commandLineHistoryDraft = commandLineHistoryDraft
         self.defaultRegister = defaultRegister
         self.registers = registers
         self.pendingRegister = pendingRegister
@@ -159,6 +181,10 @@ public struct VimState: Sendable, Hashable {
     }
 
     public static let initial = VimState()
+
+    /// Cap on entries kept per command-line history ring. Old entries are
+    /// dropped from the front when this is exceeded.
+    public static let commandLineHistoryLimit = 50
 
     /// Effective count for the next motion/operator: `pendingCount ?? 1`.
     public var effectiveCount: Int { pendingCount ?? 1 }

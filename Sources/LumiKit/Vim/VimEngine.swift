@@ -133,6 +133,13 @@ public enum VimEngine {
         case .controlR:
             return redo(state: state, buffer: buffer)
 
+        case .historyPrev, .historyNext:
+            // Arrow-key history navigation is only meaningful inside
+            // command-line mode. The UI bridge re-maps up/down to .character
+            // outside command-line, so these shouldn't fire here in practice;
+            // ignore defensively if they do.
+            return Result(state: state, buffer: buffer)
+
         case let .character(char):
             return handleNormalCharacter(char, state: state, buffer: buffer)
         }
@@ -434,7 +441,7 @@ public enum VimEngine {
             state.pendingCount = nil
             return clamp(state: state, buffer: buffer)
 
-        case .tab, .controlR:
+        case .tab, .controlR, .historyPrev, .historyNext:
             return Result(state: state, buffer: buffer)
 
         case let .character(char):
@@ -901,6 +908,8 @@ public enum VimEngine {
                 buffer.cursor = snap
             }
             state.commandLineEntryCursor = nil
+            state.commandLineHistoryIndex = nil
+            state.commandLineHistoryDraft = nil
             state.mode = .normal
             state.pendingOperator = nil
             state.pendingCount = nil
@@ -915,6 +924,8 @@ public enum VimEngine {
                     buffer.cursor = snap
                 }
                 state.commandLineEntryCursor = nil
+                state.commandLineHistoryIndex = nil
+                state.commandLineHistoryDraft = nil
                 state.mode = .normal
                 state.pendingOperator = nil
                 state.pendingCount = nil
@@ -923,6 +934,10 @@ public enum VimEngine {
             var newBuffer = currentBuffer
             newBuffer.removeLast()
             state.mode = .commandLine(prefix: prefix, buffer: newBuffer)
+            // Editing the buffer after walking history ends the walk —
+            // subsequent <up> starts over from this new draft.
+            state.commandLineHistoryIndex = nil
+            state.commandLineHistoryDraft = nil
             updateIncrementalPreview(prefix: prefix, pattern: newBuffer, state: &state, buffer: &buffer)
             return Result(state: state, buffer: buffer)
 
@@ -930,10 +945,13 @@ public enum VimEngine {
             // Execute. Branch on the prefix: `:` is an ex command (no buffer
             // motion, may emit a host effect); `/` and `?` are search.
             state.mode = .normal
+            state.commandLineHistoryIndex = nil
+            state.commandLineHistoryDraft = nil
 
             if prefix == ":" {
                 state.pendingOperator = nil
                 state.pendingCount = nil
+                appendToCommandLineHistory(currentBuffer, prefix: prefix, state: &state)
                 switch parseExCommand(currentBuffer) {
                 case .effect(let e):
                     return Result(state: state, buffer: buffer, effect: e)
@@ -954,6 +972,10 @@ public enum VimEngine {
             }
             state.commandLineEntryCursor = nil
 
+            // Record the typed pattern (or the empty buffer + reuse case) in
+            // search history. Empty buffers don't pollute the ring.
+            appendToCommandLineHistory(currentBuffer, prefix: prefix, state: &state)
+
             let direction: SearchDirection = (prefix == "?") ? .backward : .forward
             if currentBuffer.isEmpty {
                 guard let last = state.lastSearch else {
@@ -969,13 +991,111 @@ public enum VimEngine {
             // Ignored while typing a pattern.
             return Result(state: state, buffer: buffer)
 
+        case .historyPrev:
+            return walkHistory(forward: false, prefix: prefix, currentBuffer: currentBuffer, state: state, buffer: buffer)
+
+        case .historyNext:
+            return walkHistory(forward: true, prefix: prefix, currentBuffer: currentBuffer, state: state, buffer: buffer)
+
         case let .character(char):
             var newBuffer = currentBuffer
             newBuffer.append(char)
             state.mode = .commandLine(prefix: prefix, buffer: newBuffer)
+            // Typing ends a history walk — see comment in `.backspace`.
+            state.commandLineHistoryIndex = nil
+            state.commandLineHistoryDraft = nil
             updateIncrementalPreview(prefix: prefix, pattern: newBuffer, state: &state, buffer: &buffer)
             return Result(state: state, buffer: buffer)
         }
+    }
+
+    /// Append `entry` to the appropriate history ring. Skips empty strings and
+    /// duplicates of the most recent entry; caps the ring at
+    /// `VimState.commandLineHistoryLimit`.
+    private static func appendToCommandLineHistory(_ entry: String, prefix: Character, state: inout VimState) {
+        guard !entry.isEmpty else { return }
+        switch prefix {
+        case ":":
+            guard state.exHistory.last != entry else { return }
+            state.exHistory.append(entry)
+            if state.exHistory.count > VimState.commandLineHistoryLimit {
+                state.exHistory.removeFirst(state.exHistory.count - VimState.commandLineHistoryLimit)
+            }
+        case "/", "?":
+            guard state.searchHistory.last != entry else { return }
+            state.searchHistory.append(entry)
+            if state.searchHistory.count > VimState.commandLineHistoryLimit {
+                state.searchHistory.removeFirst(state.searchHistory.count - VimState.commandLineHistoryLimit)
+            }
+        default:
+            break
+        }
+    }
+
+    private static func commandLineHistory(for prefix: Character, state: VimState) -> [String] {
+        switch prefix {
+        case ":": return state.exHistory
+        case "/", "?": return state.searchHistory
+        default: return []
+        }
+    }
+
+    /// Step the history cursor older (forward: false) or newer (forward: true).
+    /// On the first older-step we snapshot the user's draft so a newer-step
+    /// past the most recent entry can restore it.
+    private static func walkHistory(
+        forward: Bool,
+        prefix: Character,
+        currentBuffer: String,
+        state inState: VimState,
+        buffer inBuffer: TextBuffer
+    ) -> Result {
+        var state = inState
+        var buffer = inBuffer
+        let history = commandLineHistory(for: prefix, state: state)
+        guard !history.isEmpty else {
+            return Result(state: state, buffer: buffer)
+        }
+
+        let newIndex: Int?
+        if forward {
+            guard let idx = state.commandLineHistoryIndex else {
+                // Not walking; <down> is a no-op (vim shows an empty drafted
+                // buffer, but since we never started walking there's nothing
+                // to step toward).
+                return Result(state: state, buffer: buffer)
+            }
+            if idx >= history.count - 1 {
+                newIndex = nil // walked past newest → restore draft
+            } else {
+                newIndex = idx + 1
+            }
+        } else {
+            if let idx = state.commandLineHistoryIndex {
+                if idx > 0 {
+                    newIndex = idx - 1
+                } else {
+                    return Result(state: state, buffer: buffer) // already at oldest
+                }
+            } else {
+                // First <up>: snapshot draft, jump to most recent.
+                state.commandLineHistoryDraft = currentBuffer
+                newIndex = history.count - 1
+            }
+        }
+
+        let displayed: String
+        if let idx = newIndex {
+            displayed = history[idx]
+            state.commandLineHistoryIndex = idx
+        } else {
+            displayed = state.commandLineHistoryDraft ?? ""
+            state.commandLineHistoryIndex = nil
+            state.commandLineHistoryDraft = nil
+        }
+        state.mode = .commandLine(prefix: prefix, buffer: displayed)
+        updateIncrementalPreview(prefix: prefix, pattern: displayed, state: &state, buffer: &buffer)
+        return Result(state: state, buffer: buffer)
     }
 
     /// Incsearch live preview. Called whenever the pattern buffer changes
@@ -1197,6 +1317,9 @@ public enum VimEngine {
             if case let .character(char) = input {
                 insertString(String(char), state: &state, buffer: &buffer)
             }
+            return Result(state: state, buffer: buffer)
+
+        case .historyPrev, .historyNext:
             return Result(state: state, buffer: buffer)
         }
     }

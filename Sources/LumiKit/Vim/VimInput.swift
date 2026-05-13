@@ -22,4 +22,14 @@ public enum VimInput: Sendable, Hashable {
 
     /// Ctrl-R — redo in normal mode.
     case controlR
+
+    /// Up arrow while in command-line mode — recall older history entry.
+    /// Outside command-line, the UI bridge translates up/down arrows into
+    /// `h`/`j`/`k`/`l` motions before reaching the engine, so these cases
+    /// are only produced while typing a `/`, `?`, or `:` pattern.
+    case historyPrev
+
+    /// Down arrow while in command-line mode — step toward newer entries
+    /// (eventually restoring the user's typed draft).
+    case historyNext
 }
