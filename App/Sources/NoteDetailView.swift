@@ -254,9 +254,19 @@ private struct ReadModeScroll<Content: View>: View {
 #if os(macOS)
 import AppKit
 
+/// NSScrollView host that reuses one `NSHostingController` across SwiftUI
+/// updates. Previous version recreated the host on every `updateNSView`,
+/// leaving dangling Auto Layout constraints anchored to deallocated views
+/// — those crashed the app the moment scrolling tried to lay out content
+/// for a freshly-opened note.
+///
+/// The hosting controller's `rootView` is mutated in place via the
+/// coordinator, which is the supported pattern for SwiftUI-in-AppKit hosts.
 private struct NativeScrollHost<Content: View>: NSViewRepresentable {
     let jkEnabled: Bool
     @ViewBuilder var content: () -> Content
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = KeyAwareScrollView()
@@ -269,49 +279,30 @@ private struct NativeScrollHost<Content: View>: NSViewRepresentable {
         scroll.scrollerStyle = .overlay
         scroll.jkEnabled = jkEnabled
 
-        let host = NSHostingController(rootView: content())
+        let host = NSHostingController(rootView: AnyView(content()))
         host.view.translatesAutoresizingMaskIntoConstraints = false
-        let flipped = FlippedClipContainer()
-        flipped.translatesAutoresizingMaskIntoConstraints = false
-        flipped.addSubview(host.view)
-        NSLayoutConstraint.activate([
-            host.view.topAnchor.constraint(equalTo: flipped.topAnchor),
-            host.view.leadingAnchor.constraint(equalTo: flipped.leadingAnchor),
-            host.view.trailingAnchor.constraint(equalTo: flipped.trailingAnchor),
-            host.view.bottomAnchor.constraint(equalTo: flipped.bottomAnchor),
-            flipped.widthAnchor.constraint(equalTo: scroll.widthAnchor)
-        ])
+        context.coordinator.host = host
 
-        scroll.documentView = flipped
+        scroll.documentView = host.view
+
+        // Pin the hosted view's width to the clip view so it never grows
+        // horizontally (only vertically as content reflows for scrolling).
+        NSLayoutConstraint.activate([
+            host.view.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor)
+        ])
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         (scroll as? KeyAwareScrollView)?.jkEnabled = jkEnabled
-        // Re-host the SwiftUI content tree so updates land. We rebuild a
-        // new NSHostingController on each update — heavy on first glance
-        // but cheap in practice because SwiftUI itself diffs the actual
-        // view tree underneath.
-        guard let flipped = scroll.documentView else { return }
-        for sub in flipped.subviews { sub.removeFromSuperview() }
-        let host = NSHostingController(rootView: content())
-        host.view.translatesAutoresizingMaskIntoConstraints = false
-        flipped.addSubview(host.view)
-        NSLayoutConstraint.activate([
-            host.view.topAnchor.constraint(equalTo: flipped.topAnchor),
-            host.view.leadingAnchor.constraint(equalTo: flipped.leadingAnchor),
-            host.view.trailingAnchor.constraint(equalTo: flipped.trailingAnchor),
-            host.view.bottomAnchor.constraint(equalTo: flipped.bottomAnchor)
-        ])
+        // Mutate the existing host's root view — SwiftUI diffs the underlying
+        // tree, no AppKit subview thrashing.
+        context.coordinator.host?.rootView = AnyView(content())
     }
-}
 
-/// NSScrollView's clip view defaults to non-flipped coordinates (origin
-/// bottom-left), which makes scrolling math counter-intuitive. A flipped
-/// host gives us standard top-down coordinates so j scrolls "down" matches
-/// the bouncy native feel.
-private final class FlippedClipContainer: NSView {
-    override var isFlipped: Bool { true }
+    final class Coordinator {
+        var host: NSHostingController<AnyView>?
+    }
 }
 
 /// Subclass that intercepts j/k/g/G keys when its `jkEnabled` flag is set.
