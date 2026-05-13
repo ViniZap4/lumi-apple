@@ -52,24 +52,12 @@ struct NoteDetailView: View {
         switch mode {
         case .view:
             ReadModeScroll(jkEnabled: appState.preferences.jkScrollInView) {
-                VStack(alignment: .leading, spacing: 18) {
-                    Text(displayTitle)
-                        .font(.system(size: 32, weight: .semibold))
-                        .foregroundStyle(theme.text)
-                    if !displayTags.isEmpty {
-                        HStack(spacing: 6) {
-                            ForEach(displayTags, id: \.self) { tag in
-                                TagChip(tag: tag)
-                            }
-                        }
-                    }
-                    let document = MarkdownParser.parse(editor.currentText, baseURL: baseURL)
-                    MarkdownView(document)
-                }
-                .padding(.horizontal, 32)
-                .padding(.vertical, 24)
-                .frame(maxWidth: 820, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                MarkdownReader(
+                    title: displayTitle,
+                    tags: displayTags,
+                    text: editor.currentText,
+                    baseURL: baseURL
+                )
             }
         case .edit:
             VimEditor(
@@ -191,74 +179,209 @@ private struct DetailToolbar: View {
     }
 }
 
+/// Renders the parsed markdown document for read-mode. Memoizes the parse
+/// step so each scroll/repaint doesn't re-parse the whole note — for large
+/// notes the parser is the dominant cost. We key the cache on the raw text
+/// string; SwiftUI calls `body` whenever editor.currentText flips, so the
+/// `.onChange` reruns the parser only then.
+private struct MarkdownReader: View {
+    let title: String
+    let tags: [String]
+    let text: String
+    let baseURL: URL?
+    @Environment(\.theme) private var theme
+    @State private var parsed: MarkdownDocument?
+    @State private var parsedFor: String = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text(title)
+                .font(.system(size: 32, weight: .semibold))
+                .foregroundStyle(theme.text)
+            if !tags.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(tags, id: \.self) { tag in
+                        TagChip(tag: tag)
+                    }
+                }
+            }
+            if let parsed {
+                MarkdownView(parsed)
+            } else {
+                Text("loading…")
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundStyle(theme.textDim)
+            }
+        }
+        .padding(.horizontal, 32)
+        .padding(.vertical, 24)
+        .frame(maxWidth: 820, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear { reparseIfNeeded() }
+        .onChange(of: text) { _, _ in reparseIfNeeded() }
+    }
+
+    private func reparseIfNeeded() {
+        guard text != parsedFor else { return }
+        parsedFor = text
+        parsed = MarkdownParser.parse(text, baseURL: baseURL)
+    }
+}
+
 /// macOS-focused scroll container that supports `j` / `k` keyboard scrolling
 /// when the host enables it via preferences. iOS falls back to a plain
 /// ScrollView with no key intercept (tap/drag/scroll wheel still work
 /// everywhere).
 ///
-/// `anchorFraction` tracks the desired top-of-view position as a 0…1 fraction
-/// of the content's height. `j` and `k` nudge it; `gg` / `G` jump to the
-/// edges. SwiftUI's `ScrollViewProxy.scrollTo(_:anchor:)` is the only knob we
-/// have on stock ScrollView, so we ride that — it's approximate but feels
-/// right at the reading granularity we care about.
+/// macOS path uses a real `NSScrollView` (via NSViewRepresentable) so we can
+/// call `documentView?.scroll(to:)` with precise pixel deltas — much
+/// smoother than SwiftUI's `ScrollViewProxy.scrollTo(_:anchor:)` which only
+/// supports fractional anchors. j/k step by one line-height; g/G jump to
+/// ends. Holding j/k animates through native scroll deceleration.
 private struct ReadModeScroll<Content: View>: View {
     let jkEnabled: Bool
     @ViewBuilder let content: () -> Content
 
-    /// Step size as a fraction of content height per j/k press. Small enough
-    /// that holding the key produces smooth-ish movement; big enough that a
-    /// few presses traverse a typical note.
-    private let stepFraction: CGFloat = 0.05
-
-    @State private var anchorFraction: CGFloat = 0
-    @FocusState private var scrollFocused: Bool
-
     var body: some View {
         #if os(macOS)
-        ScrollViewReader { proxy in
-            ScrollView {
-                content()
-                    .id("readContent")
-            }
-            .focusable()
-            .focused($scrollFocused)
-            .onAppear { if jkEnabled { scrollFocused = true } }
-            .onKeyPress(phases: .down) { press in
-                guard jkEnabled else { return .ignored }
-                switch press.characters {
-                case "j":
-                    nudge(by: stepFraction, proxy: proxy)
-                    return .handled
-                case "k":
-                    nudge(by: -stepFraction, proxy: proxy)
-                    return .handled
-                case "g":
-                    anchorFraction = 0
-                    withAnimation { proxy.scrollTo("readContent", anchor: .top) }
-                    return .handled
-                case "G":
-                    anchorFraction = 1
-                    withAnimation { proxy.scrollTo("readContent", anchor: .bottom) }
-                    return .handled
-                default:
-                    return .ignored
-                }
-            }
-        }
+        NativeScrollHost(jkEnabled: jkEnabled, content: content)
         #else
         ScrollView { content() }
         #endif
     }
+}
 
-    #if os(macOS)
-    private func nudge(by delta: CGFloat, proxy: ScrollViewProxy) {
-        anchorFraction = max(0, min(1, anchorFraction + delta))
-        withAnimation(.linear(duration: 0.08)) {
-            proxy.scrollTo("readContent", anchor: UnitPoint(x: 0, y: anchorFraction))
+#if os(macOS)
+import AppKit
+
+private struct NativeScrollHost<Content: View>: NSViewRepresentable {
+    let jkEnabled: Bool
+    @ViewBuilder var content: () -> Content
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = KeyAwareScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.verticalScrollElasticity = .allowed
+        scroll.scrollerStyle = .overlay
+        scroll.jkEnabled = jkEnabled
+
+        let host = NSHostingController(rootView: content())
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        let flipped = FlippedClipContainer()
+        flipped.translatesAutoresizingMaskIntoConstraints = false
+        flipped.addSubview(host.view)
+        NSLayoutConstraint.activate([
+            host.view.topAnchor.constraint(equalTo: flipped.topAnchor),
+            host.view.leadingAnchor.constraint(equalTo: flipped.leadingAnchor),
+            host.view.trailingAnchor.constraint(equalTo: flipped.trailingAnchor),
+            host.view.bottomAnchor.constraint(equalTo: flipped.bottomAnchor),
+            flipped.widthAnchor.constraint(equalTo: scroll.widthAnchor)
+        ])
+
+        scroll.documentView = flipped
+        return scroll
+    }
+
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        (scroll as? KeyAwareScrollView)?.jkEnabled = jkEnabled
+        // Re-host the SwiftUI content tree so updates land. We rebuild a
+        // new NSHostingController on each update — heavy on first glance
+        // but cheap in practice because SwiftUI itself diffs the actual
+        // view tree underneath.
+        guard let flipped = scroll.documentView else { return }
+        for sub in flipped.subviews { sub.removeFromSuperview() }
+        let host = NSHostingController(rootView: content())
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        flipped.addSubview(host.view)
+        NSLayoutConstraint.activate([
+            host.view.topAnchor.constraint(equalTo: flipped.topAnchor),
+            host.view.leadingAnchor.constraint(equalTo: flipped.leadingAnchor),
+            host.view.trailingAnchor.constraint(equalTo: flipped.trailingAnchor),
+            host.view.bottomAnchor.constraint(equalTo: flipped.bottomAnchor)
+        ])
+    }
+}
+
+/// NSScrollView's clip view defaults to non-flipped coordinates (origin
+/// bottom-left), which makes scrolling math counter-intuitive. A flipped
+/// host gives us standard top-down coordinates so j scrolls "down" matches
+/// the bouncy native feel.
+private final class FlippedClipContainer: NSView {
+    override var isFlipped: Bool { true }
+}
+
+/// Subclass that intercepts j/k/g/G keys when its `jkEnabled` flag is set.
+/// Everything else (arrows, page up/down, scroll wheel) goes through normal
+/// NSScrollView handling, so users still get native momentum + elastic
+/// bounce.
+private final class KeyAwareScrollView: NSScrollView {
+    var jkEnabled: Bool = false
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        guard jkEnabled, let chars = event.charactersIgnoringModifiers else {
+            super.keyDown(with: event)
+            return
+        }
+        let lineStep: CGFloat = 24      // one comfortable text line
+        let pageStep: CGFloat = bounds.height - 40
+        switch chars {
+        case "j":
+            scrollBy(lineStep); return
+        case "k":
+            scrollBy(-lineStep); return
+        case "d":
+            // half-page down — matches vim's <C-d>
+            scrollBy(pageStep / 2); return
+        case "u":
+            scrollBy(-pageStep / 2); return
+        case "g":
+            scrollToTop(); return
+        case "G":
+            scrollToBottom(); return
+        default:
+            super.keyDown(with: event)
         }
     }
-    #endif
+
+    private func scrollBy(_ dy: CGFloat) {
+        guard let clip = contentView as NSClipView?, let doc = documentView else { return }
+        let current = clip.bounds.origin
+        let maxY = max(0, doc.bounds.height - clip.bounds.height)
+        let nextY = max(0, min(maxY, current.y + dy))
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.10
+            ctx.allowsImplicitAnimation = true
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            clip.animator().setBoundsOrigin(NSPoint(x: current.x, y: nextY))
+        } completionHandler: { [weak self] in
+            self?.reflectScrolledClipView(clip)
+        }
+    }
+
+    private func scrollToTop() {
+        guard let clip = contentView as NSClipView? else { return }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.18
+            clip.animator().setBoundsOrigin(.zero)
+        }
+    }
+
+    private func scrollToBottom() {
+        guard let clip = contentView as NSClipView?, let doc = documentView else { return }
+        let maxY = max(0, doc.bounds.height - clip.bounds.height)
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.18
+            clip.animator().setBoundsOrigin(NSPoint(x: 0, y: maxY))
+        }
+    }
 }
+#endif
 
 private struct VimModeBadge: View {
     let vimMode: VimMode

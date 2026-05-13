@@ -20,6 +20,11 @@ final class AppState {
     /// cheap even when the vault has millions of notes.
     var rootFolder: FolderNode?
 
+    /// Three-column browser state — drives the parent / current / preview
+    /// columns when no note is open. Created fresh each time the active
+    /// vault changes (so the cursor/path stack reset cleanly).
+    var browserState: TreeBrowserState?
+
     /// Currently selected note's lightweight handle. Set by tree row taps
     /// (or quick-switcher selection); read by the detail view to drive the
     /// editor load. Holding the entry here means the detail view doesn't

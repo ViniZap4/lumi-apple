@@ -93,7 +93,6 @@ struct RootView: View {
 
     @ViewBuilder
     private var mainContent: some View {
-        @Bindable var bound = appState
         if let entry = appState.selectedEntry, let session = appState.session {
             NoteDetailView(
                 entry: entry,
@@ -102,12 +101,11 @@ struct RootView: View {
             )
         } else if let vaultID = appState.selectedVaultID,
                   let vault = vaults.first(where: { $0.id == vaultID }),
-                  let root = appState.rootFolder {
-            NoteListView(
-                vault: vault,
-                rootFolder: root,
-                selectedNoteID: $bound.selectedNoteID,
-                onSelect: selectNote
+                  let browser = appState.browserState {
+            TreeBrowserView(
+                state: browser,
+                vaultName: vault.name,
+                onOpen: selectNote
             )
         } else if let remoteID = appState.selectedRemoteVaultID,
                   let remote = appState.remoteVaultsStore.vaults.first(where: { $0.id == remoteID }) {
@@ -140,17 +138,15 @@ struct RootView: View {
         guard let session = VaultSession.open(record: record) else {
             appState.setSession(nil)
             appState.rootFolder = nil
+            appState.browserState = nil
             appState.selectedVaultID = nil
             return
         }
         appState.setSession(session)
         let root = session.rootFolder()
-        // Load the immediate children synchronously so the tree shows
-        // something the moment the user picks a vault. Subfolders stay
-        // unloaded until expanded — the vault-open cost is one syscall,
-        // independent of vault size.
         root.loadIfNeeded()
         appState.rootFolder = root
+        appState.browserState = TreeBrowserState(root: root)
         appState.selectedVaultID = record.id
         record.lastOpenedAt = Date()
     }
