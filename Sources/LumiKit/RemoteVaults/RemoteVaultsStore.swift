@@ -166,6 +166,46 @@ public final class RemoteVaultsStore {
         await refreshInvites()
     }
 
+    /// Create a new vault server-side and prepend it to the local cache.
+    /// Caller becomes Admin. Returns the created vault so the UI can select
+    /// it without waiting for a full list refresh.
+    @discardableResult
+    public func createVault(name: String, slug: String? = nil) async throws(LumiAPIError) -> RemoteVault {
+        let vault = try await client.createVault(name: name, slug: slug)
+        // Server returns the canonical row; insert at the top so newest is
+        // most visible. Avoid dupes if a refresh happens concurrently.
+        if !vaults.contains(where: { $0.id == vault.id }) {
+            vaults.insert(vault, at: 0)
+        }
+        return vault
+    }
+
+    /// Rename the given vault. Updates the cached row and (if it's the
+    /// currently selected vault) keeps `selectedVaultID` intact.
+    @discardableResult
+    public func renameVault(vaultID: UUID, name: String) async throws(LumiAPIError) -> RemoteVault {
+        let updated = try await client.renameVault(vaultID: vaultID, name: name)
+        if let idx = vaults.firstIndex(where: { $0.id == vaultID }) {
+            vaults[idx] = updated
+        }
+        return updated
+    }
+
+    /// Delete the given vault server-side. Drops it from the cache; clears
+    /// the active selection if it was that vault.
+    public func deleteVault(vaultID: UUID) async throws(LumiAPIError) {
+        try await client.deleteVault(vaultID: vaultID)
+        vaults.removeAll { $0.id == vaultID }
+        if selectedVaultID == vaultID {
+            selectedVaultID = nil
+            members = []
+            roles = []
+            invites = []
+            auditEntries = []
+            auditHasMore = false
+        }
+    }
+
     /// Wipe all state. Call on sign-out so the next sign-in starts clean.
     public func clear() {
         vaults = []

@@ -355,6 +355,85 @@ struct LumiAPIClientVaultTests {
         try await client.revokeInvite(vaultID: vaultID, token: "abc")
     }
 
+    @Test("createVault returns the vault DTO")
+    func createVaultRoundtrip() async throws {
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/vaults")
+            #expect(request.httpMethod == "POST")
+            #expect(request.value(forHTTPHeaderField: "X-Lumi-Token") == "tok")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil)!
+            let body = """
+            {"id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301","slug":"work",
+             "name":"Work","created_by":"3F2504E0-4F89-11D3-9A0C-0305E82C3302",
+             "created_at":"2026-05-13T10:00:00Z"}
+            """.data(using: .utf8)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let vault = try await client.createVault(name: "Work", slug: "work")
+        #expect(vault.name == "Work")
+        #expect(vault.slug == "work")
+    }
+
+    @Test("createVault surfaces slug_taken on collision")
+    func createVaultSlugTaken() async throws {
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 409, httpVersion: nil, headerFields: nil)!
+            let body = #"{"error":"slug_taken","detail":"work"}"#.data(using: .utf8)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let thrown = await catchAPIError {
+            _ = try await client.createVault(name: "Work", slug: "work")
+        }
+        if case let .server(status, code, _) = thrown {
+            #expect(status == 409)
+            #expect(code == "slug_taken")
+        } else {
+            Issue.record("expected .server slug_taken, got \(String(describing: thrown))")
+        }
+    }
+
+    @Test("renameVault PATCHes and decodes the updated DTO")
+    func renameVaultRoundtrip() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/vaults/3f2504e0-4f89-11d3-9a0c-0305e82c3301")
+            #expect(request.httpMethod == "PATCH")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = """
+            {"id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301","slug":"work",
+             "name":"Work Renamed","created_by":"3F2504E0-4F89-11D3-9A0C-0305E82C3302",
+             "created_at":"2026-05-13T10:00:00Z"}
+            """.data(using: .utf8)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let updated = try await client.renameVault(vaultID: vaultID, name: "Work Renamed")
+        #expect(updated.name == "Work Renamed")
+    }
+
+    @Test("deleteVault issues DELETE and returns void")
+    func deleteVaultRoundtrip() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/vaults/3f2504e0-4f89-11d3-9a0c-0305e82c3301")
+            #expect(request.httpMethod == "DELETE")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 204, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        try await client.deleteVault(vaultID: vaultID)
+    }
+
     @Test("listAuditEntries decodes entries + pagination meta")
     func auditList() async throws {
         let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!

@@ -126,6 +126,31 @@ public actor LumiAPIClient {
         try await request(method: "GET", path: "/api/vaults/\(id.uuidString.lowercased())", body: nil as EmptyBody?, requireToken: true)
     }
 
+    /// `POST /api/vaults` — create a new vault. Caller becomes its Admin.
+    /// `slug` is optional; the server derives one from `name` when omitted.
+    /// On slug collision the server returns 409 with code `slug_taken`.
+    public func createVault(name: String, slug: String? = nil) async throws(LumiAPIError) -> RemoteVault {
+        let body = CreateVaultRequest(name: name, slug: slug?.isEmpty == true ? nil : slug)
+        return try await request(method: "POST", path: "/api/vaults", body: body, requireToken: true)
+    }
+
+    /// `PATCH /api/vaults/:vault` — rename. Capability `vault.manage` required.
+    public func renameVault(vaultID: UUID, name: String) async throws(LumiAPIError) -> RemoteVault {
+        let body = UpdateVaultRequest(name: name)
+        return try await request(method: "PATCH", path: "/api/vaults/\(vaultID.uuidString.lowercased())", body: body, requireToken: true)
+    }
+
+    /// `DELETE /api/vaults/:vault` — destructive. Capability `vault.manage`
+    /// required. Server returns 204.
+    public func deleteVault(vaultID: UUID) async throws(LumiAPIError) {
+        let _: EmptyResponse = try await request(
+            method: "DELETE",
+            path: "/api/vaults/\(vaultID.uuidString.lowercased())",
+            body: EmptyBody(),
+            requireToken: true
+        )
+    }
+
     /// `GET /api/vaults/:vault/members`.
     public func listMembers(vaultID: UUID) async throws(LumiAPIError) -> [RemoteMember] {
         let envelope: MemberListResponse = try await request(method: "GET", path: "/api/vaults/\(vaultID.uuidString.lowercased())/members", body: nil as EmptyBody?, requireToken: true)
@@ -376,6 +401,15 @@ struct ServerErrorEnvelope: Decodable, Sendable {
 
 struct VaultListResponse: Decodable, Sendable {
     let vaults: [RemoteVault]
+}
+
+struct CreateVaultRequest: Codable, Sendable {
+    let name: String
+    let slug: String?
+}
+
+struct UpdateVaultRequest: Codable, Sendable {
+    let name: String
 }
 
 struct MemberListResponse: Decodable, Sendable {

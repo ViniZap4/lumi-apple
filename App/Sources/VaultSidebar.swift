@@ -10,6 +10,7 @@ struct VaultSidebar: View {
     let onSelect: (VaultRecord) -> Void
 
     @State private var showImporter = false
+    @State private var showCreateRemoteVault = false
     @Environment(\.theme) private var theme
     @Environment(AppState.self) private var appState
 
@@ -52,6 +53,14 @@ struct VaultSidebar: View {
                         }
                     }
                     Button {
+                        showCreateRemoteVault = true
+                    } label: {
+                        Label("New vault…", systemImage: "plus.circle")
+                            .font(.system(.callout, design: .monospaced))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(theme.primary)
+                    Button {
                         Task { await appState.remoteVaultsStore.refresh() }
                     } label: {
                         Label("Refresh", systemImage: "arrow.clockwise")
@@ -88,6 +97,11 @@ struct VaultSidebar: View {
             if case let .success(urls) = result, let url = urls.first {
                 onAdd(url)
             }
+        }
+        .sheet(isPresented: $showCreateRemoteVault) {
+            CreateVaultSheet()
+                .environment(appState)
+                .environment(\.theme, theme)
         }
     }
 

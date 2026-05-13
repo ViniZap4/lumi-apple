@@ -10,6 +10,10 @@ struct RemoteVaultDetailView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
     @State private var showCreateInvite: Bool = false
+    @State private var isEditingName: Bool = false
+    @State private var editedName: String = ""
+    @State private var showDeleteConfirm: Bool = false
+    @State private var manageError: String?
 
     var body: some View {
         ScrollView {
@@ -31,6 +35,75 @@ struct RemoteVaultDetailView: View {
             CreateInviteSheet(vault: vault, roles: appState.remoteVaultsStore.roles)
                 .environment(appState)
                 .environment(\.theme, theme)
+        }
+        .confirmationDialog(
+            "Delete vault \"\(vault.name)\"?",
+            isPresented: $showDeleteConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Delete vault", role: .destructive) { Task { await commitDelete() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently removes the vault on the server, including all notes and member rows. This action cannot be undone.")
+        }
+    }
+
+    /// `vault.manage` capability check against the current session's member row.
+    private var canManageVault: Bool {
+        guard let session = appState.authService.currentSession else { return false }
+        let me = appState.remoteVaultsStore.members.first { $0.username == session.user.username }
+        guard let caps = me?.capabilities else { return false }
+        return caps.contains { $0 == "*" || $0 == "vault.*" || $0 == "vault.manage" }
+    }
+
+    private func commitRename() async {
+        manageError = nil
+        let trimmed = editedName.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, trimmed != vault.name else {
+            isEditingName = false
+            return
+        }
+        do {
+            _ = try await appState.remoteVaultsStore.renameVault(vaultID: vault.id, name: trimmed)
+            isEditingName = false
+        } catch let error as LumiAPIError {
+            manageError = describeManage(error)
+        } catch {
+            manageError = error.localizedDescription
+        }
+    }
+
+    private func commitDelete() async {
+        manageError = nil
+        do {
+            try await appState.remoteVaultsStore.deleteVault(vaultID: vault.id)
+            // The store clears selectedVaultID; mirror to AppState so the
+            // detail panel switches back to EmptyVaultPanel.
+            appState.selectedRemoteVaultID = nil
+        } catch let error as LumiAPIError {
+            manageError = describeManage(error)
+        } catch {
+            manageError = error.localizedDescription
+        }
+    }
+
+    private func describeManage(_ error: LumiAPIError) -> String {
+        switch error {
+        case .unauthorized: return "session expired"
+        case .network(let m): return "network error: \(m)"
+        case .server(_, let code, let detail):
+            switch code {
+            case "forbidden":
+                return "you don't have permission to manage this vault (vault.manage)"
+            case "not_found":
+                return "this vault no longer exists on the server"
+            case "validation", "validation_failed":
+                return detail ?? "validation error"
+            default:
+                return detail ?? code
+            }
+        case .invalidResponse(let s): return "unexpected response (HTTP \(s))"
+        case .decoding(let m): return "decode failed: \(m)"
         }
     }
 
@@ -274,10 +347,46 @@ struct RemoteVaultDetailView: View {
             HStack(spacing: 10) {
                 Image(systemName: "cloud.fill")
                     .foregroundStyle(theme.primary)
-                Text(vault.name)
-                    .font(.system(size: 32, weight: .semibold))
-                    .foregroundStyle(theme.text)
+                if isEditingName {
+                    TextField("Vault name", text: $editedName, onCommit: { Task { await commitRename() } })
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.title2, design: .default).weight(.semibold))
+                        .frame(maxWidth: 400)
+                    Button("Save") { Task { await commitRename() } }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(editedName.trimmingCharacters(in: .whitespaces).isEmpty || editedName == vault.name)
+                    Button("Cancel") {
+                        isEditingName = false
+                        editedName = vault.name
+                        manageError = nil
+                    }
+                    .buttonStyle(.borderless)
+                } else {
+                    Text(vault.name)
+                        .font(.system(size: 32, weight: .semibold))
+                        .foregroundStyle(theme.text)
+                }
                 Spacer()
+                if canManageVault, !isEditingName {
+                    Menu {
+                        Button {
+                            editedName = vault.name
+                            isEditingName = true
+                        } label: {
+                            Label("Rename…", systemImage: "pencil")
+                        }
+                        Divider()
+                        Button(role: .destructive) {
+                            showDeleteConfirm = true
+                        } label: {
+                            Label("Delete vault…", systemImage: "trash")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(theme.textDim)
+                }
                 Button {
                     Task { await appState.remoteVaultsStore.selectVault(vault.id) }
                 } label: {
@@ -287,6 +396,11 @@ struct RemoteVaultDetailView: View {
                 .buttonStyle(.borderless)
                 .foregroundStyle(theme.textDim)
                 .disabled(appState.remoteVaultsStore.isLoading)
+            }
+            if let manageError {
+                Text(manageError)
+                    .font(.caption)
+                    .foregroundStyle(theme.error)
             }
             Text(vault.slug)
                 .font(.system(.callout, design: .monospaced))
