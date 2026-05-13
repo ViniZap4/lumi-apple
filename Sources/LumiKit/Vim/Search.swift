@@ -37,8 +37,12 @@ public struct SearchMemory: Sendable, Hashable {
 }
 
 /// Pure regex search over the buffer text. Returns a *character-offset* range
-/// (not UTF-16) of the next match, wrapping around at SOF/EOF. Case-insensitive
-/// by default; smartcase / `\C` honoring is a future addition.
+/// (not UTF-16) of the next match, wrapping around at SOF/EOF.
+///
+/// Case sensitivity follows vim's smartcase: case-insensitive when the pattern
+/// is all lowercase; case-sensitive as soon as it contains any uppercase letter.
+/// `\C` in the pattern forces sensitive; `\c` forces insensitive. Both flags are
+/// stripped before the pattern is compiled.
 ///
 /// Forward semantics: skip the cursor's character itself, scan toward EOF, then
 /// wrap to BOF and scan up to (but not including) the cursor's character.
@@ -48,7 +52,7 @@ public struct SearchMemory: Sendable, Hashable {
 /// for the last match.
 ///
 /// `nil` is returned for:
-///   - empty pattern
+///   - empty pattern (or one that becomes empty after stripping \C/\c)
 ///   - pattern that fails to compile as an `NSRegularExpression`
 ///   - no match anywhere in the buffer
 public func nextMatch(
@@ -58,7 +62,10 @@ public func nextMatch(
     direction: SearchDirection
 ) -> Range<Int>? {
     guard !pattern.isEmpty else { return nil }
-    guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+    let analysis = analyzeCaseFlags(pattern)
+    guard !analysis.effectivePattern.isEmpty else { return nil }
+    let options: NSRegularExpression.Options = analysis.caseInsensitive ? [.caseInsensitive] : []
+    guard let regex = try? NSRegularExpression(pattern: analysis.effectivePattern, options: options) else {
         return nil
     }
     let nsText = text as NSString
@@ -97,6 +104,55 @@ public func nextMatch(
         }
         return nil
     }
+}
+
+/// Result of stripping vim's case-flag escapes (`\C`, `\c`) from a pattern and
+/// deciding effective case sensitivity. `\C` wins over `\c`; absent both,
+/// smartcase applies: insensitive unless the pattern contains an uppercase
+/// letter. Non-flag backslash escapes (`\d`, `\.`, `\\`, …) pass through
+/// untouched.
+struct CaseFlagAnalysis: Sendable, Hashable {
+    let effectivePattern: String
+    let caseInsensitive: Bool
+}
+
+func analyzeCaseFlags(_ pattern: String) -> CaseFlagAnalysis {
+    var stripped = ""
+    stripped.reserveCapacity(pattern.count)
+    var sawExplicitSensitive = false
+    var sawExplicitInsensitive = false
+
+    var iterator = pattern.makeIterator()
+    while let c = iterator.next() {
+        guard c == "\\" else {
+            stripped.append(c)
+            continue
+        }
+        guard let next = iterator.next() else {
+            // Trailing backslash — keep so the regex compiler can decide.
+            stripped.append(c)
+            break
+        }
+        switch next {
+        case "C":
+            sawExplicitSensitive = true
+        case "c":
+            sawExplicitInsensitive = true
+        default:
+            stripped.append(c)
+            stripped.append(next)
+        }
+    }
+
+    let caseInsensitive: Bool
+    if sawExplicitSensitive {
+        caseInsensitive = false
+    } else if sawExplicitInsensitive {
+        caseInsensitive = true
+    } else {
+        caseInsensitive = !stripped.contains(where: { $0.isUppercase })
+    }
+    return CaseFlagAnalysis(effectivePattern: stripped, caseInsensitive: caseInsensitive)
 }
 
 private func firstMatch(regex: NSRegularExpression, in text: NSString, range: NSRange) -> NSTextCheckingResult? {
