@@ -27,6 +27,12 @@ struct LumiApp: App {
         #if os(macOS)
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1200, height: 760)
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { appState.showSettings = true }
+                    .keyboardShortcut(",", modifiers: [.command])
+            }
+        }
         #endif
     }
 }

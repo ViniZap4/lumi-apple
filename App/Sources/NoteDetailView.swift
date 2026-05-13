@@ -41,7 +41,7 @@ struct NoteDetailView: View {
     private func content(editor: EditorState) -> some View {
         switch mode {
         case .view:
-            ScrollView {
+            ReadModeScroll(jkEnabled: appState.preferences.jkScrollInView) {
                 VStack(alignment: .leading, spacing: 18) {
                     Text(note.title)
                         .font(.system(size: 32, weight: .semibold))
@@ -71,8 +71,32 @@ struct NoteDetailView: View {
                 onModeChange: { vimMode = $0 },
                 onEffect: { effect in
                     handleVimEffect(effect, editor: editor)
-                }
+                },
+                jjEscapeEnabled: appState.preferences.jjEscapeMapping
             )
+            .overlay(alignment: .top) {
+                editModeStripe
+            }
+        }
+    }
+
+    /// Thin colored stripe along the top of the editor area. Color reflects
+    /// the active vim mode so the user always knows what keys will do at a
+    /// glance — green for normal, blue for insert, amber for visual, accent
+    /// for command-line. Subtle but always visible.
+    @ViewBuilder
+    private var editModeStripe: some View {
+        Rectangle()
+            .fill(editModeColor)
+            .frame(height: 3)
+    }
+
+    private var editModeColor: Color {
+        switch vimMode {
+        case .insert: return theme.primary
+        case .visual: return theme.warning
+        case .commandLine: return theme.accent
+        case .normal: return theme.info
         }
     }
 
@@ -156,6 +180,75 @@ private struct DetailToolbar: View {
             }
         }
     }
+}
+
+/// macOS-focused scroll container that supports `j` / `k` keyboard scrolling
+/// when the host enables it via preferences. iOS falls back to a plain
+/// ScrollView with no key intercept (tap/drag/scroll wheel still work
+/// everywhere).
+///
+/// `anchorFraction` tracks the desired top-of-view position as a 0…1 fraction
+/// of the content's height. `j` and `k` nudge it; `gg` / `G` jump to the
+/// edges. SwiftUI's `ScrollViewProxy.scrollTo(_:anchor:)` is the only knob we
+/// have on stock ScrollView, so we ride that — it's approximate but feels
+/// right at the reading granularity we care about.
+private struct ReadModeScroll<Content: View>: View {
+    let jkEnabled: Bool
+    @ViewBuilder let content: () -> Content
+
+    /// Step size as a fraction of content height per j/k press. Small enough
+    /// that holding the key produces smooth-ish movement; big enough that a
+    /// few presses traverse a typical note.
+    private let stepFraction: CGFloat = 0.05
+
+    @State private var anchorFraction: CGFloat = 0
+    @FocusState private var scrollFocused: Bool
+
+    var body: some View {
+        #if os(macOS)
+        ScrollViewReader { proxy in
+            ScrollView {
+                content()
+                    .id("readContent")
+            }
+            .focusable()
+            .focused($scrollFocused)
+            .onAppear { if jkEnabled { scrollFocused = true } }
+            .onKeyPress(phases: .down) { press in
+                guard jkEnabled else { return .ignored }
+                switch press.characters {
+                case "j":
+                    nudge(by: stepFraction, proxy: proxy)
+                    return .handled
+                case "k":
+                    nudge(by: -stepFraction, proxy: proxy)
+                    return .handled
+                case "g":
+                    anchorFraction = 0
+                    withAnimation { proxy.scrollTo("readContent", anchor: .top) }
+                    return .handled
+                case "G":
+                    anchorFraction = 1
+                    withAnimation { proxy.scrollTo("readContent", anchor: .bottom) }
+                    return .handled
+                default:
+                    return .ignored
+                }
+            }
+        }
+        #else
+        ScrollView { content() }
+        #endif
+    }
+
+    #if os(macOS)
+    private func nudge(by delta: CGFloat, proxy: ScrollViewProxy) {
+        anchorFraction = max(0, min(1, anchorFraction + delta))
+        withAnimation(.linear(duration: 0.08)) {
+            proxy.scrollTo("readContent", anchor: UnitPoint(x: 0, y: anchorFraction))
+        }
+    }
+    #endif
 }
 
 private struct VimModeBadge: View {

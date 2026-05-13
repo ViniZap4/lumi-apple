@@ -24,6 +24,7 @@ struct RootView: View {
                let vault = vaults.first(where: { $0.id == vaultID }) {
                 NoteListView(
                     vault: vault,
+                    vaultRoot: appState.session?.rootURL,
                     notes: appState.notes,
                     selectedNoteID: $bound.selectedNoteID,
                     onSelect: selectNote
@@ -55,6 +56,18 @@ struct RootView: View {
             ToolbarItem(placement: .primaryAction) {
                 ThemeMenu(selection: $bound.theme)
             }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    appState.showSettings = true
+                } label: {
+                    Image(systemName: "gearshape")
+                }
+            }
+        }
+        .sheet(isPresented: $bound.showSettings) {
+            SettingsSheet()
+                .environment(appState)
+                .environment(\.theme, theme)
         }
         .task { await appState.authService.restore() }
         // When sign-in lands a session, fetch the vault list. On sign-out,

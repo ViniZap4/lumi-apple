@@ -9,17 +9,20 @@ public struct VimEditor: View {
     @Binding var text: String
     let onModeChange: ((VimMode) -> Void)?
     let onEffect: ((VimEffect) -> Void)?
+    let jjEscapeEnabled: Bool
 
     @State private var controller: VimController
 
     public init(
         text: Binding<String>,
         onModeChange: ((VimMode) -> Void)? = nil,
-        onEffect: ((VimEffect) -> Void)? = nil
+        onEffect: ((VimEffect) -> Void)? = nil,
+        jjEscapeEnabled: Bool = false
     ) {
         self._text = text
         self.onModeChange = onModeChange
         self.onEffect = onEffect
+        self.jjEscapeEnabled = jjEscapeEnabled
         self._controller = State(initialValue: VimController(initialText: text.wrappedValue))
     }
 
@@ -54,7 +57,11 @@ public struct VimEditor: View {
         }
         .onAppear {
             controller.onEffect = onEffect
+            controller.setJJEscapeEnabled(jjEscapeEnabled)
             onModeChange?(controller.state.mode)
+        }
+        .onChange(of: jjEscapeEnabled) { _, newValue in
+            controller.setJJEscapeEnabled(newValue)
         }
         .background(theme.background)
     }

@@ -37,6 +37,15 @@ final class AppState {
     /// detail panel doesn't conflict.
     var selectedRemoteVaultID: UUID?
 
+    /// Persisted user preferences (vim nav, jj/jk mappings, etc.). Read by
+    /// views that gate features on user opt-in.
+    let preferences = LumiPreferences()
+
+    /// Whether the Settings sheet is presented. Lives on AppState so the
+    /// Cmd+, keyboard shortcut (defined on the App-level Scene) and the
+    /// toolbar button share state without dueling `@State` containers.
+    var showSettings: Bool = false
+
     init() {
         let auth = AuthService()
         self.authService = auth

@@ -1287,6 +1287,7 @@ public enum VimEngine {
 
         switch input {
         case .escape:
+            state.insertModeLastWasJ = false
             state.mode = .normal
             // vim convention: cursor steps left when leaving insert (unless at line start)
             let line = buffer.cursorLine
@@ -1298,6 +1299,7 @@ public enum VimEngine {
 
         case .return:
             insertString("\n", state: &state, buffer: &buffer)
+            state.insertModeLastWasJ = false
             return Result(state: state, buffer: buffer)
 
         case .backspace:
@@ -1307,19 +1309,48 @@ public enum VimEngine {
                 buffer.text.removeSubrange(before..<idx)
                 buffer.cursor -= 1
             }
+            state.insertModeLastWasJ = false
             return Result(state: state, buffer: buffer)
 
         case .tab:
             insertString("\t", state: &state, buffer: &buffer)
+            state.insertModeLastWasJ = false
             return Result(state: state, buffer: buffer)
 
         case .controlR, .character:
             if case let .character(char) = input {
+                // jj → Esc mapping. Only fires when the user has opted in
+                // via `state.jjEscapeEnabled`, and only when the previous
+                // input also inserted a literal `j` immediately before.
+                // Removes the buffered first `j` and exits insert mode
+                // (with the standard cursor-step-left).
+                if char == "j", state.jjEscapeEnabled, state.insertModeLastWasJ {
+                    // Drop the previous `j` (the one this handler inserted
+                    // last call). Cursor sits right after it, so step back
+                    // and remove the preceding character.
+                    if buffer.cursor > 0 {
+                        let idx = buffer.text.index(buffer.text.startIndex, offsetBy: buffer.cursor)
+                        let before = buffer.text.index(before: idx)
+                        buffer.text.removeSubrange(before..<idx)
+                        buffer.cursor -= 1
+                    }
+                    state.mode = .normal
+                    state.insertModeLastWasJ = false
+                    // Vim's normal-cursor-after-insert convention: keep
+                    // the cursor where it lands. Matches the existing
+                    // .escape branch, except we don't step left again
+                    // because we already removed the buffered `j`.
+                    return clamp(state: state, buffer: buffer)
+                }
                 insertString(String(char), state: &state, buffer: &buffer)
+                state.insertModeLastWasJ = (char == "j")
+            } else {
+                state.insertModeLastWasJ = false
             }
             return Result(state: state, buffer: buffer)
 
         case .historyPrev, .historyNext:
+            state.insertModeLastWasJ = false
             return Result(state: state, buffer: buffer)
         }
     }

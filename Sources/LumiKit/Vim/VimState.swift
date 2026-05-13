@@ -45,6 +45,16 @@ public struct VimState: Sendable, Hashable {
     /// command-line session. Restored when arrow-down walks past the newest
     /// entry. `nil` once navigation ends.
     public var commandLineHistoryDraft: String?
+    /// True iff the most recent `handle()` call inserted a `j` into the
+    /// buffer while in insert mode. Cleared by any subsequent input. Powers
+    /// the `jj`-as-escape mapping when `jjEscapeEnabled` is on — the engine
+    /// detects "j after j" by remembering this flag across calls.
+    public var insertModeLastWasJ: Bool
+    /// Toggles the `jj → <Esc>` insert-mode mapping. Off by default; the
+    /// host enables it from user preferences before each `handle()` call
+    /// (or sets it once and trusts it to stick). Pure data on `VimState`
+    /// so the engine stays the source of truth for behavior.
+    public var jjEscapeEnabled: Bool
     /// Default ("unnamed") register — receives the most recent yank/delete.
     public var defaultRegister: Register
     /// Named registers (`"a` … `"z`, `"A` … `"Z`). Yank/delete writes here in
@@ -120,6 +130,8 @@ public struct VimState: Sendable, Hashable {
         searchHistory: [String] = [],
         commandLineHistoryIndex: Int? = nil,
         commandLineHistoryDraft: String? = nil,
+        insertModeLastWasJ: Bool = false,
+        jjEscapeEnabled: Bool = false,
         defaultRegister: Register = Register(),
         registers: [Character: Register] = [:],
         pendingRegister: Character? = nil,
@@ -156,6 +168,8 @@ public struct VimState: Sendable, Hashable {
         self.searchHistory = searchHistory
         self.commandLineHistoryIndex = commandLineHistoryIndex
         self.commandLineHistoryDraft = commandLineHistoryDraft
+        self.insertModeLastWasJ = insertModeLastWasJ
+        self.jjEscapeEnabled = jjEscapeEnabled
         self.defaultRegister = defaultRegister
         self.registers = registers
         self.pendingRegister = pendingRegister

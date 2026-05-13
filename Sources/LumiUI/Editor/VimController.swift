@@ -28,6 +28,13 @@ public final class VimController {
         self.state = .initial
     }
 
+    /// Toggle the `jj → <Esc>` mapping at runtime. The host calls this when
+    /// the user's preference changes — flowing the bool through `state` keeps
+    /// the engine the single source of truth for behavior.
+    public func setJJEscapeEnabled(_ enabled: Bool) {
+        state.jjEscapeEnabled = enabled
+    }
+
     /// Replace the buffer text wholesale (e.g. when the user switches notes).
     /// Resets the engine state to normal mode and clears history.
     public func replace(text: String) {
