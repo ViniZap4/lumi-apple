@@ -32,6 +32,13 @@ struct LumiApp: App {
                 Button("Settings…") { appState.showSettings = true }
                     .keyboardShortcut(",", modifiers: [.command])
             }
+            CommandGroup(after: .toolbar) {
+                Button(appState.editorMode == .view ? "Switch to Edit" : "Switch to Read") {
+                    appState.editorMode = appState.editorMode == .view ? .edit : .view
+                }
+                .keyboardShortcut("e", modifiers: [.command])
+                .disabled(appState.selectedEntry == nil)
+            }
         }
         #endif
     }

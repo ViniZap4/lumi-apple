@@ -59,7 +59,14 @@ struct TreeBrowserView: View {
                     items: parent.items ?? [],
                     highlightedID: "folder:" + state.currentFolder.relativePath,
                     cursorIsActive: false,
-                    onTap: { _ in /* parent column tap → just visual */ }
+                    onTap: { item in
+                        // Clicking a parent-column row navigates back to
+                        // that folder. Lets users jump up the breadcrumb
+                        // without keyboard.
+                        if case .folder = item, item.id == "folder:" + state.currentFolder.relativePath {
+                            _ = state.goBack()
+                        }
+                    }
                 )
             } else {
                 Text(vaultName)
@@ -79,7 +86,12 @@ struct TreeBrowserView: View {
                 highlightedID: state.selectedItem?.id,
                 cursorIsActive: true,
                 onTap: { item in
+                    // Single click moves cursor *and* activates — finder /
+                    // yazi feel. For folders this means one click descends;
+                    // for notes one click opens. Keyboard nav still uses
+                    // l/Enter explicitly.
                     state.setCursor(toItemID: item.id)
+                    activate(item)
                 },
                 onActivate: { item in
                     activate(item)
@@ -100,31 +112,36 @@ struct TreeBrowserView: View {
     @ViewBuilder
     private var header: some View {
         HStack(spacing: 8) {
-            Text("lumi")
-                .font(.system(.callout, design: .monospaced).weight(.bold))
-                .foregroundStyle(theme.primary)
-            Text("·")
-                .foregroundStyle(theme.textDim)
+            // Breadcrumb starting at "vault / sub / sub". Skip the lumi
+            // wordmark — the toolbar above already identifies the app.
             Text(vaultName)
-                .font(.system(.callout, design: .monospaced))
+                .font(.system(.callout, design: .monospaced).weight(.semibold))
                 .foregroundStyle(theme.text)
-            if !state.currentFolder.relativePath.isEmpty {
-                Text("·")
+            ForEach(Array(state.currentFolder.relativePath
+                .split(separator: "/", omittingEmptySubsequences: true)
+                .enumerated()), id: \.offset) { _, comp in
+                Text("›")
                     .foregroundStyle(theme.textDim)
-                Text("/" + state.currentFolder.relativePath)
+                Text(String(comp))
                     .font(.system(.callout, design: .monospaced))
-                    .foregroundStyle(theme.textDim)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                    .foregroundStyle(theme.text)
             }
             Spacer()
             Text("\(state.currentItems.count) items")
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(theme.textDim)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+                .background(
+                    Capsule().fill(theme.overlayBackground)
+                )
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .background(theme.overlayBackground)
+        .background(theme.background)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(theme.border).frame(height: 0.5)
+        }
     }
 
     // MARK: - Key handling
@@ -245,26 +262,52 @@ private struct ColumnList: View {
 
     @ViewBuilder
     private func row(item: FolderNode.Item, isHighlighted: Bool) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             Image(systemName: icon(for: item))
-                .foregroundStyle(isHighlighted ? rowAccent : theme.textDim)
-                .frame(width: 14)
-            Text(item.name)
-                .font(.system(.body, design: .monospaced))
-                .foregroundStyle(isHighlighted ? theme.text : theme.text)
-                .lineLimit(1)
-                .truncationMode(.middle)
+                .foregroundStyle(isHighlighted ? rowAccent : iconColor(for: item))
+                .frame(width: 16, alignment: .center)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(item.name)
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if case .note(let n) = item {
+                    Text(n.updatedAt.formatted(.relative(presentation: .numeric)))
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(theme.textDim)
+                }
+            }
             Spacer(minLength: 0)
             if case .folder = item {
                 Image(systemName: "chevron.right")
                     .font(.caption2)
-                    .foregroundStyle(theme.textDim)
+                    .foregroundStyle(isHighlighted ? theme.text : theme.textDim)
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(isHighlighted ? rowBackground : Color.clear)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(isHighlighted ? rowBackground : Color.clear)
+        )
+        .overlay(
+            // Thin accent stripe on the left edge of the highlighted row in
+            // the active column — TUI-style cursor cue.
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .strokeBorder(
+                    isHighlighted && cursorIsActive ? theme.accent : .clear,
+                    lineWidth: 1
+                )
+        )
         .contentShape(Rectangle())
+    }
+
+    private func iconColor(for item: FolderNode.Item) -> Color {
+        switch item {
+        case .folder: return theme.accent.opacity(0.85)
+        case .note: return theme.textDim
+        }
     }
 
     private var rowAccent: Color {
@@ -272,7 +315,9 @@ private struct ColumnList: View {
     }
 
     private var rowBackground: Color {
-        cursorIsActive ? theme.overlayBackground : theme.overlayBackground.opacity(0.4)
+        if cursorIsActive { return theme.overlayBackground }
+        // Dim parent-column highlight so the eye lands on the active column.
+        return theme.overlayBackground.opacity(0.4)
     }
 
     private func icon(for item: FolderNode.Item) -> String {
@@ -326,18 +371,25 @@ private struct PreviewPane: View {
 
     @ViewBuilder
     private func folderPreview(_ f: FolderNode) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Image(systemName: "folder.fill")
-                    .foregroundStyle(theme.accent)
-                Text(f.name)
-                    .font(.system(.body, design: .monospaced).weight(.semibold))
-                    .foregroundStyle(theme.text)
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Image(systemName: "folder.fill")
+                        .font(.title3)
+                        .foregroundStyle(theme.accent)
+                    Text(f.name)
+                        .font(.system(.title3, design: .default).weight(.semibold))
+                        .foregroundStyle(theme.text)
+                }
+                Text("/" + f.relativePath)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(theme.textDim)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
-            Text("/" + f.relativePath)
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(theme.textDim)
-            Divider().background(theme.border)
+
+            Rectangle().fill(theme.border).frame(height: 0.5)
+
             if f.items == nil {
                 Button {
                     f.loadIfNeeded()
@@ -347,22 +399,31 @@ private struct PreviewPane: View {
                 }
                 .buttonStyle(.bordered)
             } else if let items = f.items {
-                Text("\(items.count) items")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(theme.textDim)
-                ForEach(items.prefix(12)) { sub in
-                    HStack(spacing: 4) {
-                        Image(systemName: sub.id.hasPrefix("folder:") ? "folder" : "doc.text")
-                            .font(.caption2)
-                            .foregroundStyle(theme.textDim)
-                        Text(sub.name)
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundStyle(theme.text)
-                            .lineLimit(1)
+                HStack(spacing: 6) {
+                    Image(systemName: "doc.on.doc")
+                        .font(.caption2)
+                        .foregroundStyle(theme.textDim)
+                    Text("\(items.count) items")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(theme.textDim)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(items.prefix(14)) { sub in
+                        HStack(spacing: 6) {
+                            Image(systemName: sub.id.hasPrefix("folder:") ? "folder" : "doc.text")
+                                .font(.caption2)
+                                .foregroundStyle(sub.id.hasPrefix("folder:") ? theme.accent.opacity(0.7) : theme.textDim)
+                                .frame(width: 12)
+                            Text(sub.name)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(theme.text)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
                     }
                 }
-                if items.count > 12 {
-                    Text("…and \(items.count - 12) more")
+                if items.count > 14 {
+                    Text("…and \(items.count - 14) more")
                         .font(.caption2)
                         .foregroundStyle(theme.textDim)
                 }
@@ -372,38 +433,47 @@ private struct PreviewPane: View {
 
     @ViewBuilder
     private func notePreview(_ n: NoteEntry) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Image(systemName: "doc.text.fill")
-                    .foregroundStyle(theme.primary)
-                Text(noteExcerpt?.title ?? n.title)
-                    .font(.system(.body, design: .monospaced).weight(.semibold))
-                    .foregroundStyle(theme.text)
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Image(systemName: "doc.text.fill")
+                        .font(.title3)
+                        .foregroundStyle(theme.primary)
+                    Text(noteExcerpt?.title ?? n.title)
+                        .font(.system(.title3, design: .default).weight(.semibold))
+                        .foregroundStyle(theme.text)
+                }
+                Text("/" + n.relativePath)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(theme.textDim)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(n.updatedAt.formatted(.relative(presentation: .numeric)))
+                    .font(.caption2)
+                    .foregroundStyle(theme.textDim)
             }
-            Text("/" + n.relativePath)
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(theme.textDim)
-            Text(n.updatedAt.formatted(.relative(presentation: .numeric)))
-                .font(.caption2)
-                .foregroundStyle(theme.textDim)
+
             if let tags = noteExcerpt?.tags, !tags.isEmpty {
                 HStack(spacing: 4) {
                     ForEach(tags, id: \.self) { tag in
                         Text(tag)
                             .font(.system(.caption2, design: .monospaced))
-                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .padding(.horizontal, 6).padding(.vertical, 1)
                             .background(theme.overlayBackground)
                             .foregroundStyle(theme.accent)
                             .clipShape(Capsule())
                     }
                 }
             }
-            Divider().background(theme.border)
+
+            Rectangle().fill(theme.border).frame(height: 0.5)
+
             if let excerpt = noteExcerpt {
                 Text(excerpt.bodyExcerpt)
-                    .font(.system(.caption, design: .monospaced))
+                    .font(.system(.callout, design: .monospaced))
                     .foregroundStyle(theme.text)
                     .fixedSize(horizontal: false, vertical: true)
+                    .lineSpacing(2)
             } else {
                 ProgressView().controlSize(.small)
             }

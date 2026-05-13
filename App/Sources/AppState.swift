@@ -4,6 +4,12 @@ import SwiftUI
 import LumiKit
 import LumiUI
 
+/// What the user is doing with the active note — previewing or editing.
+public enum NoteDisplayMode: Hashable, Sendable {
+    case view
+    case edit
+}
+
 @Observable
 @MainActor
 final class AppState {
@@ -30,6 +36,18 @@ final class AppState {
     /// editor load. Holding the entry here means the detail view doesn't
     /// have to scan the lazy tree to resolve a selection.
     var selectedEntry: NoteEntry?
+
+    /// Read-vs-edit toggle for the currently open note. Lives on AppState
+    /// so the global toolbar (RootView) and the note view share a single
+    /// source of truth; opening a new note resets to `.view` so users
+    /// always land in the preview pane first.
+    var editorMode: NoteDisplayMode = .view
+
+    /// Notes scanned from the currently selected vault. Cached here so the
+    /// detail view can resolve a selection by id without re-walking the disk.
+    /// (Legacy field — the lazy tree replaces it for new flows but a few
+    /// places still read it; cleanup pending.)
+    var notes: [Note] = []
 
     /// Active vault session — keeps security-scoped access alive while a vault
     /// is selected. Nil when no vault is open.

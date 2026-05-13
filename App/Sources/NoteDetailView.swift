@@ -20,24 +20,30 @@ struct NoteDetailView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
 
-    @State private var mode: Mode = .view
     @State private var vimMode: VimMode = .normal
 
-    enum Mode: Hashable { case view, edit }
+    /// Read-vs-edit toggle is hoisted to AppState so the global toolbar
+    /// renders the picker alongside theme/settings/etc. Local binding so
+    /// the existing view code below reads `mode` as before.
+    private var mode: NoteDisplayMode {
+        appState.editorMode
+    }
 
     var body: some View {
         @Bindable var editor = appState.editor
         VStack(spacing: 0) {
-            DetailToolbar(
-                mode: $mode,
+            // Slim status bar (no mode picker — that's hoisted to the
+            // RootView toolbar so it sits next to the theme/settings/etc.
+            // buttons). Keeps save/conflict status close to the content.
+            DetailStatusBar(
                 editor: editor,
                 vimMode: vimMode,
+                inEditMode: mode == .edit,
                 onSave: { editor.save() },
                 onReload: { editor.reloadFromDisk(vaultRoot: vaultRoot) },
                 onForceSave: { editor.forceSave() },
                 onDiscard: { editor.discard() }
             )
-            Divider().background(theme.separator)
             content(editor: editor)
         }
         .background(theme.background)
@@ -111,24 +117,28 @@ struct NoteDetailView: View {
             if case .conflict = editor.status {
                 return
             }
-            mode = .view
+            appState.editorMode = .view
         case .close(force: false):
             // Vim's :q refuses to quit a dirty buffer. Mirror that by staying
             // in edit mode; the user can :q! to discard or :w to save first.
             if !editor.isDirty {
-                mode = .view
+                appState.editorMode = .view
             }
         case .close(force: true):
             editor.discard()
-            mode = .view
+            appState.editorMode = .view
         }
     }
 }
 
-private struct DetailToolbar: View {
-    @Binding var mode: NoteDetailView.Mode
+/// Compact status bar inside the note pane. Shows the vim-mode badge when
+/// editing, the editor status (modified / saved / conflict / error), and
+/// a Cmd-S save button. Mode toggle is *not* here — it lives in the global
+/// toolbar so all chrome is centralized at the top of the window.
+private struct DetailStatusBar: View {
     let editor: EditorState
     let vimMode: VimMode
+    let inEditMode: Bool
     let onSave: () -> Void
     let onReload: () -> Void
     let onForceSave: () -> Void
@@ -138,22 +148,12 @@ private struct DetailToolbar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Picker("Mode", selection: $mode) {
-                    Image(systemName: "doc.text").tag(NoteDetailView.Mode.view)
-                    Image(systemName: "square.and.pencil").tag(NoteDetailView.Mode.edit)
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 140)
-
-                if mode == .edit {
+            HStack(spacing: 10) {
+                if inEditMode {
                     VimModeBadge(vimMode: vimMode)
                 }
-
                 Spacer()
-
                 StatusLabel(editor: editor)
-
                 Button(action: onSave) {
                     Label("Save", systemImage: "checkmark")
                         .labelStyle(.iconOnly)
@@ -164,7 +164,8 @@ private struct DetailToolbar: View {
                 .foregroundStyle(editor.isDirty ? theme.primary : theme.textDim)
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 8)
+            .padding(.vertical, 6)
+            .background(theme.background)
 
             if case .conflict = editor.status {
                 ConflictBanner(
@@ -194,17 +195,30 @@ private struct MarkdownReader: View {
     @State private var parsedFor: String = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text(title)
-                .font(.system(size: 32, weight: .semibold))
-                .foregroundStyle(theme.text)
-            if !tags.isEmpty {
-                HStack(spacing: 6) {
-                    ForEach(tags, id: \.self) { tag in
-                        TagChip(tag: tag)
+        VStack(alignment: .leading, spacing: 22) {
+            // Header: oversized title + thin tag row + subtle separator.
+            // Tight stack so the body's whitespace stays consistent.
+            VStack(alignment: .leading, spacing: 10) {
+                Text(title)
+                    .font(.system(size: 34, weight: .semibold, design: .default))
+                    .foregroundStyle(theme.text)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !tags.isEmpty {
+                    HStack(spacing: 6) {
+                        ForEach(tags, id: \.self) { tag in
+                            TagChip(tag: tag)
+                        }
                     }
                 }
             }
+            .padding(.bottom, 4)
+
+            Rectangle()
+                .fill(theme.border)
+                .frame(height: 0.5)
+                .padding(.bottom, 2)
+
             if let parsed {
                 MarkdownView(parsed)
             } else {
@@ -213,10 +227,14 @@ private struct MarkdownReader: View {
                     .foregroundStyle(theme.textDim)
             }
         }
-        .padding(.horizontal, 32)
-        .padding(.vertical, 24)
-        .frame(maxWidth: 820, alignment: .leading)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 48)
+        .padding(.top, 36)
+        .padding(.bottom, 80)
+        // Narrower max width for comfortable measure — ~70–75 chars of body
+        // at our default size. Centered in the available pane via the
+        // outer infinity frame.
+        .frame(maxWidth: 760, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .center)
         .onAppear { reparseIfNeeded() }
         .onChange(of: text) { _, _ in reparseIfNeeded() }
     }
@@ -233,18 +251,36 @@ private struct MarkdownReader: View {
 /// ScrollView with no key intercept (tap/drag/scroll wheel still work
 /// everywhere).
 ///
-/// macOS path uses a real `NSScrollView` (via NSViewRepresentable) so we can
-/// call `documentView?.scroll(to:)` with precise pixel deltas — much
-/// smoother than SwiftUI's `ScrollViewProxy.scrollTo(_:anchor:)` which only
-/// supports fractional anchors. j/k step by one line-height; g/G jump to
-/// ends. Holding j/k animates through native scroll deceleration.
+/// Key handling lives at the SwiftUI level (`.onKeyPress`) — earlier
+/// attempts to intercept inside `NSScrollView.keyDown` failed because the
+/// hosted SwiftUI subtree grabs first-responder for itself, so the scroll
+/// view never sees the key event. Going through SwiftUI's focus model
+/// works regardless.
 private struct ReadModeScroll<Content: View>: View {
     let jkEnabled: Bool
     @ViewBuilder let content: () -> Content
+    @FocusState private var focused: Bool
 
     var body: some View {
         #if os(macOS)
-        NativeScrollHost(jkEnabled: jkEnabled, content: content)
+        let host = NativeScrollHost(content: content)
+        host
+            .focusable()
+            .focused($focused)
+            .onAppear { focused = true }
+            .onKeyPress(phases: .down) { press in
+                guard jkEnabled else { return .ignored }
+                let lineStep: CGFloat = 24
+                switch press.characters {
+                case "j": host.coordinator.scroll(by: lineStep); return .handled
+                case "k": host.coordinator.scroll(by: -lineStep); return .handled
+                case "d": host.coordinator.scrollHalfPage(direction: 1); return .handled
+                case "u": host.coordinator.scrollHalfPage(direction: -1); return .handled
+                case "g": host.coordinator.scrollTo(.top); return .handled
+                case "G": host.coordinator.scrollTo(.bottom); return .handled
+                default: return .ignored
+                }
+            }
         #else
         ScrollView { content() }
         #endif
@@ -262,14 +298,23 @@ import AppKit
 ///
 /// The hosting controller's `rootView` is mutated in place via the
 /// coordinator, which is the supported pattern for SwiftUI-in-AppKit hosts.
+///
+/// The coordinator is exposed up to the SwiftUI wrapper so `.onKeyPress`
+/// handlers can call scroll methods directly. Without this, key events
+/// would never reach an `NSScrollView.keyDown` override because the hosted
+/// SwiftUI subtree always grabs first-responder for itself.
 private struct NativeScrollHost<Content: View>: NSViewRepresentable {
-    let jkEnabled: Bool
     @ViewBuilder var content: () -> Content
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    /// Built once on view init; the same instance is handed to
+    /// `makeCoordinator` so external callers (the SwiftUI wrapper) can
+    /// reach it via `host.coordinator.scroll(by:)`.
+    let coordinator = Coordinator()
+
+    func makeCoordinator() -> Coordinator { coordinator }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = KeyAwareScrollView()
+        let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = false
         scroll.autohidesScrollers = true
@@ -277,11 +322,11 @@ private struct NativeScrollHost<Content: View>: NSViewRepresentable {
         scroll.borderType = .noBorder
         scroll.verticalScrollElasticity = .allowed
         scroll.scrollerStyle = .overlay
-        scroll.jkEnabled = jkEnabled
 
         let host = NSHostingController(rootView: AnyView(content()))
         host.view.translatesAutoresizingMaskIntoConstraints = false
-        context.coordinator.host = host
+        coordinator.host = host
+        coordinator.scrollView = scroll
 
         scroll.documentView = host.view
 
@@ -294,81 +339,56 @@ private struct NativeScrollHost<Content: View>: NSViewRepresentable {
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        (scroll as? KeyAwareScrollView)?.jkEnabled = jkEnabled
         // Mutate the existing host's root view — SwiftUI diffs the underlying
         // tree, no AppKit subview thrashing.
-        context.coordinator.host?.rootView = AnyView(content())
+        coordinator.host?.rootView = AnyView(content())
     }
 
+    /// Exposed to the SwiftUI wrapper for keyboard-driven scrolling. Methods
+    /// here drive the underlying NSScrollView with native animation.
     final class Coordinator {
         var host: NSHostingController<AnyView>?
-    }
-}
+        weak var scrollView: NSScrollView?
 
-/// Subclass that intercepts j/k/g/G keys when its `jkEnabled` flag is set.
-/// Everything else (arrows, page up/down, scroll wheel) goes through normal
-/// NSScrollView handling, so users still get native momentum + elastic
-/// bounce.
-private final class KeyAwareScrollView: NSScrollView {
-    var jkEnabled: Bool = false
+        enum Edge { case top, bottom }
 
-    override var acceptsFirstResponder: Bool { true }
-
-    override func keyDown(with event: NSEvent) {
-        guard jkEnabled, let chars = event.charactersIgnoringModifiers else {
-            super.keyDown(with: event)
-            return
+        func scroll(by dy: CGFloat) {
+            guard let view = scrollView,
+                  let doc = view.documentView
+            else { return }
+            let clip = view.contentView
+            let current = clip.bounds.origin
+            let maxY = max(0, doc.bounds.height - clip.bounds.height)
+            let nextY = max(0, min(maxY, current.y + dy))
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.10
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                clip.animator().setBoundsOrigin(NSPoint(x: current.x, y: nextY))
+            } completionHandler: { [weak view] in
+                view?.reflectScrolledClipView(clip)
+            }
         }
-        let lineStep: CGFloat = 24      // one comfortable text line
-        let pageStep: CGFloat = bounds.height - 40
-        switch chars {
-        case "j":
-            scrollBy(lineStep); return
-        case "k":
-            scrollBy(-lineStep); return
-        case "d":
-            // half-page down — matches vim's <C-d>
-            scrollBy(pageStep / 2); return
-        case "u":
-            scrollBy(-pageStep / 2); return
-        case "g":
-            scrollToTop(); return
-        case "G":
-            scrollToBottom(); return
-        default:
-            super.keyDown(with: event)
-        }
-    }
 
-    private func scrollBy(_ dy: CGFloat) {
-        guard let clip = contentView as NSClipView?, let doc = documentView else { return }
-        let current = clip.bounds.origin
-        let maxY = max(0, doc.bounds.height - clip.bounds.height)
-        let nextY = max(0, min(maxY, current.y + dy))
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.10
-            ctx.allowsImplicitAnimation = true
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            clip.animator().setBoundsOrigin(NSPoint(x: current.x, y: nextY))
-        } completionHandler: { [weak self] in
-            self?.reflectScrolledClipView(clip)
+        func scrollHalfPage(direction sign: CGFloat) {
+            guard let view = scrollView else { return }
+            let page = view.bounds.height - 40
+            scroll(by: sign * page / 2)
         }
-    }
 
-    private func scrollToTop() {
-        guard let clip = contentView as NSClipView? else { return }
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.18
-            clip.animator().setBoundsOrigin(.zero)
-        }
-    }
-
-    private func scrollToBottom() {
-        guard let clip = contentView as NSClipView?, let doc = documentView else { return }
-        let maxY = max(0, doc.bounds.height - clip.bounds.height)
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.18
-            clip.animator().setBoundsOrigin(NSPoint(x: 0, y: maxY))
+        func scrollTo(_ edge: Edge) {
+            guard let view = scrollView,
+                  let doc = view.documentView
+            else { return }
+            let clip = view.contentView
+            let y: CGFloat
+            switch edge {
+            case .top: y = 0
+            case .bottom: y = max(0, doc.bounds.height - clip.bounds.height)
+            }
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.18
+                clip.animator().setBoundsOrigin(NSPoint(x: 0, y: y))
+            }
         }
     }
 }

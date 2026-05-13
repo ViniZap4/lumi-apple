@@ -50,6 +50,20 @@ struct RootView: View {
                 .disabled(appState.rootFolder == nil)
             }
             #endif
+            // Read / edit toggle for the active note. Lives in the global
+            // toolbar so all chrome is centralized at the top of the window;
+            // hidden when no note is open. Cmd+E flips it from anywhere.
+            if appState.selectedEntry != nil {
+                ToolbarItem(placement: .principal) {
+                    Picker("Mode", selection: $bound.editorMode) {
+                        Image(systemName: "doc.text").tag(NoteDisplayMode.view)
+                        Image(systemName: "square.and.pencil").tag(NoteDisplayMode.edit)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 100)
+                    .help("Read / edit mode (⌘E)")
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 ServerMenu()
             }
@@ -159,6 +173,10 @@ struct RootView: View {
         appState.editor.load(noteID: entry.relativePath, at: entry.url, vaultRoot: session.rootURL)
         appState.selectedNoteID = entry.relativePath
         appState.selectedEntry = entry
+        // Always land in view mode when opening a new note — users tap
+        // through the tree primarily to read; ⌘E (or the toolbar toggle)
+        // jumps into edit when they actually want to write.
+        appState.editorMode = .view
     }
 
     private func addVault(url: URL) {
