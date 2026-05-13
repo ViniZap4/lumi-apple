@@ -23,6 +23,13 @@ public enum VimInput: Sendable, Hashable {
     /// Ctrl-R — redo in normal mode.
     case controlR
 
+    /// Ctrl-D — half-page down (vim's scroll-cursor-down). Engine treats
+    /// it as a multi-line down motion (no concept of viewport).
+    case controlD
+
+    /// Ctrl-U — half-page up.
+    case controlU
+
     /// Up arrow while in command-line mode — recall older history entry.
     /// Outside command-line, the UI bridge translates up/down arrows into
     /// `h`/`j`/`k`/`l` motions before reaching the engine, so these cases

@@ -26,22 +26,31 @@ struct TreeBrowserView: View {
     @Environment(AppState.self) private var appState
     @FocusState private var focused: Bool
 
+    /// User-resizable column widths. Persisted only for the session; if the
+    /// user wants different defaults each launch we can stash these in
+    /// LumiPreferences in a follow-up.
+    @State private var parentColumnWidth: CGFloat = 220
+    @State private var previewColumnWidth: CGFloat = 420
+
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider().background(theme.border)
             HStack(spacing: 0) {
                 parentColumn
+                    .frame(width: parentColumnWidth)
                     .id("parent-\(state.pathStack.count)")
                     .transition(.asymmetric(
                         insertion: .move(edge: .leading).combined(with: .opacity),
                         removal: .move(edge: .leading).combined(with: .opacity)
                     ))
-                Divider().background(theme.border)
+                resizer(width: $parentColumnWidth, min: 160, max: 360)
                 currentColumn
+                    .frame(maxWidth: .infinity)
                     .id("current-\(state.pathStack.count)")
-                Divider().background(theme.border)
+                resizer(width: $previewColumnWidth, min: 280, max: 700, dragFromRight: true)
                 previewColumn
+                    .frame(width: previewColumnWidth)
                     .id("preview-\(state.selectedItem?.id ?? "-")")
                     .transition(.opacity)
             }
@@ -63,7 +72,7 @@ struct TreeBrowserView: View {
 
     @ViewBuilder
     private var parentColumn: some View {
-        ColumnContainer(width: 220) {
+        ColumnContainer(width: nil) {
             if let parent = state.parentFolder {
                 ColumnList(
                     items: parent.items ?? [],
@@ -112,9 +121,48 @@ struct TreeBrowserView: View {
 
     @ViewBuilder
     private var previewColumn: some View {
-        ColumnContainer(width: 320) {
-            PreviewPane(item: state.selectedItem)
+        ColumnContainer(width: nil) {
+            PreviewPane(item: state.selectedItem, baseURL: previewBaseURL)
         }
+    }
+
+    /// For note previews, resolve relative markdown links/images against
+    /// the note's own directory. nil for folders (they don't render bodies).
+    private var previewBaseURL: URL? {
+        guard let item = state.selectedItem, case let .note(n) = item else { return nil }
+        return n.url.deletingLastPathComponent()
+    }
+
+    @ViewBuilder
+    private func resizer(width: Binding<CGFloat>, min: CGFloat, max: CGFloat, dragFromRight: Bool = false) -> some View {
+        Rectangle()
+            .fill(theme.border)
+            .frame(width: 0.5)
+            .frame(maxHeight: .infinity)
+            .overlay {
+                // Wider invisible hit target around the hairline divider so
+                // grabbing it isn't pixel-perfect work.
+                Color.clear
+                    .frame(width: 8)
+                    .contentShape(Rectangle())
+                    #if os(macOS)
+                    .onHover { hovering in
+                        if hovering { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+                    }
+                    #endif
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { value in
+                                let delta = dragFromRight
+                                    ? -value.translation.width
+                                    : value.translation.width
+                                let next = width.wrappedValue + delta
+                                if next >= min && next <= max {
+                                    width.wrappedValue = next
+                                }
+                            }
+                    )
+            }
     }
 
     // MARK: - Header
@@ -348,6 +396,7 @@ private struct ColumnList: View {
 
 private struct PreviewPane: View {
     let item: FolderNode.Item?
+    let baseURL: URL?
     @Environment(\.theme) private var theme
     @State private var noteExcerpt: NoteExcerpt?
 
@@ -365,21 +414,31 @@ private struct PreviewPane: View {
                     notePreview(n)
                 }
             }
-            .padding(12)
+            .padding(16)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .onChange(of: itemID) { _, _ in
             // Drop the previous note excerpt so we don't show stale content
             // while the new one loads.
             noteExcerpt = nil
-            if case .note(let n) = item {
-                noteExcerpt = NoteExcerpt.load(from: n.url)
-            }
+            handleItemChange()
         }
         .onAppear {
-            if case .note(let n) = item {
-                noteExcerpt = NoteExcerpt.load(from: n.url)
-            }
+            handleItemChange()
+        }
+    }
+
+    /// Side-effects when the selected item changes: kick off a folder load
+    /// or a note excerpt read. Folders auto-load so the user doesn't have
+    /// to click "Peek into folder".
+    private func handleItemChange() {
+        switch item {
+        case .folder(let f):
+            f.loadIfNeeded()
+        case .note(let n):
+            noteExcerpt = NoteExcerpt.load(from: n.url)
+        case nil:
+            break
         }
     }
 
@@ -406,14 +465,16 @@ private struct PreviewPane: View {
 
             Rectangle().fill(theme.border).frame(height: 0.5)
 
+            // Folders auto-load now (see PreviewPane.handleItemChange) —
+            // no more "Peek into folder" button. While loading we show a
+            // small ProgressView; once items are in we render them inline.
             if f.items == nil {
-                Button {
-                    f.loadIfNeeded()
-                } label: {
-                    Label("Peek into folder", systemImage: "eye")
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("scanning…")
                         .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(theme.textDim)
                 }
-                .buttonStyle(.bordered)
             } else if let items = f.items {
                 HStack(spacing: 6) {
                     Image(systemName: "doc.on.doc")
@@ -423,23 +484,23 @@ private struct PreviewPane: View {
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(theme.textDim)
                 }
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(items.prefix(14)) { sub in
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(items.prefix(30)) { sub in
                         HStack(spacing: 6) {
-                            Image(systemName: sub.id.hasPrefix("folder:") ? "folder" : "doc.text")
+                            Image(systemName: sub.id.hasPrefix("folder:") ? "folder.fill" : "doc.text")
                                 .font(.caption2)
-                                .foregroundStyle(sub.id.hasPrefix("folder:") ? theme.accent.opacity(0.7) : theme.textDim)
+                                .foregroundStyle(sub.id.hasPrefix("folder:") ? theme.accent : theme.textDim)
                                 .frame(width: 12)
                             Text(sub.name)
-                                .font(.system(.caption, design: .monospaced))
+                                .font(.system(.callout, design: .monospaced))
                                 .foregroundStyle(theme.text)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                         }
                     }
                 }
-                if items.count > 14 {
-                    Text("…and \(items.count - 14) more")
+                if items.count > 30 {
+                    Text("…and \(items.count - 30) more")
                         .font(.caption2)
                         .foregroundStyle(theme.textDim)
                 }
@@ -485,11 +546,12 @@ private struct PreviewPane: View {
             Rectangle().fill(theme.border).frame(height: 0.5)
 
             if let excerpt = noteExcerpt {
-                Text(excerpt.bodyExcerpt)
-                    .font(.system(.callout, design: .monospaced))
-                    .foregroundStyle(theme.text)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .lineSpacing(2)
+                // Render the excerpt as actual markdown — was raw text
+                // with all the `#` and `**` showing. Same MarkdownView the
+                // read pane uses, so links/images resolve relative to the
+                // note's own directory via `baseURL`.
+                let document = MarkdownParser.parse(excerpt.bodyExcerpt, baseURL: baseURL)
+                MarkdownView(document)
             } else {
                 ProgressView().controlSize(.small)
             }

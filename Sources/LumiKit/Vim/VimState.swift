@@ -50,6 +50,10 @@ public struct VimState: Sendable, Hashable {
     /// the `jj`-as-escape mapping when `jjEscapeEnabled` is on — the engine
     /// detects "j after j" by remembering this flag across calls.
     public var insertModeLastWasJ: Bool
+
+    /// Set after `r` in normal mode. The next typed character replaces the
+    /// character under the cursor. Stateful so `r` doesn't immediately fire.
+    public var awaitingReplaceChar: Bool
     /// Toggles the `jj → <Esc>` insert-mode mapping. Off by default; the
     /// host enables it from user preferences before each `handle()` call
     /// (or sets it once and trusts it to stick). Pure data on `VimState`
@@ -131,6 +135,7 @@ public struct VimState: Sendable, Hashable {
         commandLineHistoryIndex: Int? = nil,
         commandLineHistoryDraft: String? = nil,
         insertModeLastWasJ: Bool = false,
+        awaitingReplaceChar: Bool = false,
         jjEscapeEnabled: Bool = false,
         defaultRegister: Register = Register(),
         registers: [Character: Register] = [:],
@@ -169,6 +174,7 @@ public struct VimState: Sendable, Hashable {
         self.commandLineHistoryIndex = commandLineHistoryIndex
         self.commandLineHistoryDraft = commandLineHistoryDraft
         self.insertModeLastWasJ = insertModeLastWasJ
+        self.awaitingReplaceChar = awaitingReplaceChar
         self.jjEscapeEnabled = jjEscapeEnabled
         self.defaultRegister = defaultRegister
         self.registers = registers

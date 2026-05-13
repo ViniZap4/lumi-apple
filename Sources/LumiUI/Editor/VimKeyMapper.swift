@@ -33,9 +33,13 @@ enum VimKeyMapper {
         default: break
         }
         if event.modifierFlags.contains(.control),
-           let chars = event.charactersIgnoringModifiers,
-           chars == "r" {
-            return .controlR
+           let chars = event.charactersIgnoringModifiers {
+            switch chars {
+            case "r": return .controlR
+            case "d": return .controlD
+            case "u": return .controlU
+            default: break
+            }
         }
         guard let chars = event.charactersIgnoringModifiers,
               let first = chars.first,
@@ -59,8 +63,13 @@ enum VimKeyMapper {
         case .keyboardRightArrow: return .character("l")
         default: break
         }
-        if key.modifierFlags.contains(.control), key.characters == "r" {
-            return .controlR
+        if key.modifierFlags.contains(.control) {
+            switch key.characters {
+            case "r": return .controlR
+            case "d": return .controlD
+            case "u": return .controlU
+            default: break
+            }
         }
         guard let first = key.characters.first else { return nil }
         return .character(first)

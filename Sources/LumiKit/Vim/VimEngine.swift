@@ -133,6 +133,16 @@ public enum VimEngine {
         case .controlR:
             return redo(state: state, buffer: buffer)
 
+        case .controlD:
+            // Half-page down. Engine doesn't know viewport height; use
+            // 10 lines as a typical "screen worth" approximation.
+            buffer.cursor = Motion.down.resolve(in: buffer, count: 10)
+            return clamp(state: state, buffer: buffer)
+
+        case .controlU:
+            buffer.cursor = Motion.up.resolve(in: buffer, count: 10)
+            return clamp(state: state, buffer: buffer)
+
         case .historyPrev, .historyNext:
             // Arrow-key history navigation is only meaningful inside
             // command-line mode. The UI bridge re-maps up/down to .character
@@ -152,6 +162,21 @@ public enum VimEngine {
     ) -> Result {
         var state = inState
         var buffer = inBuffer
+
+        // After `r` in normal mode, the next character replaces the char
+        // under the cursor — stateful command, must run before other key
+        // handlers so the captured char isn't interpreted as a motion etc.
+        if state.awaitingReplaceChar {
+            state.awaitingReplaceChar = false
+            guard !buffer.text.isEmpty,
+                  buffer.cursor < buffer.text.count
+            else { return Result(state: state, buffer: buffer) }
+            state.history.push(.init(buffer: buffer))
+            let idx = buffer.text.index(buffer.text.startIndex, offsetBy: buffer.cursor)
+            let next = buffer.text.index(after: idx)
+            buffer.text.replaceSubrange(idx..<next, with: String(char))
+            return clamp(state: state, buffer: buffer)
+        }
 
         // Macro recording stop: `q` while recording finalizes the macro. Must
         // run before any other handler so `q` isn't interpreted as a normal key.
@@ -402,11 +427,88 @@ public enum VimEngine {
         case "@":
             state.awaitingMacroPlay = true
             return Result(state: state, buffer: buffer)
+
+        case "r":
+            // Replace single char: capture next typed character into the
+            // cursor's position. State flag drives the consumption above.
+            state.awaitingReplaceChar = true
+            return Result(state: state, buffer: buffer)
+
+        case "J":
+            // Join current and next line: drop the newline that separates
+            // them and insert a single space, mirroring vim's J. count>1
+            // joins additional lines.
+            return joinLines(times: count, state: state, buffer: buffer)
+
+        case "~":
+            // Toggle the case of the char under the cursor, then advance.
+            return toggleCaseAtCursor(state: state, buffer: buffer)
+
         default:
             state.pendingCount = nil
             return Result(state: state, buffer: buffer)
         }
         return Result(state: state, buffer: buffer)
+    }
+
+    /// Vim `J`: remove the newline at end-of-line, insert a single space
+    /// in its place (unless the next line is empty / the current line ends
+    /// in trailing whitespace, in which case skip the space). `count`
+    /// chains the join `count - 1` more times — `3J` joins three lines.
+    private static func joinLines(times: Int, state inState: VimState, buffer inBuffer: TextBuffer) -> Result {
+        var state = inState
+        var buffer = inBuffer
+        state.pendingCount = nil
+        state.history.push(.init(buffer: buffer))
+        let joins = max(1, times)
+        for _ in 0..<joins {
+            // Find end of current line (the position of the newline).
+            let lineEnd = buffer.lineEnd(of: buffer.cursorLine)
+            guard lineEnd < buffer.text.count,
+                  buffer.text.index(buffer.text.startIndex, offsetBy: lineEnd) < buffer.text.endIndex
+            else { break }
+            let nlIdx = buffer.text.index(buffer.text.startIndex, offsetBy: lineEnd)
+            // Replace "\n[whitespace]" with single space, dropping any
+            // leading whitespace on the joined line.
+            var afterNl = buffer.text.index(after: nlIdx)
+            while afterNl < buffer.text.endIndex, buffer.text[afterNl] == " " || buffer.text[afterNl] == "\t" {
+                afterNl = buffer.text.index(after: afterNl)
+            }
+            buffer.text.replaceSubrange(nlIdx..<afterNl, with: " ")
+            // Move cursor to where the space sits — vim's J leaves cursor
+            // on the newly-inserted space.
+            buffer.cursor = lineEnd
+        }
+        return clamp(state: state, buffer: buffer)
+    }
+
+    /// Vim `~`: toggle case of the cursor's character then advance once.
+    private static func toggleCaseAtCursor(state inState: VimState, buffer inBuffer: TextBuffer) -> Result {
+        var state = inState
+        var buffer = inBuffer
+        state.pendingCount = nil
+        guard !buffer.text.isEmpty, buffer.cursor < buffer.text.count else {
+            return Result(state: state, buffer: buffer)
+        }
+        let idx = buffer.text.index(buffer.text.startIndex, offsetBy: buffer.cursor)
+        let original = buffer.text[idx]
+        let flipped: Character
+        if original.isUppercase {
+            flipped = Character(original.lowercased())
+        } else if original.isLowercase {
+            flipped = Character(original.uppercased())
+        } else {
+            // Non-alphabetic: leave as-is but still advance cursor.
+            flipped = original
+        }
+        if flipped != original {
+            state.history.push(.init(buffer: buffer))
+            let next = buffer.text.index(after: idx)
+            buffer.text.replaceSubrange(idx..<next, with: String(flipped))
+        }
+        // Vim advances after `~`.
+        buffer.cursor = min(buffer.text.count - 1, buffer.cursor + 1)
+        return clamp(state: state, buffer: buffer)
     }
 
     // MARK: Visual mode
@@ -441,7 +543,7 @@ public enum VimEngine {
             state.pendingCount = nil
             return clamp(state: state, buffer: buffer)
 
-        case .tab, .controlR, .historyPrev, .historyNext:
+        case .tab, .controlR, .controlD, .controlU, .historyPrev, .historyNext:
             return Result(state: state, buffer: buffer)
 
         case let .character(char):
@@ -987,7 +1089,7 @@ public enum VimEngine {
             }
             return resolveSearch(direction: direction, pattern: currentBuffer, state: state, buffer: buffer)
 
-        case .tab, .controlR:
+        case .tab, .controlR, .controlD, .controlU:
             // Ignored while typing a pattern.
             return Result(state: state, buffer: buffer)
 
@@ -1315,6 +1417,11 @@ public enum VimEngine {
         case .tab:
             insertString("\t", state: &state, buffer: &buffer)
             state.insertModeLastWasJ = false
+            return Result(state: state, buffer: buffer)
+
+        case .controlD, .controlU:
+            // Half-page jumps don't apply inside insert mode in our engine
+            // (they're a normal-mode motion). Ignore silently.
             return Result(state: state, buffer: buffer)
 
         case .controlR, .character:
