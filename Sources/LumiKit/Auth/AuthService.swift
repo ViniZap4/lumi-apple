@@ -112,6 +112,60 @@ public final class AuthService {
         return session
     }
 
+    /// Fetch the invite preview without committing — used by the UI to show
+    /// "Join Work as Editor?" before the user agrees. Doesn't touch
+    /// `currentSession`.
+    public func previewInvite(serverURL: URL, token: String) async throws(LumiAPIError) -> InvitePreview {
+        await client.setBaseURL(serverURL)
+        return try await client.previewInvite(token: token)
+    }
+
+    /// Accept an invite as the currently-signed-in user. Requires that the
+    /// session was issued by `serverURL` — otherwise the token won't match.
+    /// Returns the joined vault so the UI can navigate to it.
+    @discardableResult
+    public func acceptInviteAsExistingUser(serverURL: URL, token: String) async throws(LumiAPIError) -> AcceptedVault {
+        isBusy = true
+        defer { isBusy = false }
+        await client.setBaseURL(serverURL)
+        // Token should already be set from a prior signIn/register; if not,
+        // the client will throw .unauthorized.
+        return try await client.acceptInviteAsExistingUser(token: token)
+    }
+
+    /// Accept an invite *and* create the account in one step. The session
+    /// returned by the server is persisted the same way as login/register.
+    @discardableResult
+    public func acceptInviteWithSignup(
+        serverURL: URL,
+        token: String,
+        username: String,
+        password: String,
+        displayName: String,
+        tosVersion: String,
+        privacyVersion: String
+    ) async throws(LumiAPIError) -> AcceptedInviteSession {
+        isBusy = true
+        defer { isBusy = false }
+        await client.setBaseURL(serverURL)
+        await client.setToken(nil)
+        let accepted = try await client.acceptInviteWithSignup(
+            token: token,
+            username: username,
+            password: password,
+            displayName: displayName,
+            tosVersion: tosVersion,
+            privacyVersion: privacyVersion
+        )
+        // Build a SessionResponse-equivalent so persist() can do its job.
+        // The signup-accept response doesn't include the full user object,
+        // so we synthesize one from the captured display name / username.
+        let userDTO = UserDTO(id: "", username: username, displayName: displayName)
+        let synthetic = SessionResponse(token: accepted.token, expiresAt: accepted.expiresAt, user: userDTO)
+        _ = try await persist(serverURL: serverURL, response: synthetic)
+        return accepted
+    }
+
     /// Drop the current session locally and tell the server to invalidate the
     /// token. Server errors are swallowed (the local clear is the important
     /// part — if the network is down, the user still expects to be signed

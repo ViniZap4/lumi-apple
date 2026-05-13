@@ -55,6 +55,7 @@ private struct SignInSheet: View {
     enum Mode: String, CaseIterable, Identifiable {
         case signIn = "Sign In"
         case register = "Create Account"
+        case invite = "Accept Invite"
         var id: String { rawValue }
     }
 
@@ -68,10 +69,15 @@ private struct SignInSheet: View {
     @State private var agreedToTerms: Bool = false
     @State private var errorMessage: String?
 
+    // Invite-accept-only state.
+    @State private var inviteToken: String = ""
+    @State private var invitePreview: InvitePreview?
+    @State private var isFetchingPreview: Bool = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text(mode == .signIn ? "Sign in to lumi server" : "Create lumi account")
+                Text(title)
                     .font(.headline)
                     .foregroundStyle(theme.text)
                 Spacer()
@@ -85,7 +91,10 @@ private struct SignInSheet: View {
                 }
             }
             .pickerStyle(.segmented)
-            .onChange(of: mode) { _, _ in errorMessage = nil }
+            .onChange(of: mode) { _, _ in
+                errorMessage = nil
+                invitePreview = nil
+            }
 
             VStack(alignment: .leading, spacing: 8) {
                 fieldLabel("Server URL")
@@ -98,21 +107,71 @@ private struct SignInSheet: View {
                     .textInputAutocapitalization(.never)
                     #endif
 
-                fieldLabel("Username")
-                TextField("alice", text: $username)
-                    .textFieldStyle(.roundedBorder)
-                    .textContentType(.username)
-                    .autocorrectionDisabled()
-                    #if os(iOS) || os(visionOS)
-                    .textInputAutocapitalization(.never)
-                    #endif
+                if mode == .invite {
+                    fieldLabel("Invite link or token")
+                    TextField("https://lumi.example.com/invite/abc… or just the token", text: $inviteToken)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        #if os(iOS) || os(visionOS)
+                        .textInputAutocapitalization(.never)
+                        #endif
+                        .onChange(of: inviteToken) { _, raw in
+                            if let parsed = extractServerAndToken(from: raw) {
+                                serverURL = parsed.serverURL
+                                inviteToken = parsed.token
+                            }
+                        }
 
-                fieldLabel("Password")
-                SecureField("•••••••••", text: $password)
-                    .textFieldStyle(.roundedBorder)
-                    .textContentType(mode == .signIn ? .password : .newPassword)
+                    HStack {
+                        Button {
+                            Task { await fetchPreview() }
+                        } label: {
+                            if isFetchingPreview {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Text("Preview invite")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(serverURL.isEmpty || inviteToken.isEmpty || isFetchingPreview)
+                        Spacer()
+                    }
 
-                if mode == .register {
+                    if let preview = invitePreview {
+                        invitePreviewPanel(preview)
+                    }
+                } else {
+                    fieldLabel("Username")
+                    TextField("alice", text: $username)
+                        .textFieldStyle(.roundedBorder)
+                        .textContentType(.username)
+                        .autocorrectionDisabled()
+                        #if os(iOS) || os(visionOS)
+                        .textInputAutocapitalization(.never)
+                        #endif
+
+                    fieldLabel("Password")
+                    SecureField("•••••••••", text: $password)
+                        .textFieldStyle(.roundedBorder)
+                        .textContentType(mode == .signIn ? .password : .newPassword)
+                }
+
+                if mode == .register || (mode == .invite && (invitePreview?.requiresSignup ?? false)) {
+                    if mode == .invite {
+                        fieldLabel("Username (new account)")
+                        TextField("alice", text: $username)
+                            .textFieldStyle(.roundedBorder)
+                            .autocorrectionDisabled()
+                            #if os(iOS) || os(visionOS)
+                            .textInputAutocapitalization(.never)
+                            #endif
+
+                        fieldLabel("Password")
+                        SecureField("•••••••••", text: $password)
+                            .textFieldStyle(.roundedBorder)
+                            .textContentType(.newPassword)
+                    }
+
                     fieldLabel("Display name")
                     TextField("Alice", text: $displayName)
                         .textFieldStyle(.roundedBorder)
@@ -165,7 +224,7 @@ private struct SignInSheet: View {
                     if appState.authService.isBusy {
                         ProgressView().controlSize(.small)
                     } else {
-                        Text(mode == .signIn ? "Sign In" : "Create Account")
+                        Text(submitButtonLabel)
                     }
                 }
                 .buttonStyle(.borderedProminent)
@@ -177,16 +236,103 @@ private struct SignInSheet: View {
         .background(theme.background)
     }
 
+    private var title: String {
+        switch mode {
+        case .signIn: return "Sign in to lumi server"
+        case .register: return "Create lumi account"
+        case .invite: return "Accept lumi invitation"
+        }
+    }
+
+    private var submitButtonLabel: String {
+        switch mode {
+        case .signIn: return "Sign In"
+        case .register: return "Create Account"
+        case .invite:
+            return (invitePreview?.requiresSignup ?? !alreadySignedInToThisServer) ? "Accept & Create Account" : "Accept Invitation"
+        }
+    }
+
+    private var alreadySignedInToThisServer: Bool {
+        guard let session = appState.authService.currentSession,
+              let url = URL(string: serverURL)
+        else { return false }
+        return session.serverURL == url
+    }
+
+    @ViewBuilder
+    private func invitePreviewPanel(_ preview: InvitePreview) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Image(systemName: "envelope.fill")
+                    .foregroundStyle(theme.primary)
+                Text(preview.vaultName)
+                    .font(.system(.body, design: .monospaced).weight(.semibold))
+                    .foregroundStyle(theme.text)
+                Text("·").foregroundStyle(theme.textDim)
+                Text(preview.roleName)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(theme.accent)
+            }
+            if let email = preview.emailHint, !email.isEmpty {
+                Text("for \(email)")
+                    .font(.caption)
+                    .foregroundStyle(theme.textDim)
+            }
+            if let expiry = preview.expiresAt {
+                Text("expires \(expiry.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.caption)
+                    .foregroundStyle(theme.textDim)
+            }
+            if let max = preview.maxUses {
+                Text("uses: \(preview.useCount) / \(max)")
+                    .font(.caption)
+                    .foregroundStyle(theme.textDim)
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(theme.overlayBackground)
+        )
+    }
+
     private var canSubmit: Bool {
         guard !appState.authService.isBusy,
-              URL(string: serverURL) != nil,
-              !username.isEmpty,
-              !password.isEmpty
+              URL(string: serverURL) != nil
         else { return false }
-        if mode == .register {
-            return !displayName.isEmpty && agreedToTerms
+        switch mode {
+        case .signIn:
+            return !username.isEmpty && !password.isEmpty
+        case .register:
+            return !username.isEmpty && !password.isEmpty && !displayName.isEmpty && agreedToTerms
+        case .invite:
+            guard !inviteToken.isEmpty, let preview = invitePreview else { return false }
+            if preview.requiresSignup {
+                return !username.isEmpty && !password.isEmpty && !displayName.isEmpty && agreedToTerms
+            }
+            // Existing-user path: must already be signed in to this server.
+            return alreadySignedInToThisServer
         }
-        return true
+    }
+
+    private func fetchPreview() async {
+        errorMessage = nil
+        guard let url = URL(string: serverURL) else {
+            errorMessage = "invalid server URL"
+            return
+        }
+        isFetchingPreview = true
+        defer { isFetchingPreview = false }
+        do {
+            invitePreview = try await appState.authService.previewInvite(serverURL: url, token: inviteToken)
+        } catch let error as LumiAPIError {
+            invitePreview = nil
+            errorMessage = describe(error)
+        } catch {
+            invitePreview = nil
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func submit() async {
@@ -208,6 +354,24 @@ private struct SignInSheet: View {
                     tosVersion: tosVersion,
                     privacyVersion: privacyVersion
                 )
+            case .invite:
+                guard let preview = invitePreview else {
+                    errorMessage = "preview the invite first"
+                    return
+                }
+                if preview.requiresSignup {
+                    _ = try await appState.authService.acceptInviteWithSignup(
+                        serverURL: url,
+                        token: inviteToken,
+                        username: username,
+                        password: password,
+                        displayName: displayName,
+                        tosVersion: tosVersion,
+                        privacyVersion: privacyVersion
+                    )
+                } else {
+                    _ = try await appState.authService.acceptInviteAsExistingUser(serverURL: url, token: inviteToken)
+                }
             }
             dismiss()
         } catch let error as LumiAPIError {
@@ -215,6 +379,25 @@ private struct SignInSheet: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// Parse a pasted invite URL into (serverURL, token). Accepts shapes like
+    /// `https://lumi.example.com/invite/abc123` or
+    /// `https://lumi.example.com/api/invites/abc123`. Returns nil if `raw`
+    /// doesn't look like a URL containing an `/invite[s]/` path component.
+    private func extractServerAndToken(from raw: String) -> (serverURL: String, token: String)? {
+        guard let url = URL(string: raw),
+              let host = url.host,
+              let scheme = url.scheme,
+              !url.pathComponents.isEmpty
+        else { return nil }
+        let components = url.pathComponents
+        guard let idx = components.firstIndex(where: { $0 == "invite" || $0 == "invites" }),
+              idx + 1 < components.count
+        else { return nil }
+        let token = components[idx + 1]
+        let server = "\(scheme)://\(host)\(url.port.map { ":\($0)" } ?? "")"
+        return (server, token)
     }
 
     private func fieldLabel(_ text: String) -> some View {
@@ -242,6 +425,16 @@ private struct SignInSheet: View {
                 return "that username is taken"
             case "invalid_credentials":
                 return "incorrect username or password"
+            case "invite_not_found":
+                return "no such invite — the link may be wrong or has been revoked"
+            case "invite_expired":
+                return "this invite has expired — ask the inviter for a fresh one"
+            case "invite_exhausted":
+                return "this invite has already been used up"
+            case "already_member":
+                return "you're already a member of this vault"
+            case "missing_token":
+                return "missing invite token"
             default:
                 return detail ?? code
             }

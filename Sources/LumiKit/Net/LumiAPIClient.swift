@@ -73,6 +73,48 @@ public actor LumiAPIClient {
         try await request(method: "GET", path: "/api/users/me", body: nil as EmptyBody?, requireToken: true)
     }
 
+    /// `GET /api/invites/:token` — public preview, no auth required. Used
+    /// to render a "join Work as Editor?" confirmation screen before the user
+    /// commits.
+    public func previewInvite(token: String) async throws(LumiAPIError) -> InvitePreview {
+        try await request(method: "GET", path: "/api/invites/\(token)", body: nil as EmptyBody?, requireToken: false)
+    }
+
+    /// `POST /api/invites/:token/accept` (authenticated). Attaches membership
+    /// to the user the client is currently signed in as. Server returns just
+    /// the vault descriptor.
+    public func acceptInviteAsExistingUser(token: String) async throws(LumiAPIError) -> AcceptedVault {
+        let envelope: AcceptExistingResponse = try await request(method: "POST", path: "/api/invites/\(token)/accept", body: EmptyBody(), requireToken: true)
+        return envelope.vault
+    }
+
+    /// `POST /api/invites/:token/accept` (signup variant). Used when no
+    /// session exists yet — the server creates the user, attaches them to
+    /// the invited vault, and returns a fresh session token. `acceptedAt`
+    /// defaults to "now" if the caller doesn't provide one.
+    public func acceptInviteWithSignup(
+        token: String,
+        username: String,
+        password: String,
+        displayName: String,
+        tosVersion: String,
+        privacyVersion: String,
+        acceptedAt: Date = Date()
+    ) async throws(LumiAPIError) -> AcceptedInviteSession {
+        let body = AcceptSignupRequest(
+            username: username,
+            password: password,
+            displayName: displayName,
+            consent: AcceptSignupConsent(
+                tosVersion: tosVersion,
+                privacyVersion: privacyVersion,
+                acceptedAt: acceptedAt
+            )
+        )
+        let envelope: AcceptSignupResponse = try await request(method: "POST", path: "/api/invites/\(token)/accept", body: body, requireToken: false)
+        return AcceptedInviteSession(token: envelope.token, expiresAt: envelope.expiresAt, vault: envelope.vault)
+    }
+
     /// `GET /api/vaults` — list vaults the authenticated user is a member of.
     public func listVaults() async throws(LumiAPIError) -> [RemoteVault] {
         let envelope: VaultListResponse = try await request(method: "GET", path: "/api/vaults", body: nil as EmptyBody?, requireToken: true)

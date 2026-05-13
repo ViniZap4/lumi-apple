@@ -196,6 +196,99 @@ struct LumiAPIClientVaultTests {
         }
     }
 
+    // MARK: - Invite flows
+
+    @Test("previewInvite decodes the public preview envelope")
+    func previewInvite() async throws {
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/invites/abc123")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = """
+            {"vault_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301",
+             "vault_name":"Work","vault_slug":"work",
+             "role_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3303","role_name":"Editor",
+             "inviter_user_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3304",
+             "expires_at":"2026-12-31T23:59:59Z",
+             "max_uses":5,"use_count":1,"email_hint":"a@e.com","requires_signup":true}
+            """.data(using: .utf8)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        let preview = try await client.previewInvite(token: "abc123")
+        #expect(preview.vaultName == "Work")
+        #expect(preview.roleName == "Editor")
+        #expect(preview.useCount == 1)
+        #expect(preview.maxUses == 5)
+        #expect(preview.requiresSignup)
+    }
+
+    @Test("acceptInviteAsExistingUser returns the joined vault")
+    func acceptExisting() async throws {
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/invites/abc/accept")
+            #expect(request.httpMethod == "POST")
+            #expect(request.value(forHTTPHeaderField: "X-Lumi-Token") == "tok")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = """
+            {"vault":{"id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301","slug":"work","name":"Work"}}
+            """.data(using: .utf8)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let vault = try await client.acceptInviteAsExistingUser(token: "abc")
+        #expect(vault.slug == "work")
+        #expect(vault.name == "Work")
+    }
+
+    @Test("acceptInviteWithSignup returns session + vault")
+    func acceptSignup() async throws {
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/invites/abc/accept")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil)!
+            let body = """
+            {"token":"new-tok","expires_at":"2026-12-31T23:59:59Z",
+             "vault":{"id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301","slug":"work","name":"Work"}}
+            """.data(using: .utf8)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        let accepted = try await client.acceptInviteWithSignup(
+            token: "abc",
+            username: "bob",
+            password: "pw",
+            displayName: "Bob",
+            tosVersion: "",
+            privacyVersion: ""
+        )
+        #expect(accepted.token == "new-tok")
+        #expect(accepted.vault.name == "Work")
+    }
+
+    @Test("expired invite surfaces server code invite_expired")
+    func inviteExpired() async throws {
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 410, httpVersion: nil, headerFields: nil)!
+            let body = #"{"error":"invite_expired"}"#.data(using: .utf8)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        do {
+            _ = try await client.previewInvite(token: "abc")
+            Issue.record("expected throw")
+        } catch let error as LumiAPIError {
+            if case let .server(_, code, _) = error {
+                #expect(code == "invite_expired")
+            } else {
+                Issue.record("expected .server, got \(error)")
+            }
+        }
+    }
+
     // MARK: - Vault flows
 
     @Test("listVaults decodes the envelope")
