@@ -9,6 +9,20 @@ private func makeClient() -> LumiAPIClient {
     return LumiAPIClient(session: session)
 }
 
+/// Helper around the typed-throw API. Sidesteps a Swift 6 compiler crash
+/// (SIL ownership verifier) we hit when combining `do/catch let as
+/// LumiAPIError` with an inner `try await` on a typed-throw async call.
+private func catchAPIError(_ body: () async throws -> Void) async -> LumiAPIError? {
+    do {
+        try await body()
+        return nil
+    } catch let error as LumiAPIError {
+        return error
+    } catch {
+        return nil
+    }
+}
+
 private let baseURL = URL(string: "https://lumi.test")!
 
 /// All MockURLProtocol-using vault tests live under one `.serialized` suite
@@ -266,6 +280,102 @@ struct LumiAPIClientVaultTests {
         )
         #expect(accepted.token == "new-tok")
         #expect(accepted.vault.name == "Work")
+    }
+
+    @Test("createInvite returns token, url, and expiry")
+    func createInviteRoundtrip() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        let roleID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3303")!
+        let expiry = Date().addingTimeInterval(7 * 24 * 3600)
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/vaults/3f2504e0-4f89-11d3-9a0c-0305e82c3301/invites")
+            #expect(request.httpMethod == "POST")
+            #expect(request.value(forHTTPHeaderField: "X-Lumi-Token") == "tok")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil)!
+            let body = """
+            {"token":"abc123","url":"https://lumi.test/invite/abc123",
+             "expires_at":"2026-12-31T23:59:59Z","max_uses":3,"use_count":0}
+            """.data(using: .utf8)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let created = try await client.createInvite(vaultID: vaultID, roleID: roleID, maxUses: 3, expiresAt: expiry, emailHint: nil)
+        #expect(created.token == "abc123")
+        #expect(created.url == "https://lumi.test/invite/abc123")
+        #expect(created.maxUses == 3)
+    }
+
+    @Test("listInvites decodes the envelope including revoked rows")
+    func listInvitesEnvelope() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/vaults/3f2504e0-4f89-11d3-9a0c-0305e82c3301/invites")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = """
+            {"invites":[
+              {"token":"a","vault_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301",
+               "role_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3303",
+               "inviter_user_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3304",
+               "email_hint":"a@e.com","max_uses":1,"use_count":0,
+               "expires_at":"2026-12-31T23:59:59Z","created_at":"2026-05-13T10:00:00Z","revoked_at":null},
+              {"token":"b","vault_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301",
+               "role_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3303",
+               "inviter_user_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3304",
+               "max_uses":0,"use_count":2,
+               "expires_at":"2026-12-31T23:59:59Z","revoked_at":"2026-05-12T10:00:00Z"}
+            ]}
+            """.data(using: .utf8)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let invites = try await client.listInvites(vaultID: vaultID)
+        #expect(invites.count == 2)
+        #expect(invites[0].token == "a")
+        #expect(invites[0].emailHint == "a@e.com")
+        #expect(invites[1].isRevoked)
+        #expect(invites[1].maxUses == 0)
+    }
+
+    @Test("revokeInvite issues DELETE and returns void")
+    func revokeRoundtrip() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/vaults/3f2504e0-4f89-11d3-9a0c-0305e82c3301/invites/abc")
+            #expect(request.httpMethod == "DELETE")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 204, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        try await client.revokeInvite(vaultID: vaultID, token: "abc")
+    }
+
+    @Test("createInvite without members.invite cap surfaces .server forbidden")
+    func createForbidden() async throws {
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!
+            let body = #"{"error":"forbidden"}"#.data(using: .utf8)!
+            return (response, body)
+        }
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        let roleID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3303")!
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let thrown: LumiAPIError? = await catchAPIError {
+            _ = try await client.createInvite(vaultID: vaultID, roleID: roleID, maxUses: 1, expiresAt: Date(), emailHint: nil)
+        }
+        if case let .server(status, code, _) = thrown {
+            #expect(status == 403)
+            #expect(code == "forbidden")
+        } else {
+            Issue.record("expected .server, got \(String(describing: thrown))")
+        }
     }
 
     @Test("expired invite surfaces server code invite_expired")

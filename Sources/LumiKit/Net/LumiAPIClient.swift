@@ -138,6 +138,51 @@ public actor LumiAPIClient {
         return envelope.roles
     }
 
+    /// `POST /api/vaults/:vault/invites` — capability `members.invite` required.
+    public func createInvite(
+        vaultID: UUID,
+        roleID: UUID,
+        maxUses: Int,
+        expiresAt: Date,
+        emailHint: String?
+    ) async throws(LumiAPIError) -> CreatedInvite {
+        let body = CreateInviteRequest(
+            roleID: roleID.uuidString.lowercased(),
+            maxUses: maxUses,
+            expiresAt: expiresAt,
+            emailHint: emailHint?.isEmpty == true ? nil : emailHint
+        )
+        return try await request(
+            method: "POST",
+            path: "/api/vaults/\(vaultID.uuidString.lowercased())/invites",
+            body: body,
+            requireToken: true
+        )
+    }
+
+    /// `GET /api/vaults/:vault/invites` — capability `members.invite` required.
+    public func listInvites(vaultID: UUID) async throws(LumiAPIError) -> [VaultInvite] {
+        let envelope: InviteListResponse = try await request(
+            method: "GET",
+            path: "/api/vaults/\(vaultID.uuidString.lowercased())/invites",
+            body: nil as EmptyBody?,
+            requireToken: true
+        )
+        return envelope.invites
+    }
+
+    /// `DELETE /api/vaults/:vault/invites/:token` — capability `members.invite`
+    /// required. Server responds 204; we synthesize an empty JSON body so the
+    /// generic decoder is happy.
+    public func revokeInvite(vaultID: UUID, token: String) async throws(LumiAPIError) {
+        let _: EmptyResponse = try await request(
+            method: "DELETE",
+            path: "/api/vaults/\(vaultID.uuidString.lowercased())/invites/\(token)",
+            body: EmptyBody(),
+            requireToken: true
+        )
+    }
+
     private func request<Body: Encodable & Sendable, Response: Decodable & Sendable>(
         method: String,
         path: String,

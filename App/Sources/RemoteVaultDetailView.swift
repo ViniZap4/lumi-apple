@@ -2,12 +2,14 @@ import SwiftUI
 import LumiKit
 
 /// Read-only overview of a server-hosted vault: name + slug, member list with
-/// roles, role list with capabilities. Note CRUD lives in a future phase
-/// (E.1.2) — that's why we don't surface a "notes" tab here yet.
+/// roles, role list with capabilities, plus invite management for users with
+/// the `members.invite` capability. Note CRUD lives in a future phase (E.1.2)
+/// — that's why we don't surface a "notes" tab here yet.
 struct RemoteVaultDetailView: View {
     let vault: RemoteVault
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
+    @State private var showCreateInvite: Bool = false
 
     var body: some View {
         ScrollView {
@@ -15,6 +17,7 @@ struct RemoteVaultDetailView: View {
                 header
                 memberSection
                 roleSection
+                inviteSection
                 placeholder
             }
             .padding(.horizontal, 32)
@@ -23,6 +26,133 @@ struct RemoteVaultDetailView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(theme.background)
+        .sheet(isPresented: $showCreateInvite) {
+            CreateInviteSheet(vault: vault, roles: appState.remoteVaultsStore.roles)
+                .environment(appState)
+                .environment(\.theme, theme)
+        }
+    }
+
+    @ViewBuilder
+    private var inviteSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                sectionTitle("Invites")
+                Spacer()
+                if canCreateInvites {
+                    Button {
+                        showCreateInvite = true
+                    } label: {
+                        Label("New invite", systemImage: "plus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(theme.primary)
+                }
+            }
+
+            if appState.remoteVaultsStore.invites.isEmpty {
+                Text(canCreateInvites ? "no invites yet" : "no invites visible (members.invite required)")
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundStyle(theme.textDim)
+            } else {
+                ForEach(appState.remoteVaultsStore.invites) { invite in
+                    inviteRow(invite)
+                }
+            }
+        }
+    }
+
+    /// `members.invite` capability is owned by the current session's member
+    /// row. We look it up against the vault's member list.
+    private var canCreateInvites: Bool {
+        guard let session = appState.authService.currentSession else { return false }
+        let me = appState.remoteVaultsStore.members.first { $0.username == session.user.username }
+        guard let caps = me?.capabilities else { return false }
+        return caps.contains { $0 == "*" || $0 == "members.*" || $0 == "members.invite" || $0 == "vault.*" }
+    }
+
+    @ViewBuilder
+    private func inviteRow(_ invite: VaultInvite) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Image(systemName: "envelope")
+                    .foregroundStyle(invite.isActive ? theme.accent : theme.textDim)
+                Text(roleName(for: invite.roleID))
+                    .font(.system(.body, design: .monospaced).weight(.semibold))
+                    .foregroundStyle(theme.text)
+                if let hint = invite.emailHint, !hint.isEmpty {
+                    Text("· \(hint)")
+                        .font(.caption)
+                        .foregroundStyle(theme.textDim)
+                }
+                Spacer()
+                statusBadge(for: invite)
+                if invite.isActive && canCreateInvites {
+                    Button {
+                        Task { await revoke(invite) }
+                    } label: {
+                        Label("Revoke", systemImage: "xmark.circle")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(theme.textDim)
+                }
+            }
+            Text(invite.token)
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(theme.textDim)
+                .textSelection(.enabled)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            HStack(spacing: 12) {
+                if invite.maxUses > 0 {
+                    Text("uses: \(invite.useCount) / \(invite.maxUses)")
+                        .font(.caption2)
+                        .foregroundStyle(theme.textDim)
+                } else {
+                    Text("unlimited uses · \(invite.useCount) used")
+                        .font(.caption2)
+                        .foregroundStyle(theme.textDim)
+                }
+                if let expires = invite.expiresAt {
+                    Text("expires \(expires.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption2)
+                        .foregroundStyle(theme.textDim)
+                }
+            }
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(theme.overlayBackground)
+        )
+        .opacity(invite.isActive ? 1.0 : 0.6)
+    }
+
+    @ViewBuilder
+    private func statusBadge(for invite: VaultInvite) -> some View {
+        let (label, color): (String, Color) = {
+            if invite.isRevoked { return ("revoked", theme.error) }
+            if invite.isExpired { return ("expired", theme.error) }
+            if invite.isExhausted { return ("used up", theme.warning) }
+            return ("active", theme.accent)
+        }()
+        Text(label)
+            .font(.system(.caption2, design: .monospaced))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(theme.background)
+            .foregroundStyle(color)
+            .clipShape(Capsule())
+    }
+
+    private func roleName(for id: UUID) -> String {
+        appState.remoteVaultsStore.roles.first(where: { $0.id == id })?.name ?? "(unknown role)"
+    }
+
+    private func revoke(_ invite: VaultInvite) async {
+        try? await appState.remoteVaultsStore.revokeInvite(token: invite.token)
     }
 
     @ViewBuilder
