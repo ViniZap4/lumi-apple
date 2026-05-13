@@ -16,17 +16,25 @@ struct RootView: View {
         // whether a note is open. No third "detail" column, so notes don't
         // sit beside the list — they replace it, matching the web / TUI
         // single-pane reading experience.
-        NavigationSplitView(columnVisibility: $bound.columnVisibility) {
-            VaultSidebar(
-                vaults: vaults,
-                selectedVaultID: $bound.selectedVaultID,
-                onAdd: addVault,
-                onSelect: selectLocalVault
-            )
-            .navigationTitle("Vaults")
-        } detail: {
-            mainContent
+        VStack(spacing: 0) {
+            NavigationSplitView(columnVisibility: $bound.columnVisibility) {
+                VaultSidebar(
+                    vaults: vaults,
+                    selectedVaultID: $bound.selectedVaultID,
+                    onAdd: addVault,
+                    onSelect: selectLocalVault
+                )
+                .navigationTitle("Vaults")
+            } detail: {
+                mainContent
+            }
+            if appState.preferences.showKeybindsBar {
+                KeybindsBar(context: keybindsContext)
+                    .transition(.opacity)
+            }
         }
+        .animation(.easeInOut(duration: 0.15), value: appState.preferences.showKeybindsBar)
+        .animation(.easeInOut(duration: 0.12), value: keybindsContext)
         .background(theme.background)
         .toolbar {
             #if os(macOS)
@@ -55,13 +63,18 @@ struct RootView: View {
             // hidden when no note is open. Cmd+E flips it from anywhere.
             if appState.selectedEntry != nil {
                 ToolbarItem(placement: .principal) {
-                    Picker("Mode", selection: $bound.editorMode) {
-                        Image(systemName: "doc.text").tag(NoteDisplayMode.view)
-                        Image(systemName: "square.and.pencil").tag(NoteDisplayMode.edit)
+                    HStack(spacing: 12) {
+                        Picker("Mode", selection: $bound.editorMode) {
+                            Image(systemName: "doc.text").tag(NoteDisplayMode.view)
+                            Image(systemName: "square.and.pencil").tag(NoteDisplayMode.edit)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 100)
+                        .help("Read / edit mode (⌘E)")
+                        if appState.editorMode == .edit {
+                            ToolbarVimModeBadge(mode: appState.liveVimMode)
+                        }
                     }
-                    .pickerStyle(.segmented)
-                    .frame(width: 100)
-                    .help("Read / edit mode (⌘E)")
                 }
             }
             ToolbarItem(placement: .primaryAction) {
@@ -165,6 +178,15 @@ struct RootView: View {
         record.lastOpenedAt = Date()
     }
 
+    /// Tell the bottom keybinds bar which set of hints to show based on
+    /// what's currently in the content area.
+    private var keybindsContext: KeybindsBar.Context {
+        if appState.selectedEntry != nil {
+            return appState.editorMode == .edit ? .noteEdit : .noteView
+        }
+        return .tree
+    }
+
     private func selectNote(_ entry: NoteEntry) {
         guard let session = appState.session else { return }
         if appState.editor.isDirty {
@@ -188,5 +210,35 @@ struct RootView: View {
         modelContext.insert(record)
         try? modelContext.save()
         selectVault(record)
+    }
+}
+
+/// Compact vim mode label for the global toolbar — same color logic as the
+/// in-pane badge but smaller padding so it doesn't bloat the title bar.
+private struct ToolbarVimModeBadge: View {
+    let mode: VimMode
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        let (label, color) = parts
+        Text(label)
+            .font(.system(.caption2, design: .monospaced).weight(.bold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(color)
+            )
+            .foregroundStyle(theme.background)
+            .help("Vim mode")
+    }
+
+    private var parts: (String, Color) {
+        switch mode {
+        case .normal: return ("NORMAL", theme.accent)
+        case .insert: return ("INSERT", theme.primary)
+        case .visual: return (mode.label, theme.warning)
+        case let .commandLine(prefix, _): return (String(prefix), theme.accent)
+        }
     }
 }

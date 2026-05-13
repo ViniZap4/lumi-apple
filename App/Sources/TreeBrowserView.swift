@@ -272,43 +272,45 @@ private struct ColumnList: View {
 
     @ViewBuilder
     private func row(item: FolderNode.Item, isHighlighted: Bool) -> some View {
+        // When the row is "lit up" (active-column selection) the bg becomes
+        // a strong accent fill, so text/icons need to flip to the background
+        // color for legible contrast — same trick web/TUI use.
+        let isActiveSelection = isHighlighted && cursorIsActive
+        let primaryFg = isActiveSelection ? theme.background : theme.text
+        let secondaryFg = isActiveSelection ? theme.background.opacity(0.85) : theme.textDim
+
         HStack(spacing: 8) {
             Image(systemName: icon(for: item))
-                .foregroundStyle(isHighlighted ? rowAccent : iconColor(for: item))
+                .foregroundStyle(isActiveSelection ? theme.background : iconColor(for: item))
                 .frame(width: 16, alignment: .center)
             VStack(alignment: .leading, spacing: 0) {
                 Text(item.name)
                     .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(theme.text)
+                    .foregroundStyle(primaryFg)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if case .note(let n) = item {
                     Text(n.updatedAt.formatted(.relative(presentation: .numeric)))
                         .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(theme.textDim)
+                        .foregroundStyle(secondaryFg)
                 }
             }
             Spacer(minLength: 0)
             if case .folder = item {
                 Image(systemName: "chevron.right")
                     .font(.caption2)
-                    .foregroundStyle(isHighlighted ? theme.text : theme.textDim)
+                    .foregroundStyle(isActiveSelection ? theme.background : theme.textDim)
             }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .background(
+            // Solid background pill for the active selection. The earlier
+            // border-around-row look made the cursor read as outlined; a
+            // filled bg matches the web/TUI feel where the cursor row is
+            // the loudest thing on the screen.
             RoundedRectangle(cornerRadius: 4, style: .continuous)
                 .fill(isHighlighted ? rowBackground : Color.clear)
-        )
-        .overlay(
-            // Thin accent stripe on the left edge of the highlighted row in
-            // the active column — TUI-style cursor cue.
-            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .strokeBorder(
-                    isHighlighted && cursorIsActive ? theme.accent : .clear,
-                    lineWidth: 1
-                )
         )
         .contentShape(Rectangle())
     }
@@ -321,13 +323,17 @@ private struct ColumnList: View {
     }
 
     private var rowAccent: Color {
-        cursorIsActive ? theme.accent : theme.textDim
+        cursorIsActive ? theme.background : theme.textDim
     }
 
     private var rowBackground: Color {
-        if cursorIsActive { return theme.overlayBackground }
+        if cursorIsActive {
+            // Strong tinted bg for the active-column selection — reads as
+            // "you are here" without needing an outline.
+            return theme.accent.opacity(0.85)
+        }
         // Dim parent-column highlight so the eye lands on the active column.
-        return theme.overlayBackground.opacity(0.4)
+        return theme.overlayBackground.opacity(0.6)
     }
 
     private func icon(for item: FolderNode.Item) -> String {

@@ -43,6 +43,11 @@ final class AppState {
     /// always land in the preview pane first.
     var editorMode: NoteDisplayMode = .view
 
+    /// Live vim engine mode for the currently open note. Surfaced to the
+    /// toolbar's VimModeBadge so the user sees NORMAL / INSERT / VISUAL /
+    /// COMMAND from anywhere in the chrome.
+    var liveVimMode: VimMode = .normal
+
     /// Notes scanned from the currently selected vault. Cached here so the
     /// detail view can resolve a selection by id without re-walking the disk.
     /// (Legacy field — the lazy tree replaces it for new flows but a few

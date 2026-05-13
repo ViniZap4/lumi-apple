@@ -66,6 +66,10 @@ struct VimTextViewBridge: NSViewRepresentable {
         applyHighlights(to: textView.textStorage, color: NSColor(theme.warning).withAlphaComponent(0.35))
         if textView.selectedRange() != selection {
             textView.setSelectedRange(selection)
+            // Keep the cursor on-screen — without this the user can navigate
+            // (j/k, gg/G, /search) and the cursor walks past the visible
+            // region with the viewport stuck where it was.
+            textView.scrollRangeToVisible(selection)
         }
     }
 
@@ -216,6 +220,7 @@ struct VimTextViewBridge: UIViewRepresentable {
         applyHighlights(to: view.textStorage, color: UIColor(theme.warning).withAlphaComponent(0.35))
         if view.selectedRange != selection {
             view.selectedRange = selection
+            view.scrollRangeToVisible(selection)
         }
 
         // Swap accessory views based on the engine mode.

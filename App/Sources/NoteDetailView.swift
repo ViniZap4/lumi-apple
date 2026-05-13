@@ -20,7 +20,6 @@ struct NoteDetailView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
 
-    @State private var vimMode: VimMode = .normal
 
     /// Read-vs-edit toggle is hoisted to AppState so the global toolbar
     /// renders the picker alongside theme/settings/etc. Local binding so
@@ -37,8 +36,6 @@ struct NoteDetailView: View {
             // buttons). Keeps save/conflict status close to the content.
             DetailStatusBar(
                 editor: editor,
-                vimMode: vimMode,
-                inEditMode: mode == .edit,
                 onSave: { editor.save() },
                 onReload: { editor.reloadFromDisk(vaultRoot: vaultRoot) },
                 onForceSave: { editor.forceSave() },
@@ -71,7 +68,7 @@ struct NoteDetailView: View {
                     get: { editor.currentText },
                     set: { editor.currentText = $0 }
                 ),
-                onModeChange: { vimMode = $0 },
+                onModeChange: { appState.liveVimMode = $0 },
                 onEffect: { effect in
                     handleVimEffect(effect, editor: editor)
                 },
@@ -95,7 +92,7 @@ struct NoteDetailView: View {
     }
 
     private var editModeColor: Color {
-        switch vimMode {
+        switch appState.liveVimMode {
         case .insert: return theme.primary
         case .visual: return theme.warning
         case .commandLine: return theme.accent
@@ -131,14 +128,12 @@ struct NoteDetailView: View {
     }
 }
 
-/// Compact status bar inside the note pane. Shows the vim-mode badge when
-/// editing, the editor status (modified / saved / conflict / error), and
-/// a Cmd-S save button. Mode toggle is *not* here — it lives in the global
-/// toolbar so all chrome is centralized at the top of the window.
+/// Compact status bar inside the note pane. Shows only the editor save
+/// state + a Cmd-S save button. The vim-mode badge and the read/edit
+/// picker both live in the global toolbar now so the chrome stays
+/// centralized at the top.
 private struct DetailStatusBar: View {
     let editor: EditorState
-    let vimMode: VimMode
-    let inEditMode: Bool
     let onSave: () -> Void
     let onReload: () -> Void
     let onForceSave: () -> Void
@@ -149,9 +144,6 @@ private struct DetailStatusBar: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                if inEditMode {
-                    VimModeBadge(vimMode: vimMode)
-                }
                 Spacer()
                 StatusLabel(editor: editor)
                 Button(action: onSave) {
@@ -200,8 +192,8 @@ private struct MarkdownReader: View {
             // Tight stack so the body's whitespace stays consistent.
             VStack(alignment: .leading, spacing: 10) {
                 Text(title)
-                    .font(.system(size: 34, weight: .semibold, design: .default))
-                    .foregroundStyle(theme.text)
+                    .font(.system(size: 30, weight: .bold, design: .default))
+                    .foregroundStyle(theme.primary)
                     .lineSpacing(2)
                     .fixedSize(horizontal: false, vertical: true)
                 if !tags.isEmpty {
@@ -228,8 +220,8 @@ private struct MarkdownReader: View {
             }
         }
         .padding(.horizontal, 48)
-        .padding(.top, 36)
-        .padding(.bottom, 80)
+        .padding(.top, 32)
+        .padding(.bottom, 24)
         // Narrower max width for comfortable measure — ~70–75 chars of body
         // at our default size. Centered in the available pane via the
         // outer infinity frame.

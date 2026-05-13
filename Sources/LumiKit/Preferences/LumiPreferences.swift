@@ -87,6 +87,31 @@ public final class LumiPreferences {
         didSet { defaults.set(editorSyntaxColor, forKey: Keys.editorSyntaxColor) }
     }
 
+    /// Display the contextual keybinds bar at the bottom of the window.
+    /// Off matches a chrome-light reading mode; on mirrors what TUI / web
+    /// show by default.
+    public var showKeybindsBar: Bool {
+        didSet { defaults.set(showKeybindsBar, forKey: Keys.showKeybindsBar) }
+    }
+
+    /// How the active theme is chosen: explicit dark, explicit light, or
+    /// auto-follow the system. Auto uses `defaultLight` for light system
+    /// appearance and `defaultDark` otherwise.
+    public var themeMode: ThemeMode {
+        didSet { defaults.set(themeMode.rawValue, forKey: Keys.themeMode) }
+    }
+    public enum ThemeMode: String, CaseIterable, Identifiable, Sendable {
+        case auto, dark, light
+        public var id: String { rawValue }
+        public var label: String {
+            switch self {
+            case .auto: return "Follow system"
+            case .dark: return "Always dark"
+            case .light: return "Always light"
+            }
+        }
+    }
+
     private let defaults: UserDefaults
 
     public init(defaults: UserDefaults = .standard) {
@@ -102,6 +127,9 @@ public final class LumiPreferences {
         self.previewLines = defaults.object(forKey: Keys.previewLines) as? Int ?? 20
         self.vimBlockCursor = defaults.object(forKey: Keys.vimBlockCursor) as? Bool ?? true
         self.editorSyntaxColor = defaults.object(forKey: Keys.editorSyntaxColor) as? Bool ?? true
+        self.showKeybindsBar = defaults.object(forKey: Keys.showKeybindsBar) as? Bool ?? true
+        let rawTheme = defaults.string(forKey: Keys.themeMode) ?? ThemeMode.auto.rawValue
+        self.themeMode = ThemeMode(rawValue: rawTheme) ?? .auto
     }
 
     private enum Keys {
@@ -115,5 +143,7 @@ public final class LumiPreferences {
         static let previewLines = "lumi.pref.previewLines.v1"
         static let vimBlockCursor = "lumi.pref.vimBlockCursor.v1"
         static let editorSyntaxColor = "lumi.pref.editorSyntaxColor.v1"
+        static let showKeybindsBar = "lumi.pref.showKeybindsBar.v1"
+        static let themeMode = "lumi.pref.themeMode.v1"
     }
 }

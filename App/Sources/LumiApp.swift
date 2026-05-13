@@ -7,6 +7,19 @@ import LumiUI
 struct LumiApp: App {
     @State private var appState = AppState()
 
+    /// Map preferences.themeMode + the active theme into a SwiftUI
+    /// preferredColorScheme. `auto` returns nil (system follows). `dark` /
+    /// `light` force the scheme regardless of theme palette so users can
+    /// pin the OS chrome (window controls, segmented controls) independent
+    /// of which color palette they picked.
+    private var preferredScheme: ColorScheme? {
+        switch appState.preferences.themeMode {
+        case .auto: return nil
+        case .dark: return .dark
+        case .light: return .light
+        }
+    }
+
     private static let sharedContainer: ModelContainer = {
         do {
             return try VaultModelContainer.make()
@@ -20,7 +33,7 @@ struct LumiApp: App {
             RootView()
                 .environment(appState)
                 .environment(\.theme, appState.theme.tokens)
-                .preferredColorScheme(appState.theme.tokens.isDark ? .dark : .light)
+                .preferredColorScheme(preferredScheme)
                 .tint(appState.theme.tokens.primary)
         }
         .modelContainer(Self.sharedContainer)

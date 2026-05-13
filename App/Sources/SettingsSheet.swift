@@ -2,211 +2,268 @@ import SwiftUI
 import LumiKit
 import LumiUI
 
-/// User preferences. Sections roughly mirror the TUI's `view_config`:
-/// Appearance, Editor, Vim, Navigation. Each toggle binds straight to
-/// LumiPreferences; values persist to UserDefaults as they change.
+/// Two-pane settings: sections list on the left, current section's controls
+/// on the right. Matches the macOS System Settings convention and gives
+/// future sections room to grow without scrolling-through-everything.
 struct SettingsSheet: View {
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
 
-    var body: some View {
-        @Bindable var prefs = appState.preferences
-        @Bindable var bound = appState
-
-        VStack(spacing: 0) {
-            header
-            Divider().background(theme.border)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    appearanceSection(themeBinding: $bound.theme)
-                    editorSection(
-                        defaultOpenMode: $prefs.defaultOpenMode,
-                        editorFontSize: $prefs.editorFontSize,
-                        showLineNumbers: $prefs.showLineNumbers,
-                        relativeLineNumbers: $prefs.relativeLineNumbers,
-                        editorSyntaxColor: $prefs.editorSyntaxColor
-                    )
-                    vimSection(
-                        vimBlockCursor: $prefs.vimBlockCursor,
-                        jjEscapeMapping: $prefs.jjEscapeMapping,
-                        vimNavigationInList: $prefs.vimNavigationInList,
-                        jkScrollInView: $prefs.jkScrollInView
-                    )
-                    navigationSection(previewLines: $prefs.previewLines)
-                }
-                .padding(24)
-                .frame(maxWidth: .infinity, alignment: .leading)
+    enum Section: String, CaseIterable, Identifiable {
+        case appearance, editor, vim, navigation, chrome
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .appearance: return "Appearance"
+            case .editor: return "Editor"
+            case .vim: return "Vim"
+            case .navigation: return "Navigation"
+            case .chrome: return "Chrome"
             }
         }
-        .frame(minWidth: 560, minHeight: 520)
-        .background(theme.background)
+        var icon: String {
+            switch self {
+            case .appearance: return "paintbrush.fill"
+            case .editor: return "square.and.pencil"
+            case .vim: return "command"
+            case .navigation: return "rectangle.3.group"
+            case .chrome: return "macwindow"
+            }
+        }
     }
 
-    // MARK: - Header
+    @State private var selected: Section = .appearance
+
+    var body: some View {
+        HStack(spacing: 0) {
+            sidebar
+            Divider().background(theme.border)
+            contentPane
+        }
+        .frame(minWidth: 680, minHeight: 520)
+        .background(theme.background)
+        .overlay(alignment: .topTrailing) {
+            Button(action: { dismiss() }) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(theme.textDim)
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(.cancelAction)
+            .padding(12)
+        }
+    }
+
+    // MARK: - Sidebar
 
     @ViewBuilder
-    private var header: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "gearshape.fill")
-                .foregroundStyle(theme.primary)
-            Text("settings")
-                .font(.system(.title3, design: .monospaced).weight(.semibold))
-                .foregroundStyle(theme.text)
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "gearshape.fill")
+                    .foregroundStyle(theme.primary)
+                Text("settings")
+                    .font(.system(.callout, design: .monospaced).weight(.semibold))
+                    .foregroundStyle(theme.text)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 18)
+            .padding(.bottom, 14)
+
+            ForEach(Section.allCases) { section in
+                Button {
+                    selected = section
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: section.icon)
+                            .frame(width: 18)
+                            .foregroundStyle(selected == section ? theme.background : theme.textDim)
+                        Text(section.label)
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(selected == section ? theme.background : theme.text)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(selected == section ? theme.accent : Color.clear)
+                    )
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 8)
+            }
             Spacer()
-            Button("Done") { dismiss() }
-                .buttonStyle(.borderless)
-                .keyboardShortcut(.cancelAction)
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 14)
+        .frame(width: 200, alignment: .topLeading)
         .background(theme.overlayBackground)
     }
 
-    // MARK: - Appearance
+    // MARK: - Content pane
 
     @ViewBuilder
-    private func appearanceSection(themeBinding: Binding<LumiTheme>) -> some View {
-        sectionContainer(title: "appearance", icon: "paintbrush.fill") {
-            VStack(alignment: .leading, spacing: 12) {
-                pickerRow(
-                    title: "Theme",
-                    detail: "12 built-in themes shared with the web and TUI clients.",
-                    selection: themeBinding,
-                    options: LumiTheme.allCases,
-                    label: { $0.label }
-                )
+    private var contentPane: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                sectionHeader
+                switch selected {
+                case .appearance: appearanceSection
+                case .editor: editorSection
+                case .vim: vimSection
+                case .navigation: navigationSection
+                case .chrome: chromeSection
+                }
             }
+            .padding(28)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
-    // MARK: - Editor
-
     @ViewBuilder
-    private func editorSection(
-        defaultOpenMode: Binding<LumiPreferences.DefaultOpenMode>,
-        editorFontSize: Binding<Double>,
-        showLineNumbers: Binding<Bool>,
-        relativeLineNumbers: Binding<Bool>,
-        editorSyntaxColor: Binding<Bool>
-    ) -> some View {
-        sectionContainer(title: "editor", icon: "square.and.pencil") {
-            VStack(alignment: .leading, spacing: 12) {
-                pickerRow(
-                    title: "Default open mode",
-                    detail: "What mode a freshly-tapped note lands in.",
-                    selection: defaultOpenMode,
-                    options: LumiPreferences.DefaultOpenMode.allCases,
-                    label: { $0.label }
-                )
-                stepperRow(
-                    title: "Editor font size",
-                    detail: "Body font size for both the editor and the read pane.",
-                    value: editorFontSize,
-                    in: 11.0...22.0,
-                    step: 1.0,
-                    format: { String(format: "%.0f pt", $0) }
-                )
-                toggleRow(
-                    title: "Show line numbers",
-                    detail: "Gutter line numbers in the vim editor.",
-                    isOn: showLineNumbers
-                )
-                toggleRow(
-                    title: "Relative line numbers",
-                    detail: "Vim's `relativenumber`. Useful for `10j` style jumps.",
-                    isOn: relativeLineNumbers
-                )
-                toggleRow(
-                    title: "Markdown syntax color in editor",
-                    detail: "Highlight headings, code, bold, links while editing.",
-                    isOn: editorSyntaxColor
-                )
-            }
+    private var sectionHeader: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(selected.label.lowercased())
+                .font(.system(.title2, design: .monospaced).weight(.semibold))
+                .foregroundStyle(theme.text)
+            Text(headerSubtitle)
+                .font(.caption)
+                .foregroundStyle(theme.textDim)
+        }
+        .padding(.bottom, 8)
+    }
+
+    private var headerSubtitle: String {
+        switch selected {
+        case .appearance: return "themes, colors, light/dark mode"
+        case .editor: return "fonts, line numbers, syntax color, default open mode"
+        case .vim: return "vim-style key bindings throughout the app"
+        case .navigation: return "tree browser preview density"
+        case .chrome: return "what's shown around the content — bars, badges"
         }
     }
 
-    // MARK: - Vim
+    // MARK: - Sections
+    //
+    // Each section grabs @Bindable inside its own scope so the row-level
+    // `$prefs.field` returns a real `Binding`. Trying to pass `Bindable<T>`
+    // across function boundaries crosses the wires — Bindable is the
+    // *property-wrapper* projection, not a Binding, and the row helpers
+    // (Toggle, Picker, Stepper) need a concrete Binding<Field>.
 
     @ViewBuilder
-    private func vimSection(
-        vimBlockCursor: Binding<Bool>,
-        jjEscapeMapping: Binding<Bool>,
-        vimNavigationInList: Binding<Bool>,
-        jkScrollInView: Binding<Bool>
-    ) -> some View {
-        sectionContainer(title: "vim", icon: "command") {
-            VStack(alignment: .leading, spacing: 12) {
-                toggleRow(
-                    title: "Block cursor in normal mode",
-                    detail: "Tinted block over the character under the cursor, like in terminal vim.",
-                    isOn: vimBlockCursor
-                )
-                toggleRow(
-                    title: "Map jj to escape (insert mode)",
-                    detail: "Typing j j in quick succession exits insert and removes the buffered j.",
-                    isOn: jjEscapeMapping
-                )
-                toggleRow(
-                    title: "Vim keys in note list",
-                    detail: "j/k move · l or ↩ opens · h collapses · gg / G top / bottom.",
-                    isOn: vimNavigationInList
-                )
-                toggleRow(
-                    title: "j / k scroll in read mode",
-                    detail: "Hold to keep scrolling; ⌃d / ⌃u half-page; g / G top / bottom.",
-                    isOn: jkScrollInView
-                )
-            }
+    private var appearanceSection: some View {
+        @Bindable var prefs = appState.preferences
+        @Bindable var bound = appState
+        VStack(alignment: .leading, spacing: 14) {
+            pickerRow(
+                title: "Mode",
+                detail: "Follow system uses your macOS appearance; explicit overrides the system.",
+                selection: $prefs.themeMode,
+                options: LumiPreferences.ThemeMode.allCases,
+                label: { $0.label }
+            )
+            pickerRow(
+                title: "Theme",
+                detail: "Active theme palette. Shared with web and TUI clients.",
+                selection: $bound.theme,
+                options: LumiTheme.allCases,
+                label: { $0.label }
+            )
         }
     }
 
-    // MARK: - Navigation
-
     @ViewBuilder
-    private func navigationSection(previewLines: Binding<Int>) -> some View {
-        sectionContainer(title: "navigation", icon: "rectangle.3.group") {
-            VStack(alignment: .leading, spacing: 12) {
-                stepperRow(
-                    title: "Preview body lines",
-                    detail: "Max lines shown in the three-column browser's preview pane.",
-                    value: Binding<Double>(
-                        get: { Double(previewLines.wrappedValue) },
-                        set: { previewLines.wrappedValue = Int($0) }
-                    ),
-                    in: 5.0...80.0,
-                    step: 5.0,
-                    format: { "\(Int($0)) lines" }
-                )
-            }
+    private var editorSection: some View {
+        @Bindable var prefs = appState.preferences
+        VStack(alignment: .leading, spacing: 14) {
+            pickerRow(
+                title: "Default open mode",
+                detail: "What mode a freshly-tapped note lands in.",
+                selection: $prefs.defaultOpenMode,
+                options: LumiPreferences.DefaultOpenMode.allCases,
+                label: { $0.label }
+            )
+            stepperRow(
+                title: "Editor font size",
+                detail: "Body font size for both the editor and the read pane.",
+                value: $prefs.editorFontSize,
+                in: 11.0...22.0,
+                step: 1.0,
+                format: { String(format: "%.0f pt", $0) }
+            )
+            toggleRow(
+                title: "Show line numbers",
+                detail: "Gutter line numbers in the vim editor.",
+                isOn: $prefs.showLineNumbers
+            )
+            toggleRow(
+                title: "Relative line numbers",
+                detail: "Vim's `relativenumber`. Useful for `10j` style jumps.",
+                isOn: $prefs.relativeLineNumbers
+            )
+            toggleRow(
+                title: "Markdown syntax color",
+                detail: "Highlight headings, code, bold, links while editing.",
+                isOn: $prefs.editorSyntaxColor
+            )
         }
     }
 
-    // MARK: - Section container
+    @ViewBuilder
+    private var vimSection: some View {
+        @Bindable var prefs = appState.preferences
+        VStack(alignment: .leading, spacing: 14) {
+            toggleRow(
+                title: "Block cursor in normal mode",
+                detail: "Tinted block over the character under the cursor, like terminal vim.",
+                isOn: $prefs.vimBlockCursor
+            )
+            toggleRow(
+                title: "Map jj to escape (insert)",
+                detail: "Typing j j in quick succession exits insert and removes the buffered j.",
+                isOn: $prefs.jjEscapeMapping
+            )
+            toggleRow(
+                title: "Vim keys in note tree",
+                detail: "j/k move · l or ↩ opens · h collapses · gg / G top / bottom.",
+                isOn: $prefs.vimNavigationInList
+            )
+            toggleRow(
+                title: "j / k scroll in read mode",
+                detail: "Hold to keep scrolling; ⌃d / ⌃u half-page; g / G top / bottom.",
+                isOn: $prefs.jkScrollInView
+            )
+        }
+    }
 
     @ViewBuilder
-    private func sectionContainer<Content: View>(
-        title: String,
-        icon: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: icon)
-                    .font(.caption)
-                    .foregroundStyle(theme.accent)
-                Text(title)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(theme.textDim)
-                    .textCase(.uppercase)
-            }
-            content()
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(theme.overlayBackground)
-                )
+    private var navigationSection: some View {
+        @Bindable var prefs = appState.preferences
+        VStack(alignment: .leading, spacing: 14) {
+            stepperRow(
+                title: "Preview body lines",
+                detail: "Max lines shown in the three-column browser's preview pane.",
+                value: Binding<Double>(
+                    get: { Double(prefs.previewLines) },
+                    set: { prefs.previewLines = Int($0) }
+                ),
+                in: 5.0...80.0,
+                step: 5.0,
+                format: { "\(Int($0)) lines" }
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var chromeSection: some View {
+        @Bindable var prefs = appState.preferences
+        VStack(alignment: .leading, spacing: 14) {
+            toggleRow(
+                title: "Keybinds bar",
+                detail: "Contextual key hints along the bottom of the window — same idea as TUI's status bar.",
+                isOn: $prefs.showKeybindsBar
+            )
         }
     }
 
@@ -214,12 +271,14 @@ struct SettingsSheet: View {
 
     @ViewBuilder
     private func toggleRow(title: String, detail: String, isOn: Binding<Bool>) -> some View {
-        HStack(alignment: .top) {
-            settingLabel(title: title, detail: detail)
-            Spacer(minLength: 12)
-            Toggle("", isOn: isOn)
-                .labelsHidden()
-                .toggleStyle(.switch)
+        rowContainer {
+            HStack(alignment: .top) {
+                settingLabel(title: title, detail: detail)
+                Spacer(minLength: 12)
+                Toggle("", isOn: isOn)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
         }
     }
 
@@ -231,17 +290,19 @@ struct SettingsSheet: View {
         options: S,
         label: @escaping (Value) -> String
     ) -> some View where S.Element == Value {
-        HStack(alignment: .top) {
-            settingLabel(title: title, detail: detail)
-            Spacer(minLength: 12)
-            Picker("", selection: selection) {
-                ForEach(Array(options)) { opt in
-                    Text(label(opt)).tag(opt)
+        rowContainer {
+            HStack(alignment: .top) {
+                settingLabel(title: title, detail: detail)
+                Spacer(minLength: 12)
+                Picker("", selection: selection) {
+                    ForEach(Array(options)) { opt in
+                        Text(label(opt)).tag(opt)
+                    }
                 }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(maxWidth: 220)
             }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .frame(maxWidth: 220)
         }
     }
 
@@ -254,17 +315,30 @@ struct SettingsSheet: View {
         step: Double,
         format: @escaping (Double) -> String
     ) -> some View {
-        HStack(alignment: .top) {
-            settingLabel(title: title, detail: detail)
-            Spacer(minLength: 12)
-            Stepper(value: value, in: range, step: step) {
-                Text(format(value.wrappedValue))
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(theme.text)
-                    .frame(minWidth: 90, alignment: .trailing)
+        rowContainer {
+            HStack(alignment: .top) {
+                settingLabel(title: title, detail: detail)
+                Spacer(minLength: 12)
+                Stepper(value: value, in: range, step: step) {
+                    Text(format(value.wrappedValue))
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(theme.text)
+                        .frame(minWidth: 90, alignment: .trailing)
+                }
+                .labelsHidden()
             }
-            .labelsHidden()
         }
+    }
+
+    @ViewBuilder
+    private func rowContainer<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(theme.overlayBackground)
+            )
     }
 
     @ViewBuilder
@@ -282,8 +356,6 @@ struct SettingsSheet: View {
 }
 
 private extension LumiTheme {
-    /// Friendly display label for the theme menu picker. Title-cases the
-    /// underlying slug (e.g. "tokyo-night" → "Tokyo night").
     var label: String {
         rawValue
             .replacingOccurrences(of: "-", with: " ")
@@ -297,4 +369,3 @@ private extension String {
         return first.uppercased() + dropFirst()
     }
 }
-
