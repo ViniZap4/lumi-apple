@@ -39,24 +39,30 @@ struct VimTextViewBridge: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? VimAppKitTextView else { return }
         textView.textColor = NSColor(theme.text)
-        // In normal mode the cursor is rendered as a block (a one-char
-        // selection — see VimController.selectionUTF16Range). Hiding the
-        // insertion-point caret keeps the block from competing with a
-        // thin blinking line; coloring the selection background gives the
-        // cursor its vim look. Insert mode shows the conventional caret.
+        // Caret always visible — earlier version hid it in normal mode and
+        // relied on the 1-char selection block, which left the cursor
+        // invisible at end-of-line / empty-buffer positions where the
+        // block can't render. Now the caret stays as a fallback; the
+        // tinted selection background still gives the block-cursor look
+        // when there's a character under the cursor.
         textView.insertionPointColor = isInsertMode
             ? NSColor(theme.primary)
-            : .clear
+            : NSColor(theme.accent)
         textView.selectedTextAttributes = [
             .backgroundColor: isInsertMode
                 ? NSColor(theme.primary).withAlphaComponent(0.30)
-                : NSColor(theme.accent).withAlphaComponent(0.55)
+                : NSColor(theme.accent).withAlphaComponent(0.55),
+            .foregroundColor: NSColor(theme.text)
         ]
 
         if textView.string != text {
             textView.string = text
-            applySyntaxHighlighting(to: textView.textStorage, text: text)
         }
+        // Re-apply syntax highlighting on EVERY update, not just on text
+        // change. Previously it was gated, which meant mode toggles /
+        // selection changes / hlsearch decoration could clobber the
+        // syntax foreground colors and we'd never restore them.
+        applySyntaxHighlighting(to: textView.textStorage, text: text)
         applyHighlights(to: textView.textStorage, color: NSColor(theme.warning).withAlphaComponent(0.35))
         if textView.selectedRange() != selection {
             textView.setSelectedRange(selection)
@@ -204,8 +210,9 @@ struct VimTextViewBridge: UIViewRepresentable {
 
         if view.text != text {
             view.text = text
-            applySyntaxHighlightingIOS(to: view.textStorage, text: text)
         }
+        // Re-apply syntax highlighting on every update (see macOS comment).
+        applySyntaxHighlightingIOS(to: view.textStorage, text: text)
         applyHighlights(to: view.textStorage, color: UIColor(theme.warning).withAlphaComponent(0.35))
         if view.selectedRange != selection {
             view.selectedRange = selection
