@@ -411,6 +411,12 @@ public enum VimEngine {
             return Result(state: state, buffer: buffer)
         }
 
+        // Mode-independent macro stop — see handleInsert for the same guard.
+        if state.recordingMacro != nil, !state.isPlayingMacro,
+           case .character("q") = input {
+            return finalizeMacroRecording(state: state, buffer: buffer)
+        }
+
         switch input {
         case .escape:
             state.mode = .normal
@@ -1149,6 +1155,15 @@ public enum VimEngine {
     private static func handleInsert(input: VimInput, state: VimState, buffer: TextBuffer) -> Result {
         var state = state
         var buffer = buffer
+
+        // Mode-independent macro stop: `q` while recording finalizes regardless
+        // of mode. The wrapper just appended this `q` to recordingMacroInputs,
+        // and `finalizeMacroRecording` trims it. Gated on `!isPlayingMacro` so
+        // a played-back `q` doesn't accidentally stop an outer recording.
+        if state.recordingMacro != nil, !state.isPlayingMacro,
+           case .character("q") = input {
+            return finalizeMacroRecording(state: state, buffer: buffer)
+        }
 
         switch input {
         case .escape:
