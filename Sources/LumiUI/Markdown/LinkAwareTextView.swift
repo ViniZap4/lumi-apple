@@ -106,25 +106,39 @@ public struct LinkAwareTextView: View {
         .alignmentGuide(.firstTextBaseline) { _ in
             firstLineBaselineFromTop
         }
-        // Publish the hover anchor (a SwiftUI Anchor<CGPoint> over the
-        // bottom-leading of the hovered link's bounding rect) via a
-        // preference. The tooltip itself lives at the MarkdownReader
-        // level as an overlay over the whole reading area — that way
-        // the bubble doesn't sit inside the LazyVStack's child tree at
-        // all, so its appearance can't trigger zIndex/layout re-passes
-        // that nudge the link out from under the cursor (which was
-        // the F.54 layout-loop bug).
-        .background(alignment: .topLeading) {
-            if let hover {
+        // Publish the link's on-screen rect (in the reader's named
+        // coordinate space) via a PreferenceKey. The tooltip itself
+        // lives at the MarkdownReader level as an overlay over the
+        // whole reading area — the bubble doesn't sit inside the
+        // LazyVStack's child tree at all, so its appearance can't
+        // trigger zIndex / layout re-passes that nudge the link out
+        // from under the cursor (the F.54 layout-loop bug).
+        //
+        // GeometryReader gives us this view's frame in the reader's
+        // named space; we add the link's local rect to that origin to
+        // get the link's rect in reader coords. Hand-rolled rather
+        // than using SwiftUI's `Anchor<CGPoint>` because `.offset`
+        // doesn't move anchor positions — only the rendered glyphs —
+        // and that mismatch is what put the tooltip on top of the
+        // hovered link before this fix.
+        .background {
+            GeometryReader { geo in
                 Color.clear
-                    .frame(width: 1, height: 1)
-                    .offset(x: hover.anchor.minX, y: hover.anchor.maxY)
-                    .anchorPreference(
+                    .preference(
                         key: LinkHoverAnchorPreferenceKey.self,
-                        value: .topLeading
-                    ) { anchor in
-                        LinkHoverAnchor(label: hover.label, point: anchor)
-                    }
+                        value: hover.map { h in
+                            let frame = geo.frame(in: .named(linkTooltipReaderCoordinateSpace))
+                            return LinkHoverAnchor(
+                                label: h.label,
+                                linkRect: CGRect(
+                                    x: frame.minX + h.anchor.minX,
+                                    y: frame.minY + h.anchor.minY,
+                                    width: h.anchor.width,
+                                    height: h.anchor.height
+                                )
+                            )
+                        }
+                    )
             }
         }
         .animation(.easeOut(duration: 0.16), value: hover)
@@ -479,28 +493,24 @@ private func resolveURL(_ link: Any) -> URL? {
     }
 }
 
-/// Anchor + label for the active link-hover tooltip. Carries a SwiftUI
-/// `Anchor<CGPoint>` pinned to the hovered link's bottom-leading
-/// corner, which the `MarkdownReader`'s `.overlayPreferenceValue`
-/// resolves against the reader's coordinate space — that way the
-/// tooltip lives outside the LazyVStack child tree entirely and can't
-/// trigger sibling-rerender / zIndex-driven layout passes that nudge
-/// the link's frame.
+/// Tooltip handoff between `LinkAwareTextView` and the
+/// `MarkdownReader`-level overlay. Carries the path label plus the
+/// hovered link's rect already translated into the reader's named
+/// coordinate space.
+///
+/// We don't use `Anchor<CGPoint>` here even though it's the more
+/// idiomatic SwiftUI primitive — SwiftUI's `.offset` modifier moves
+/// rendered glyphs but doesn't move `Anchor` values (anchors track
+/// the view's *layout* position, not its rendered position). Doing
+/// the coord conversion by hand via `GeometryReader` + `.frame
+/// (in: .named(...))` gives us the link's actual on-screen rect.
 public struct LinkHoverAnchor: Equatable, Sendable {
     public let label: String
-    public let point: Anchor<CGPoint>
+    public let linkRect: CGRect
 
-    public init(label: String, point: Anchor<CGPoint>) {
+    public init(label: String, linkRect: CGRect) {
         self.label = label
-        self.point = point
-    }
-
-    public static func == (lhs: Self, rhs: Self) -> Bool {
-        // Anchor<CGPoint> isn't Equatable; equality on the label is a
-        // sufficient proxy for SwiftUI's `.animation(value:)` driver
-        // because the same link's anchor doesn't move while it's
-        // being hovered (we deliberately pin to the first fragment).
-        lhs.label == rhs.label
+        self.linkRect = linkRect
     }
 }
 
@@ -516,6 +526,12 @@ public struct LinkHoverAnchorPreferenceKey: PreferenceKey {
         value = value ?? nextValue()
     }
 }
+
+/// Name of the coordinate space `MarkdownReader` attaches to its
+/// scrolling content. `LinkAwareTextView` uses it to convert local
+/// link rects into reader-space rects so the global tooltip overlay
+/// has the right (x, y) to render at.
+public let linkTooltipReaderCoordinateSpace = "lumi.markdownReader"
 
 /// Protocol the NSTextView calls back to when it has freshly-laid-out
 /// link rects. Decoupled so the view doesn't need to know about

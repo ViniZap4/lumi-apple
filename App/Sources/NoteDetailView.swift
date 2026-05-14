@@ -347,31 +347,23 @@ private struct MarkdownReader: View {
                 .allowsHitTesting(false)
                 .animation(.easeOut(duration: 0.45), value: yankFlashOpacity)
         }
-        // Global link-tooltip overlay. Each `LinkAwareTextView` publishes
-        // its hovered link's anchor (an Anchor<CGPoint> at the link's
-        // bottom-leading) through `LinkHoverAnchorPreferenceKey`; this
-        // overlay resolves the anchor in the reader's own coordinate
-        // space and renders the themed bubble there. Living up here —
-        // outside the LazyVStack's child tree — means the bubble's
-        // appearance can't cascade back into per-block layout passes
-        // (the F.54→F.56 zIndex hoist did, which is what was nudging
-        // the link out from under the cursor on hover).
-        .overlayPreferenceValue(LinkHoverAnchorPreferenceKey.self) { anchor in
+        // Coordinate space that `LinkAwareTextView` converts its local
+        // link rect into. The overlay below shares the same space, so
+        // the published `linkRect` can be used as-is for positioning.
+        .coordinateSpace(name: linkTooltipReaderCoordinateSpace)
+        // Global link-tooltip overlay. Each `LinkAwareTextView`
+        // publishes the hovered link's rect (already translated into
+        // this view's coordinate space) through
+        // `LinkHoverAnchorPreferenceKey`; this overlay reads that rect
+        // and places the themed bubble just below the link. Living up
+        // here — outside the LazyVStack's child tree — means the
+        // bubble's appearance can't cascade back into per-block
+        // layout passes (the F.54→F.56 zIndex hoist did, which is
+        // what was nudging the link out from under the cursor on
+        // hover).
+        .overlay(alignment: .topLeading) {
             GeometryReader { proxy in
-                if let anchor {
-                    let point = proxy[anchor.point]
-                    LinkTooltipBubble(label: anchor.label)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .offset(
-                            x: max(0, min(max(0, proxy.size.width - linkTooltipMaxWidth), point.x)),
-                            y: point.y + 8
-                        )
-                        .transition(
-                            .opacity.combined(with: .scale(scale: 0.94, anchor: .topLeading))
-                        )
-                        .allowsHitTesting(false)
-                        .animation(.easeOut(duration: 0.16), value: anchor)
-                }
+                LinkTooltipOverlay(maxWidth: proxy.size.width)
             }
             .allowsHitTesting(false)
         }
@@ -1138,5 +1130,45 @@ struct NoteDetailEmpty: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.background)
+    }
+}
+
+/// Renders the active link-hover tooltip as a global overlay above the
+/// reader's content. Reads the `LinkHoverAnchorPreferenceKey` value
+/// that `LinkAwareTextView` publishes, positions the bubble just below
+/// the hovered link, and animates the appearance with a small
+/// opacity+scale combo.
+///
+/// Kept as a separate view so we can attach `.onPreferenceChange` here
+/// and drive an `@State` transition — the previous attempt put the
+/// preference read inside `.overlayPreferenceValue`'s builder closure
+/// directly, which renders the bubble immediately at every preference
+/// change without an opportunity for the appear/disappear transitions
+/// to run. With the @State indirection the bubble fades + scales in
+/// and out cleanly.
+private struct LinkTooltipOverlay: View {
+    let maxWidth: CGFloat
+    @State private var hover: LinkHoverAnchor?
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Color.clear
+            if let hover {
+                LinkTooltipBubble(label: hover.label)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .offset(
+                        x: max(0, min(max(0, maxWidth - linkTooltipMaxWidth), hover.linkRect.minX)),
+                        y: hover.linkRect.maxY + 8
+                    )
+                    .transition(
+                        .opacity.combined(with: .scale(scale: 0.94, anchor: .topLeading))
+                    )
+            }
+        }
+        .onPreferenceChange(LinkHoverAnchorPreferenceKey.self) { value in
+            withAnimation(.easeOut(duration: 0.16)) {
+                hover = value
+            }
+        }
     }
 }
