@@ -124,45 +124,42 @@ final class LineNumberRulerView: NSRulerView {
         let baseFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         let currentFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
 
-        // Compute the line number of the first visible character ONCE.
-        // Subsequent fragments increment by counting newlines in the
-        // bytes we skip past — O(charRange.length) per draw instead of
-        // O(N²) over the whole document, which is what made the gutter
-        // fall behind in large notes.
-        var currentLine = lineNumber(at: charRange.location, in: nsText)
-        var lastLabeled = -1
+        // We compute a line number per labeled fragment by counting
+        // newlines from offset 0. This is intentionally simple — earlier
+        // attempts to track a running counter across wrap continuations
+        // drifted out of sync (a skipped continuation left newlines
+        // unconsumed, so the *next* logical line inherited the previous
+        // line's number). Recomputing per labeled fragment keeps us
+        // correct; the cost is bounded by visible-line count × document
+        // size, which is fine for normal notes.
+        _ = charRange // (kept for clarity of bounding intent)
 
         layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) { fragRect, _, _, fragGlyphRange, _ in
             let fragCharRange = layoutManager.characterRange(forGlyphRange: fragGlyphRange, actualGlyphRange: nil)
             let lineStart = nsText.lineRange(for: NSRange(location: fragCharRange.location, length: 0)).location
-            // Only label the first fragment of each logical line.
+            // Only label the leading fragment of each logical line —
+            // soft-wrap continuations share the same line number with
+            // the leading fragment and stay un-labeled.
             guard fragCharRange.location == lineStart else { return }
-            guard currentLine != lastLabeled else { return }
-            lastLabeled = currentLine
 
-            // Convert the fragment rect from textContainer coords into
-            // ruler coords. `convert(_:from: textView)` handles both the
-            // textContainerOrigin offset and the clip-view scroll, so
-            // this works at any scroll depth — the prior arithmetic
-            // missed the scroll component which is why numbers drifted
-            // off the screen.
+            let line = self.lineNumber(at: fragCharRange.location, in: nsText)
+
+            // Fragment rect is in textContainer coords; convert through
+            // the textView so the clip-view scroll offset is handled
+            // automatically.
             let pointInText = NSPoint(x: 0, y: fragRect.minY + textView.textContainerOrigin.y)
-            let pointInRuler = self.convert(pointInText, from: textView)
-            let y = pointInRuler.y
+            let y = self.convert(pointInText, from: textView).y
 
-            // Don't draw outside the dirty rect. Cheap fast-path that
-            // matters for very long documents.
-            if y + fragRect.height < rect.minY || y > rect.maxY {
-                self.advance(line: &currentLine, after: fragCharRange, in: nsText)
-                return
-            }
+            // Off-screen → still nothing to draw, but we *do* want to
+            // bail before any text rendering for the cheap fast-path.
+            if y + fragRect.height < rect.minY || y > rect.maxY { return }
 
-            let isCurrent = currentLine == cursorLine
+            let isCurrent = line == cursorLine
             let displayed: Int
             if self.showRelative {
-                displayed = isCurrent ? currentLine : abs(currentLine - cursorLine)
+                displayed = isCurrent ? line : abs(line - cursorLine)
             } else {
-                displayed = currentLine
+                displayed = line
             }
 
             if isCurrent {
@@ -181,51 +178,35 @@ final class LineNumberRulerView: NSRulerView {
                 at: NSPoint(x: self.ruleThickness - size.width - 8, y: drawY),
                 withAttributes: attrs
             )
-
-            self.advance(line: &currentLine, after: fragCharRange, in: nsText)
         }
 
         // Numbers for the trailing empty-line phantom (file ends with `\n`).
         if totalLength > 0 && nsText.character(at: totalLength - 1) == 0x0A {
             let lastLine = lineNumber(at: totalLength, in: nsText)
-            if lastLine != lastLabeled {
-                let usedHeight = layoutManager.usedRect(for: textContainer).maxY
-                let pointInText = NSPoint(x: 0, y: usedHeight + textView.textContainerOrigin.y)
-                let y = convert(pointInText, from: textView).y
-                if y >= rect.minY && y <= rect.maxY {
-                    let isCurrent = lastLine == cursorLine
-                    let displayed: Int = showRelative
-                        ? (isCurrent ? lastLine : abs(lastLine - cursorLine))
-                        : lastLine
-                    let attrs: [NSAttributedString.Key: Any] = [
-                        .font: isCurrent ? currentFont : baseFont,
-                        .foregroundColor: isCurrent ? strongColor : dimColor
-                    ]
-                    let label = "\(displayed)" as NSString
-                    let size = label.size(withAttributes: attrs)
-                    label.draw(
-                        at: NSPoint(x: ruleThickness - size.width - 8, y: y),
-                        withAttributes: attrs
-                    )
-                }
+            let usedHeight = layoutManager.usedRect(for: textContainer).maxY
+            let pointInText = NSPoint(x: 0, y: usedHeight + textView.textContainerOrigin.y)
+            let y = convert(pointInText, from: textView).y
+            if y >= rect.minY && y <= rect.maxY {
+                let isCurrent = lastLine == cursorLine
+                let displayed: Int = showRelative
+                    ? (isCurrent ? lastLine : abs(lastLine - cursorLine))
+                    : lastLine
+                let attrs: [NSAttributedString.Key: Any] = [
+                    .font: isCurrent ? currentFont : baseFont,
+                    .foregroundColor: isCurrent ? strongColor : dimColor
+                ]
+                let label = "\(displayed)" as NSString
+                let size = label.size(withAttributes: attrs)
+                label.draw(
+                    at: NSPoint(x: ruleThickness - size.width - 8, y: y),
+                    withAttributes: attrs
+                )
             }
         }
     }
 
-    /// O(1) per-fragment line increment: counts newlines in the
-    /// fragment's character range so the running line number stays
-    /// correct without recomputing from offset 0 each time.
-    private func advance(line: inout Int, after fragCharRange: NSRange, in text: NSString) {
-        let upper = min(NSMaxRange(fragCharRange), text.length)
-        var i = fragCharRange.location
-        while i < upper {
-            if text.character(at: i) == 0x0A { line += 1 }
-            i += 1
-        }
-    }
-
-    /// One-shot line number lookup for the cursor + first visible
-    /// fragment. O(offset) but called only twice per draw.
+    /// Line number for an offset (1-based). O(offset) but called once
+    /// per visible logical-line fragment — bounded by document size.
     private func lineNumber(at offset: Int, in text: NSString) -> Int {
         var line = 1
         let upper = min(offset, text.length)
