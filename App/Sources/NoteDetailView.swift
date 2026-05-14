@@ -291,6 +291,12 @@ private struct MarkdownReader: View {
             }
         }
         .environment(\.markdownStagger, appState.preferences.contentAnimations)
+        // Intercept link taps. For file:// .md URLs we navigate to
+        // that note in-app; everything else (https, mailto, etc.)
+        // falls through to the system handler.
+        .environment(\.openURL, OpenURLAction { url in
+            openMarkdownLink(url)
+        })
         .padding(.horizontal, 48)
         .padding(.top, 32)
         .padding(.bottom, 40)
@@ -300,6 +306,38 @@ private struct MarkdownReader: View {
         .frame(maxWidth: .infinity, alignment: .center)
         .onAppear { reparseIfNeeded() }
         .onChange(of: text) { _, _ in reparseIfNeeded() }
+    }
+
+    /// Custom OpenURLAction body. Inline-link taps from MarkdownView's
+    /// AttributedString pass through here. Local .md files are loaded
+    /// into the editor as a new note; everything else hands back to
+    /// AppKit for the system handler to deal with.
+    private func openMarkdownLink(_ url: URL) -> OpenURLAction.Result {
+        guard url.isFileURL, url.pathExtension.lowercased() == "md" else {
+            return .systemAction
+        }
+        guard let session = appState.session,
+              FileManager.default.fileExists(atPath: url.path)
+        else {
+            return .systemAction
+        }
+        let vaultRoot = session.rootURL.standardizedFileURL
+        let resolved = url.standardizedFileURL
+        let prefix = vaultRoot.path + "/"
+        let relativePath: String
+        if resolved.path.hasPrefix(prefix) {
+            relativePath = String(resolved.path.dropFirst(prefix.count))
+        } else {
+            relativePath = resolved.lastPathComponent
+        }
+        let mtime = (try? resolved.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+        let entry = NoteEntry(url: resolved, relativePath: relativePath, updatedAt: mtime)
+        if appState.editor.isDirty { appState.editor.save() }
+        appState.editor.load(noteID: relativePath, at: resolved, vaultRoot: vaultRoot)
+        appState.selectedNoteID = relativePath
+        appState.selectedEntry = entry
+        appState.editorMode = .view
+        return .handled
     }
 
     private func reparseIfNeeded() {

@@ -84,12 +84,19 @@ public enum MarkdownParser {
         case let code as InlineCode:
             return .code(code.code)
         case let link as Link:
+            let raw = link.destination ?? ""
+            // Resolve at parse time so the renderer doesn't need
+            // baseURL plumbing. Relative paths like `./README.md`
+            // become full file URLs; absolute URLs pass through.
+            let resolved = resolve(source: raw, baseURL: baseURL)?.absoluteString ?? raw
             return .link(
-                destination: link.destination ?? "",
+                destination: resolved,
                 children: convertInline(link.children, baseURL: baseURL)
             )
         case let image as Markdown.Image:
-            return .image(source: image.source ?? "", alt: image.plainText)
+            let rawSource = image.source ?? ""
+            let resolvedSource = resolve(source: rawSource, baseURL: baseURL)?.absoluteString ?? rawSource
+            return .image(source: resolvedSource, alt: image.plainText)
         case is LineBreak:
             return .lineBreak
         case is SoftBreak:
