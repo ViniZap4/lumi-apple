@@ -712,7 +712,7 @@ final class ReadModeCoordinator {
         func scrollHalfPage(direction sign: CGFloat) {
         guard let view = scrollView else { return }
         let page = view.bounds.height - 40
-        directScroll(by: sign * page / 2)
+        glide(by: sign * page / 2)
     }
 
     /// Full-page scroll for ⌃f / ⌃b. Leaves a small overlap so the
@@ -720,43 +720,25 @@ final class ReadModeCoordinator {
     func scrollFullPage(direction sign: CGFloat) {
         guard let view = scrollView else { return }
         let page = view.bounds.height - 40
-        directScroll(by: sign * page)
-    }
-
-    /// Hard-set the clip's bounds origin (no animation) and re-anchor
-    /// `targetY` so the velocity ticker — if it was running from an
-    /// earlier `glide` — doesn't yank us back to its stale target. The
-    /// previous NSAnimationContext-based scroll fought the ticker
-    /// during its 100 ms window, which is what produced the "scrolls
-    /// down a little, snaps back to top" symptom.
-    private func directScroll(by dy: CGFloat) {
-        guard let view = scrollView,
-              let doc = view.documentView
-        else { return }
-        stopTicker()
-        let clip = view.contentView
-        let current = clip.bounds.origin.y
-        let maxY = max(0, doc.bounds.height - clip.bounds.height)
-        let nextY = max(0, min(maxY, current + dy))
-        clip.setBoundsOrigin(NSPoint(x: 0, y: nextY))
-        view.reflectScrolledClipView(clip)
-        targetY = nextY
+        glide(by: sign * page)
     }
 
     func scrollTo(_ edge: Edge) {
         guard let view = scrollView,
               let doc = view.documentView
         else { return }
-        stopTicker()
         let clip = view.contentView
-        let y: CGFloat
+        let current = clip.bounds.origin.y
+        let target: CGFloat
         switch edge {
-        case .top: y = 0
-        case .bottom: y = max(0, doc.bounds.height - clip.bounds.height)
+        case .top: target = 0
+        case .bottom: target = max(0, doc.bounds.height - clip.bounds.height)
         }
-        clip.setBoundsOrigin(NSPoint(x: 0, y: y))
-        view.reflectScrolledClipView(clip)
-        targetY = y
+        // Use the same ticker as glide() — single source of truth means
+        // no race with mid-animation re-renders or with held j/k
+        // presses. The critical-damping factor inside `tick()` makes
+        // edge jumps ease in over ~10 frames regardless of distance.
+        glide(by: target - current)
     }
 }
 #endif
