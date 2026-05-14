@@ -405,9 +405,8 @@ private struct MarkdownReader: View {
         // The lookup runs on the main actor (so does the surrounding
         // SwiftUI body), so we don't have to hop. When a link tap
         // navigates back to a recently-viewed note, this skips the
-        // 5–30 ms parse entirely — visible win on math-heavy notes
-        // where every paragraph spins up a KaTeX WebView and parse
-        // latency stacks on top of WebView spawn time.
+        // parse entirely — biggest single win on math-heavy notes
+        // where parse + KaTeX-WebView spawn latencies stack.
         if let baseURL,
            let mtime = mtime(for: baseURL),
            let cached = MarkdownDocumentCache.shared.document(for: baseURL, mtime: mtime) {
@@ -415,20 +414,19 @@ private struct MarkdownReader: View {
             return
         }
 
-        // For tiny notes the cost of an async hop dwarfs the parse, so
-        // keep the synchronous path for those. Above ~32 KB the parse
-        // can stutter the UI (we're holding the main actor while
-        // walking AST nodes); offload to a background task. SwiftUI
-        // shows the existing parsed view until the new document
-        // arrives — no flash to empty.
-        if text.count < 32_000 {
-            let document = MarkdownParser.parse(text, baseURL: baseURL)
-            parsed = document
-            if let baseURL, let mtime = mtime(for: baseURL) {
-                MarkdownDocumentCache.shared.store(document, for: baseURL, mtime: mtime)
-            }
-            return
-        }
+        // Always async. The previous code went sync below a 32 KB
+        // threshold on the theory that "small parse is faster than a
+        // task hop"; in practice the parse + the *follow-up
+        // LazyVStack materialisation that runs in the same render
+        // pass* (WKWebView spawns per math paragraph, NSTextView
+        // setup per link paragraph) blocked the main thread for
+        // tens to a couple hundred ms on link clicks, which the user
+        // reads as "click and the app freezes for a second".
+        //
+        // Off-loading the parse to a detached Task keeps the click
+        // itself responsive. The previously-rendered MarkdownView
+        // stays on screen during the parse — old content briefly
+        // visible is better than UI hanging.
         let snapshot = text
         let url = baseURL
         Task.detached(priority: .userInitiated) {
