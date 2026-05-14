@@ -449,10 +449,7 @@ private final class ReadKeyMonitor {
         // Don't shadow text input. The check must be *isEditable*, not
         // just `is NSText`: read-mode uses .textSelection(.enabled),
         // which makes SwiftUI install a non-editable NSTextView as
-        // first responder. Letting events flow to that text view
-        // produced the system beep — the text view can't handle j /
-        // k / ⌃d either, so AppKit's responder chain falls through to
-        // NSBeep().
+        // first responder.
         if let textResponder = NSApp.keyWindow?.firstResponder as? NSText,
            textResponder.isEditable {
             return event
@@ -463,12 +460,25 @@ private final class ReadKeyMonitor {
         let hasOpt = mods.contains(.option)
         let hasCtrl = mods.contains(.control)
         let hasShift = mods.contains(.shift)
-        // Hands off OS-level shortcuts entirely.
+        // OS-level shortcuts pass through untouched.
         if hasCmd || hasOpt { return event }
 
+        // Non-character events (function keys without chars, etc.) —
+        // let them through so things like ↩ in dialogs still work.
         guard let chars = event.charactersIgnoringModifiers?.lowercased(),
               !chars.isEmpty
         else { return event }
+
+        // Special navigation keys (arrows, escape, return, tab) pass
+        // through so SwiftUI's focus / sheet navigation still works.
+        // Only character keyCodes get the read-mode treatment.
+        let passThroughKeyCodes: Set<UInt16> = [
+            53,   // escape
+            36, 76, // return / keypad enter
+            48,   // tab
+            123, 124, 125, 126 // arrow keys
+        ]
+        if passThroughKeyCodes.contains(event.keyCode) { return event }
 
         if hasCtrl {
             switch chars {
@@ -478,10 +488,9 @@ private final class ReadKeyMonitor {
             case "b": fullPage(-1); return nil
             case "t": halfPage(1); return nil
             case "g": scrollToEdge(hasShift ? .bottom : .top); return nil
-            default: return event
+            default: break
             }
         } else {
-            // Plain-key vim-style scroll.
             let lineStep = 22
             switch chars {
             case "j": glide(lineStep); return nil
@@ -491,14 +500,18 @@ private final class ReadKeyMonitor {
             case "f": fullPage(1); return nil
             case "b": fullPage(-1); return nil
             case "g":
-                // `gg` would need two-key state; for now treat both
-                // g and G as the canonical pair (G is shift+g, which
-                // arrives here with hasShift=true). G → bottom, g → top.
                 scrollToEdge(hasShift ? .bottom : .top)
                 return nil
-            default: return event
+            default: break
             }
         }
+
+        // Read mode is read-only — no character input to deliver to
+        // anything in the document. Any remaining key here would land
+        // on the non-editable text-selection NSTextView in the hosted
+        // SwiftUI subtree, which can't insert it and routes through
+        // doCommand(by:) → NSBeep. Swallow silently to prevent that.
+        return nil
     }
 }
 #endif
