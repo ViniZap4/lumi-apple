@@ -69,57 +69,36 @@ public struct LinkAwareTextView: View {
     }
 
     public var body: some View {
-        ZStack(alignment: .topLeading) {
-            LinkAwareNSTextViewRepresentable(
-                attributed: attributed,
-                fontSize: fontSize,
-                fontWeight: fontWeight,
-                lineSpacing: lineSpacing,
-                theme: theme,
-                linkAction: linkAction,
-                vaultRoot: vaultRoot,
-                onHeight: { h in
-                    if h > 1, abs(h - measuredHeight) > 0.5 {
-                        measuredHeight = h
-                    }
-                },
-                onLinkRects: { rects in
-                    if rects != linkRects {
-                        linkRects = rects
-                    }
-                },
-                // Hover events come from the NSTextView's own
-                // NSTrackingArea (added in SelfSizingTextView). SwiftUI's
-                // `.onContinuousHover` doesn't fire reliably here because
-                // NSTextView consumes mouseMoved events for its own
-                // selection/cursor handling, so we route from AppKit
-                // directly instead.
-                onHoverLink: { rect in
-                    handleHoverChange(to: rect)
+        LinkAwareNSTextViewRepresentable(
+            attributed: attributed,
+            fontSize: fontSize,
+            fontWeight: fontWeight,
+            lineSpacing: lineSpacing,
+            theme: theme,
+            linkAction: linkAction,
+            vaultRoot: vaultRoot,
+            onHeight: { h in
+                if h > 1, abs(h - measuredHeight) > 0.5 {
+                    measuredHeight = h
                 }
-            )
-
-            if let hover {
-                LinkTooltipBubble(label: hover.label)
-                    // Anchor the bubble's top-leading corner just below
-                    // the link's left edge via `.offset`. We avoid
-                    // `.position(x:y:)` here because position anchors
-                    // by the bubble's *center* — which requires knowing
-                    // the bubble's height up-front so a multi-line
-                    // wrap doesn't shift it visually.
-                    .offset(
-                        x: max(0, min(max(0, measuredWidth - tooltipMaxWidth), hover.anchor.minX)),
-                        y: hover.anchor.maxY + 8
-                    )
-                    .transition(
-                        .opacity.combined(with: .scale(scale: 0.94, anchor: .topLeading))
-                    )
-                    .allowsHitTesting(false)
+            },
+            onLinkRects: { rects in
+                if rects != linkRects {
+                    linkRects = rects
+                }
+            },
+            // Hover events come from the NSTextView's own
+            // NSTrackingArea (added in SelfSizingTextView). SwiftUI's
+            // `.onContinuousHover` doesn't fire reliably here because
+            // NSTextView consumes mouseMoved events for its own
+            // selection/cursor handling, so we route from AppKit
+            // directly instead.
+            onHoverLink: { rect in
+                handleHoverChange(to: rect)
             }
-        }
+        )
         .frame(height: measuredHeight)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(WidthReporter(width: $measuredWidth))
         // Tell SwiftUI where our first text baseline sits so a parent
         // `HStack(alignment: .firstTextBaseline)` — notably
         // `ListBlockView`'s row layout — aligns its marker glyph with
@@ -127,15 +106,27 @@ public struct LinkAwareTextView: View {
         .alignmentGuide(.firstTextBaseline) { _ in
             firstLineBaselineFromTop
         }
-        // Publish hover state through a PreferenceKey. The wrapping
-        // block container (MarkdownView's LazyVStack child) AND the
-        // wrapping row container (ListBlockView's row) both observe
-        // this preference and bump their own `.zIndex` when set —
-        // putting `.zIndex` here on the leaf doesn't help because
-        // SwiftUI's drawing order is determined by ancestors at the
-        // level where overlapping siblings sit (LazyVStack siblings,
-        // list-row siblings), not at the deeply-nested leaf.
-        .preference(key: LinkHoverActivePreferenceKey.self, value: hover != nil)
+        // Publish the hover anchor (a SwiftUI Anchor<CGPoint> over the
+        // bottom-leading of the hovered link's bounding rect) via a
+        // preference. The tooltip itself lives at the MarkdownReader
+        // level as an overlay over the whole reading area — that way
+        // the bubble doesn't sit inside the LazyVStack's child tree at
+        // all, so its appearance can't trigger zIndex/layout re-passes
+        // that nudge the link out from under the cursor (which was
+        // the F.54 layout-loop bug).
+        .background(alignment: .topLeading) {
+            if let hover {
+                Color.clear
+                    .frame(width: 1, height: 1)
+                    .offset(x: hover.anchor.minX, y: hover.anchor.maxY)
+                    .anchorPreference(
+                        key: LinkHoverAnchorPreferenceKey.self,
+                        value: .topLeading
+                    ) { anchor in
+                        LinkHoverAnchor(label: hover.label, point: anchor)
+                    }
+            }
+        }
         .animation(.easeOut(duration: 0.16), value: hover)
         // LazyVStack scrolls views in and out as the user moves. Any
         // tooltip-show Task that was mid-flight when the view leaves
@@ -221,11 +212,13 @@ private struct LinkHover: Hashable {
 /// shadow. `.fixedSize()` lets the bubble grow to its content's
 /// width up to a sane cap and wrap to multiple lines when the path
 /// is deep.
-private struct LinkTooltipBubble: View {
+public struct LinkTooltipBubble: View {
+    public init(label: String) { self.label = label }
+
     let label: String
     @Environment(\.theme) private var theme
 
-    var body: some View {
+    public var body: some View {
         Text(label)
             .font(.system(.caption2, design: .monospaced))
             .foregroundStyle(theme.text)
@@ -264,6 +257,11 @@ private struct LinkTooltipBubble: View {
             .frame(maxWidth: LinkAwareTextView.tooltipMaxWidth, alignment: .leading)
     }
 }
+
+/// Upper bound on the tooltip's width as a free constant so consumers
+/// outside this file (the global overlay in `MarkdownReader`) can
+/// align their x-clamp with the bubble's actual max width.
+public let linkTooltipMaxWidth: CGFloat = 360
 
 /// Background reporter that publishes the host view's width through a
 /// PreferenceKey. We use it to clamp the tooltip's centre so a hover at
@@ -481,19 +479,41 @@ private func resolveURL(_ link: Any) -> URL? {
     }
 }
 
-/// Preference key broadcast upward by `LinkAwareTextView` whenever its
-/// hover bubble is showing. Container views that wrap groups of blocks
-/// — `MarkdownView`'s LazyVStack child wrapper, `ListBlockView`'s row
-/// wrapper — observe this via `.onPreferenceChange` and apply their
-/// own `.zIndex` so the tooltip can paint above its sibling rows /
-/// blocks. The leaf can't bump z-index itself because `.zIndex` only
-/// affects ordering within the immediate parent layout container, and
-/// the leaf's parent is its own ZStack — well below the level where
-/// rows and blocks actually sit as siblings.
-public struct LinkHoverActivePreferenceKey: PreferenceKey {
-    public static let defaultValue: Bool = false
-    public static func reduce(value: inout Bool, nextValue: () -> Bool) {
-        value = value || nextValue()
+/// Anchor + label for the active link-hover tooltip. Carries a SwiftUI
+/// `Anchor<CGPoint>` pinned to the hovered link's bottom-leading
+/// corner, which the `MarkdownReader`'s `.overlayPreferenceValue`
+/// resolves against the reader's coordinate space — that way the
+/// tooltip lives outside the LazyVStack child tree entirely and can't
+/// trigger sibling-rerender / zIndex-driven layout passes that nudge
+/// the link's frame.
+public struct LinkHoverAnchor: Equatable, Sendable {
+    public let label: String
+    public let point: Anchor<CGPoint>
+
+    public init(label: String, point: Anchor<CGPoint>) {
+        self.label = label
+        self.point = point
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        // Anchor<CGPoint> isn't Equatable; equality on the label is a
+        // sufficient proxy for SwiftUI's `.animation(value:)` driver
+        // because the same link's anchor doesn't move while it's
+        // being hovered (we deliberately pin to the first fragment).
+        lhs.label == rhs.label
+    }
+}
+
+public struct LinkHoverAnchorPreferenceKey: PreferenceKey {
+    public static let defaultValue: LinkHoverAnchor? = nil
+    public static func reduce(
+        value: inout LinkHoverAnchor?,
+        nextValue: () -> LinkHoverAnchor?
+    ) {
+        // First non-nil wins. With the tooltip pinned to a single
+        // link at a time, this is what we want — a single hover
+        // tracked across an entire reader.
+        value = value ?? nextValue()
     }
 }
 

@@ -347,6 +347,34 @@ private struct MarkdownReader: View {
                 .allowsHitTesting(false)
                 .animation(.easeOut(duration: 0.45), value: yankFlashOpacity)
         }
+        // Global link-tooltip overlay. Each `LinkAwareTextView` publishes
+        // its hovered link's anchor (an Anchor<CGPoint> at the link's
+        // bottom-leading) through `LinkHoverAnchorPreferenceKey`; this
+        // overlay resolves the anchor in the reader's own coordinate
+        // space and renders the themed bubble there. Living up here —
+        // outside the LazyVStack's child tree — means the bubble's
+        // appearance can't cascade back into per-block layout passes
+        // (the F.54→F.56 zIndex hoist did, which is what was nudging
+        // the link out from under the cursor on hover).
+        .overlayPreferenceValue(LinkHoverAnchorPreferenceKey.self) { anchor in
+            GeometryReader { proxy in
+                if let anchor {
+                    let point = proxy[anchor.point]
+                    LinkTooltipBubble(label: anchor.label)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .offset(
+                            x: max(0, min(max(0, proxy.size.width - linkTooltipMaxWidth), point.x)),
+                            y: point.y + 8
+                        )
+                        .transition(
+                            .opacity.combined(with: .scale(scale: 0.94, anchor: .topLeading))
+                        )
+                        .allowsHitTesting(false)
+                        .animation(.easeOut(duration: 0.16), value: anchor)
+                }
+            }
+            .allowsHitTesting(false)
+        }
         .onAppear { reparseIfNeeded() }
         .onChange(of: text) { _, _ in reparseIfNeeded() }
         .onChange(of: appState.yankFlashAt) { _, _ in
