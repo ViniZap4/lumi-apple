@@ -75,6 +75,15 @@ public struct LinkAwareTextView: View {
                     if rects != linkRects {
                         linkRects = rects
                     }
+                },
+                // Hover events come from the NSTextView's own
+                // NSTrackingArea (added in SelfSizingTextView). SwiftUI's
+                // `.onContinuousHover` doesn't fire reliably here because
+                // NSTextView consumes mouseMoved events for its own
+                // selection/cursor handling, so we route from AppKit
+                // directly instead.
+                onHoverLink: { rect in
+                    handleHoverChange(to: rect)
                 }
             )
 
@@ -101,24 +110,9 @@ public struct LinkAwareTextView: View {
         // Tell SwiftUI where our first text baseline sits so a parent
         // `HStack(alignment: .firstTextBaseline)` — notably
         // `ListBlockView`'s row layout — aligns its marker glyph with
-        // our first line. Without this guide the Representable
-        // reports no baseline, the HStack falls back to top-anchoring
-        // both children, and our text rendered below the marker for
-        // every list item containing a link.
-        //
-        // The baseline lives at `font.ascender` below the text's
-        // origin; we mirror that here so the alignment is exact for
-        // body, semibold heading, and any future weight.
+        // our first line.
         .alignmentGuide(.firstTextBaseline) { _ in
             firstLineBaselineFromTop
-        }
-        .onContinuousHover(coordinateSpace: .local) { phase in
-            switch phase {
-            case let .active(point):
-                handleHover(at: point)
-            case .ended:
-                cancelHover()
-            }
         }
         .animation(.easeOut(duration: 0.16), value: hover)
     }
@@ -133,31 +127,27 @@ public struct LinkAwareTextView: View {
 
     @State private var measuredWidth: CGFloat = 0
 
-    /// Resolve hover phase into either a delayed-show task or a hide.
-    private func handleHover(at point: CGPoint) {
-        let match = linkRects.first { $0.rect.contains(point) }
-        if let match {
-            // Already showing this exact link's tooltip — nothing to do.
-            if hover?.id == match.id { return }
-            // Different link / brand new hover — restart the delay.
+    /// Translate AppKit hover events (delivered from the NSTextView's
+    /// tracking area) into the SwiftUI bubble's show / hide state.
+    /// Same delay + animation envelope as the prior onContinuousHover
+    /// path — only the event source changed.
+    private func handleHoverChange(to rect: LinkRect?) {
+        if let rect {
+            if hover?.id == rect.id { return }
             pendingShow?.cancel()
             pendingShow = Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 280_000_000) // ~280 ms
                 if Task.isCancelled { return }
                 withAnimation(.easeOut(duration: 0.16)) {
-                    hover = LinkHover(id: match.id, label: match.label, anchor: match.rect)
+                    hover = LinkHover(id: rect.id, label: rect.label, anchor: rect.rect)
                 }
             }
         } else {
-            cancelHover()
-        }
-    }
-
-    private func cancelHover() {
-        pendingShow?.cancel()
-        pendingShow = nil
-        if hover != nil {
-            withAnimation(.easeOut(duration: 0.10)) { hover = nil }
+            pendingShow?.cancel()
+            pendingShow = nil
+            if hover != nil {
+                withAnimation(.easeOut(duration: 0.10)) { hover = nil }
+            }
         }
     }
 }
@@ -244,6 +234,7 @@ private struct LinkAwareNSTextViewRepresentable: NSViewRepresentable {
     let vaultRoot: URL?
     let onHeight: (CGFloat) -> Void
     let onLinkRects: ([LinkRect]) -> Void
+    let onHoverLink: (LinkRect?) -> Void
 
     func makeNSView(context: Context) -> SelfSizingTextView {
         let textView = SelfSizingTextView()
@@ -263,6 +254,9 @@ private struct LinkAwareNSTextViewRepresentable: NSViewRepresentable {
             // inside the layout pass that triggered the height update.
             DispatchQueue.main.async { onHeight(h) }
         }
+        textView.onHoverLink = { rect in
+            DispatchQueue.main.async { onHoverLink(rect) }
+        }
         applyAttributes(to: textView, context: context)
         return textView
     }
@@ -271,6 +265,9 @@ private struct LinkAwareNSTextViewRepresentable: NSViewRepresentable {
         context.coordinator.linkAction = linkAction
         context.coordinator.vaultRoot = vaultRoot
         context.coordinator.onLinkRects = onLinkRects
+        nsView.onHoverLink = { rect in
+            DispatchQueue.main.async { onHoverLink(rect) }
+        }
         applyAttributes(to: nsView, context: context)
     }
 
@@ -427,11 +424,18 @@ protocol LinkRectsProvider: AnyObject {
 /// NSTextView subclass that:
 ///   - reports its laid-out height back via a closure
 ///   - publishes per-line-fragment link rects with display labels
+///   - emits mouseMoved-driven hover events for the SwiftUI tooltip,
+///     because the SwiftUI .onContinuousHover modifier on a parent
+///     view doesn't fire when the NSTextView itself is consuming
+///     mouseMoved for its own selection / I-beam handling.
 final class SelfSizingTextView: NSTextView {
     var onHeightChange: ((CGFloat) -> Void)?
+    var onHoverLink: ((LinkRect?) -> Void)?
     weak var linkRectsProvider: LinkRectsProvider?
     private var lastReported: CGFloat = -1
     private var lastPublishedRects: [LinkRect] = []
+    private var hoverTrackingArea: NSTrackingArea?
+    private var lastHoveredLinkID: Int? = nil
 
     override func layout() {
         super.layout()
@@ -442,6 +446,46 @@ final class SelfSizingTextView: NSTextView {
         if let provider = linkRectsProvider {
             refreshLinkRects(coordinator: provider)
         }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTrackingArea {
+            removeTrackingArea(hoverTrackingArea)
+        }
+        // `.inVisibleRect` makes the area auto-resize with the view
+        // (no need to recompute on bounds change). `.activeInKeyWindow`
+        // restricts firing to the focused window so unfocused notes
+        // don't burn cycles on hover dispatch. `.mouseMoved` plus
+        // `.mouseEnteredAndExited` give us continuous + boundary
+        // events, which we coalesce into a single hover-changed
+        // callback.
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.activeInKeyWindow, .mouseMoved, .mouseEnteredAndExited, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        hoverTrackingArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let local = convert(event.locationInWindow, from: nil)
+        let hit = lastPublishedRects.first(where: { $0.rect.contains(local) })
+        if hit?.id != lastHoveredLinkID {
+            lastHoveredLinkID = hit?.id
+            onHoverLink?(hit)
+        }
+        super.mouseMoved(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if lastHoveredLinkID != nil {
+            lastHoveredLinkID = nil
+            onHoverLink?(nil)
+        }
+        super.mouseExited(with: event)
     }
 
     func scheduleHeightReport() {
@@ -489,6 +533,13 @@ final class SelfSizingTextView: NSTextView {
         if rects != lastPublishedRects {
             lastPublishedRects = rects
             coordinator.publish(rects)
+            // Re-evaluate the current hover against the new rects —
+            // a reflow can move a link out from under the cursor.
+            if let lastHoveredLinkID,
+               !rects.contains(where: { $0.id == lastHoveredLinkID }) {
+                self.lastHoveredLinkID = nil
+                onHoverLink?(nil)
+            }
         }
     }
 }
