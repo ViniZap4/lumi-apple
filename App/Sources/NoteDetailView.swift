@@ -350,7 +350,7 @@ private struct ReadModeScroll<Content: View>: View {
     let jkEnabled: Bool
     @ViewBuilder let content: () -> Content
     @FocusState private var focused: Bool
-    @State private var monitor: CtrlKeyMonitor?
+    @State private var monitor: ReadKeyMonitor?
     // Coordinator lives in @State so it survives across body
     // re-executions. The prior design declared it as a `let` on
     // NativeScrollHost — every body call constructed a new struct with
@@ -369,17 +369,23 @@ private struct ReadModeScroll<Content: View>: View {
             .focusEffectDisabled()
             .onAppear {
                 focused = true
-                // Install an NSEvent local monitor — keyboardShortcut /
-                // onKeyPress don't reliably surface Ctrl-letter because
-                // AppKit's legacy Emacs bindings consume them at a
-                // lower responder level. addLocalMonitorForEvents sees
-                // every keyDown reaching the app and lets us return
-                // nil to consume it. Lifetime scoped to this view via
-                // .onDisappear so we don't intercept while in edit
-                // mode.
+                // Install a single NSEvent local monitor that handles
+                // both plain-key (j/k/g/G/d/u/f/b) and Ctrl-letter
+                // (⌃D/U/F/B/T/G) scroll bindings. We don't rely on
+                // SwiftUI's `.onKeyPress` because the @FocusState we
+                // own is easy to lose silently (toolbar click, sheet
+                // dismiss, NSHostingController stealing first
+                // responder), and AppKit's legacy Emacs bindings
+                // swallow Ctrl-letter before keyboardShortcut sees
+                // them. The monitor sees every keyDown reaching the
+                // app and is gated on (a) read mode being active and
+                // (b) the focused responder not being a text view, so
+                // typing into the quick-switcher / settings still
+                // works as expected.
                 let coord = coordinator
-                monitor = CtrlKeyMonitor(
+                monitor = ReadKeyMonitor(
                     enabled: jkEnabled,
+                    glide: { coord.glide(by: CGFloat($0)) },
                     halfPage: { coord.scrollHalfPage(direction: CGFloat($0)) },
                     fullPage: { coord.scrollFullPage(direction: CGFloat($0)) },
                     scrollToEdge: { coord.scrollTo($0) }
@@ -389,26 +395,6 @@ private struct ReadModeScroll<Content: View>: View {
             .onChange(of: jkEnabled) { _, new in
                 monitor?.enabled = new
             }
-            // Plain-key shortcuts go through SwiftUI's onKeyPress —
-            // those don't conflict with AppKit text-editing bindings.
-            // `.repeat` catches the auto-fired keydowns when the user
-            // holds j / k, so scrolling continues smoothly rather than
-            // stuttering one line per discrete press.
-            .onKeyPress(phases: [.down, .repeat]) { press in
-                guard jkEnabled else { return .ignored }
-                let lineStep: CGFloat = 22
-                switch press.characters {
-                case "j": coordinator.glide(by: lineStep); return .handled
-                case "k": coordinator.glide(by: -lineStep); return .handled
-                case "d": coordinator.scrollHalfPage(direction: 1); return .handled
-                case "u": coordinator.scrollHalfPage(direction: -1); return .handled
-                case "f": coordinator.scrollFullPage(direction: 1); return .handled
-                case "b": coordinator.scrollFullPage(direction: -1); return .handled
-                case "g": coordinator.scrollTo(.top); return .handled
-                case "G": coordinator.scrollTo(.bottom); return .handled
-                default: return .ignored
-                }
-            }
         #else
         ScrollView { content() }
         #endif
@@ -416,17 +402,22 @@ private struct ReadModeScroll<Content: View>: View {
 }
 
 #if canImport(AppKit)
-/// Owns an NSEvent local monitor that swallows Ctrl-letter shortcuts
-/// (⌃D, ⌃U, ⌃F, ⌃B, ⌃T) and forwards them to a pair of caller-provided
-/// scroll closures. Generic-free so it can live at file scope without
-/// dragging `Content` along; the closures bridge to whatever
-/// coordinator instance owns the actual scroll. Lifetime is scoped to
-/// the read-mode view: dropping the @State reference fires deinit and
-/// removes the monitor — we don't keep intercepting once the user
-/// leaves read mode.
+/// Single NSEvent local monitor for every read-mode scroll key.
+/// Handles both plain-key bindings (j/k/g/G/d/u/f/b) and Ctrl-letter
+/// shortcuts (⌃D/U/F/B/T/G). Lifetime is scoped to the read-mode
+/// view: dropping the @State reference fires deinit and removes the
+/// monitor so we don't keep intercepting once the user leaves read
+/// mode.
+///
+/// Gating: the monitor passes events through untouched when the
+/// focused responder is an NSText / NSTextView (so typing into the
+/// quick-switcher, settings sheet, or any in-pane text input still
+/// works as expected). It only consumes events when the user is
+/// genuinely reading.
 @MainActor
-private final class CtrlKeyMonitor {
+private final class ReadKeyMonitor {
     var enabled: Bool
+    private let glide: (Int) -> Void
     private let halfPage: (Int) -> Void
     private let fullPage: (Int) -> Void
     private let scrollToEdge: (ReadModeCoordinator.Edge) -> Void
@@ -434,11 +425,13 @@ private final class CtrlKeyMonitor {
 
     init(
         enabled: Bool,
+        glide: @escaping @MainActor (Int) -> Void,
         halfPage: @escaping @MainActor (Int) -> Void,
         fullPage: @escaping @MainActor (Int) -> Void,
         scrollToEdge: @escaping @MainActor (ReadModeCoordinator.Edge) -> Void
     ) {
         self.enabled = enabled
+        self.glide = glide
         self.halfPage = halfPage
         self.fullPage = fullPage
         self.scrollToEdge = scrollToEdge
@@ -453,30 +446,54 @@ private final class CtrlKeyMonitor {
 
     private func handle(_ event: NSEvent) -> NSEvent? {
         guard enabled else { return event }
-        // Match Ctrl with optional shift (so ⇧⌃G can map to "go bottom"
-        // since G is canonically shift-g). Anything stricter would miss
-        // the shift case.
+        // Don't shadow text input. If the user is typing in any
+        // NSText / NSTextView (quick switcher field, settings sheet,
+        // future editor that pops up over a note), let the event flow.
+        let firstResponder = NSApp.keyWindow?.firstResponder
+        if firstResponder is NSText {
+            return event
+        }
+
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let isCtrl = mods.contains(.control) && !mods.contains(.command) && !mods.contains(.option)
-        guard isCtrl,
-              let chars = event.charactersIgnoringModifiers?.lowercased()
+        let hasCmd = mods.contains(.command)
+        let hasOpt = mods.contains(.option)
+        let hasCtrl = mods.contains(.control)
+        let hasShift = mods.contains(.shift)
+        // Hands off OS-level shortcuts entirely.
+        if hasCmd || hasOpt { return event }
+
+        guard let chars = event.charactersIgnoringModifiers?.lowercased(),
+              !chars.isEmpty
         else { return event }
-        switch chars {
-        case "d": halfPage(1); return nil
-        case "u": halfPage(-1); return nil
-        case "f": fullPage(1); return nil
-        case "b": fullPage(-1); return nil
-        // Non-vim alias — symmetry with ⌃D for one-hand reach.
-        case "t": halfPage(1); return nil
-        // ⌃G — bottom; allows top/bottom without leaving the home row.
-        case "g":
-            if mods.contains(.shift) {
-                scrollToEdge(.bottom)
-            } else {
-                scrollToEdge(.top)
+
+        if hasCtrl {
+            switch chars {
+            case "d": halfPage(1); return nil
+            case "u": halfPage(-1); return nil
+            case "f": fullPage(1); return nil
+            case "b": fullPage(-1); return nil
+            case "t": halfPage(1); return nil
+            case "g": scrollToEdge(hasShift ? .bottom : .top); return nil
+            default: return event
             }
-            return nil
-        default: return event
+        } else {
+            // Plain-key vim-style scroll.
+            let lineStep = 22
+            switch chars {
+            case "j": glide(lineStep); return nil
+            case "k": glide(-lineStep); return nil
+            case "d": halfPage(1); return nil
+            case "u": halfPage(-1); return nil
+            case "f": fullPage(1); return nil
+            case "b": fullPage(-1); return nil
+            case "g":
+                // `gg` would need two-key state; for now treat both
+                // g and G as the canonical pair (G is shift+g, which
+                // arrives here with hasShift=true). G → bottom, g → top.
+                scrollToEdge(hasShift ? .bottom : .top)
+                return nil
+            default: return event
+            }
         }
     }
 }
