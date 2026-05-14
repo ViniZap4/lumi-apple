@@ -197,6 +197,7 @@ struct RootView: View {
         appState.browserState = TreeBrowserState(root: root)
         appState.selectedVaultID = record.id
         record.lastOpenedAt = Date()
+        mirrorVaultToRegistry(record: record, rootURL: session.rootURL)
         // Kick the directory walk off the main actor. The browser renders
         // its loading state until `root.items` populates and `@Observable`
         // republishes the view.
@@ -234,7 +235,28 @@ struct RootView: View {
         let record = VaultRecord(name: name, bookmarkData: bookmark)
         modelContext.insert(record)
         try? modelContext.save()
+        mirrorVaultToRegistry(record: record, rootURL: url)
         selectVault(record)
+    }
+
+    /// Write a `VaultRegistryEntry` for `record` into `~/.config/lumi/vaults.yaml`
+    /// so the shared registry stays in sync with SwiftData. `rootURL` is the
+    /// resolved security-scoped URL — used so we don't have to re-resolve
+    /// the bookmark just to extract the on-disk path. For server-bound
+    /// vaults `rootURL` is nil and we record an empty path (the entry still
+    /// uniquely identifies the vault via its server + slug fields).
+    private func mirrorVaultToRegistry(record: VaultRecord, rootURL: URL?) {
+        let path = rootURL.map { encodeHomeRelative($0.path) } ?? ""
+        let entry = VaultRegistryEntry(
+            id: record.id,
+            name: record.name,
+            path: path,
+            server: record.serverEndpoint,
+            account: record.serverAccountID,
+            addedAt: record.addedAt,
+            lastOpenedAt: record.lastOpenedAt
+        )
+        VaultRegistry.shared.upsert(entry)
     }
 }
 
