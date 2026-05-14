@@ -48,6 +48,16 @@ struct NoteDetailView: View {
             content(editor: editor)
         }
         .background(theme.background)
+        // Animates the SwiftUI switch between read / edit branches when
+        // the preference is on. Driven by `mode` so toggling the picker
+        // (or hitting ⌘E) flips with a brief cross-fade instead of a
+        // hard cut.
+        .animation(
+            appState.preferences.contentAnimations
+                ? .easeInOut(duration: 0.18)
+                : nil,
+            value: mode
+        )
         .navigationTitle(displayTitle)
         #if os(iOS) || os(visionOS)
         .navigationBarTitleDisplayMode(.inline)
@@ -66,23 +76,42 @@ struct NoteDetailView: View {
                     baseURL: baseURL
                 )
             }
+            // Resetting on entry id forces a fresh scroll-host coordinator
+            // per note, killing any stale velocity-ticker target the
+            // previous note left behind. Pair with a fade so the switch
+            // doesn't look like a hard cut.
+            .id(entry.relativePath)
+            .transition(appState.preferences.contentAnimations
+                ? .opacity.animation(.easeInOut(duration: 0.18))
+                : .identity)
         case .edit:
-            VimEditor(
-                text: Binding(
-                    get: { editor.currentText },
-                    set: { editor.currentText = $0 }
-                ),
-                onModeChange: { appState.liveVimMode = $0 },
-                onEffect: { effect in
-                    handleVimEffect(effect, editor: editor)
-                },
-                jjEscapeEnabled: appState.preferences.jjEscapeMapping,
-                showLineNumbers: appState.preferences.showLineNumbers,
-                relativeLineNumbers: appState.preferences.relativeLineNumbers
-            )
-            .overlay(alignment: .top) {
-                editModeStripe
+            Group {
+                if appState.preferences.vimEnabled {
+                    VimEditor(
+                        text: Binding(
+                            get: { editor.currentText },
+                            set: { editor.currentText = $0 }
+                        ),
+                        onModeChange: { appState.liveVimMode = $0 },
+                        onEffect: { effect in
+                            handleVimEffect(effect, editor: editor)
+                        },
+                        jjEscapeEnabled: appState.preferences.jjEscapeMapping,
+                        showLineNumbers: appState.preferences.showLineNumbers,
+                        relativeLineNumbers: appState.preferences.relativeLineNumbers
+                    )
+                    .overlay(alignment: .top) { editModeStripe }
+                } else {
+                    PlainTextEditor(text: Binding(
+                        get: { editor.currentText },
+                        set: { editor.currentText = $0 }
+                    ))
+                }
             }
+            .id(entry.relativePath)
+            .transition(appState.preferences.contentAnimations
+                ? .opacity.animation(.easeInOut(duration: 0.18))
+                : .identity)
         }
     }
 
@@ -195,6 +224,14 @@ private struct MarkdownReader: View {
 
     private var scale: Double { appState.preferences.readingScale }
 
+    private var fontFamilyEnv: MarkdownFontFamily {
+        switch appState.preferences.readingFontFamily {
+        case .system: return .system
+        case .serif: return .serif
+        case .monospace: return .monospace
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 22 * scale) {
             // Header: oversized title + thin tag row + subtle separator.
@@ -223,6 +260,7 @@ private struct MarkdownReader: View {
             if let parsed {
                 MarkdownView(parsed)
                     .environment(\.markdownScale, scale)
+                    .environment(\.markdownFontFamily, fontFamilyEnv)
             } else {
                 Text("loading…")
                     .font(.system(.callout, design: .monospaced))
@@ -268,6 +306,7 @@ private struct ReadModeScroll<Content: View>: View {
         host
             .focusable()
             .focused($focused)
+            .focusEffectDisabled()
             .onAppear { focused = true }
             // `.repeat` catches the auto-fired keydowns when the user
             // *holds* j or k, so scrolling continues smoothly rather than
@@ -352,6 +391,10 @@ private struct NativeScrollHost<Content: View>: NSViewRepresentable {
         // Mutate the existing host's root view — SwiftUI diffs the underlying
         // tree, no AppKit subview thrashing.
         coordinator.host?.rootView = AnyView(content())
+        // Document height may have changed (different note, font scale,
+        // width). Re-anchor the velocity target on the current offset so
+        // a stale target doesn't fling us past the new content bounds.
+        coordinator.syncTargetWithCurrent()
     }
 
     /// Exposed to the SwiftUI wrapper for keyboard-driven scrolling. Methods
@@ -426,8 +469,14 @@ private struct NativeScrollHost<Content: View>: NSViewRepresentable {
         }
 
         private func tick() {
-            guard let view = scrollView else { stopTicker(); return }
+            guard let view = scrollView,
+                  let doc = view.documentView
+            else { stopTicker(); return }
             let clip = view.contentView
+            let maxY = max(0, doc.bounds.height - clip.bounds.height)
+            // Document may have shrunk since the target was set (different
+            // note loaded, font scale changed). Clamp before easing.
+            targetY = max(0, min(maxY, targetY))
             let current = clip.bounds.origin.y
             let delta = targetY - current
             // Below half a pixel from target → snap and stop. Avoids the
@@ -443,6 +492,16 @@ private struct NativeScrollHost<Content: View>: NSViewRepresentable {
             let step = delta * 0.30
             clip.setBoundsOrigin(NSPoint(x: 0, y: current + step))
             view.reflectScrolledClipView(clip)
+        }
+
+        /// Called after `updateNSView`. If we're not actively ticking,
+        /// pull the target back to whatever the actual offset is now so
+        /// the next `glide()` builds on a fresh baseline. Without this,
+        /// switching notes while no ticker is running can leave a stale
+        /// targetY pointing into the previous document's coordinates.
+        func syncTargetWithCurrent() {
+            guard ticker == nil, let view = scrollView else { return }
+            targetY = view.contentView.bounds.origin.y
         }
 
         private func stopTicker() {

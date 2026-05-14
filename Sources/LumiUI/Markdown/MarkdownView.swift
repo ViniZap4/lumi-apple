@@ -8,10 +8,34 @@ public struct MarkdownScaleKey: EnvironmentKey {
     public static let defaultValue: Double = 1.0
 }
 
+/// Body-font choice for markdown rendering. Default = system sans; the
+/// read pane injects this from `preferences.readingFontFamily`.
+public enum MarkdownFontFamily: Sendable {
+    case system, serif, monospace
+}
+
+public struct MarkdownFontFamilyKey: EnvironmentKey {
+    public static let defaultValue: MarkdownFontFamily = .system
+}
+
 public extension EnvironmentValues {
     var markdownScale: Double {
         get { self[MarkdownScaleKey.self] }
         set { self[MarkdownScaleKey.self] = newValue }
+    }
+    var markdownFontFamily: MarkdownFontFamily {
+        get { self[MarkdownFontFamilyKey.self] }
+        set { self[MarkdownFontFamilyKey.self] = newValue }
+    }
+}
+
+/// Resolves a Font for the active family + size. Headings stay on the
+/// chosen family too — keeps reading visually coherent.
+func markdownBodyFont(size: CGFloat, weight: Font.Weight, family: MarkdownFontFamily) -> Font {
+    switch family {
+    case .system: return .system(size: size, weight: weight)
+    case .serif: return .system(size: size, weight: weight, design: .serif)
+    case .monospace: return .system(size: size, weight: weight, design: .monospaced)
     }
 }
 
@@ -40,6 +64,7 @@ struct BlockView: View {
     let block: MarkdownBlock
     @Environment(\.theme) private var theme
     @Environment(\.markdownScale) private var scale
+    @Environment(\.markdownFontFamily) private var fontFamily
 
     var body: some View {
         switch block {
@@ -51,7 +76,7 @@ struct BlockView: View {
 
         case let .paragraph(inline):
             Text(InlineRenderer.render(inline, theme: theme))
-                .font(.system(size: 15 * scale))
+                .font(markdownBodyFont(size: 15 * scale, weight: .regular, family: fontFamily))
                 .foregroundStyle(theme.text)
                 .textSelection(.enabled)
                 .lineSpacing(3 * scale)
@@ -89,7 +114,7 @@ struct BlockView: View {
         case 5: base = 15
         default: base = 14
         }
-        return .system(size: base * scale, weight: .semibold)
+        return markdownBodyFont(size: base * scale, weight: .semibold, family: fontFamily)
     }
 }
 

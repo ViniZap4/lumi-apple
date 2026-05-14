@@ -245,6 +245,8 @@ private struct ToolbarVimModeBadge: View {
         let (label, color) = parts
         Text(label)
             .font(.system(.caption2, design: .monospaced).weight(.bold))
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, 9)
             .padding(.vertical, 3)
             .background(Capsule().fill(color))
@@ -282,10 +284,20 @@ private struct ReadingLayoutMenu: View {
                 Button("Wide (900)") { preferences.readingWidth = 900 }
                 Button("Full (1100)") { preferences.readingWidth = 1100 }
             }
+            Section("Font") {
+                Picker("Family", selection: $preferences.readingFontFamily) {
+                    ForEach(LumiPreferences.ReadingFontFamily.allCases) { f in
+                        Text(f.label).tag(f)
+                    }
+                }
+            }
+            Section {
+                Toggle("Animate transitions", isOn: $preferences.contentAnimations)
+            }
         } label: {
             Image(systemName: "textformat.size")
         }
-        .help("Reading layout (text size & width)")
+        .help("Reading layout (text size, width, font)")
     }
 }
 
@@ -305,7 +317,9 @@ private struct ToolbarStatusLabel: View {
             }
             Text(label)
                 .font(.system(.caption2, design: .monospaced))
+                .lineLimit(1)
         }
+        .fixedSize(horizontal: true, vertical: false)
         .foregroundStyle(color)
         .padding(.horizontal, 8)
         .padding(.vertical, 2)

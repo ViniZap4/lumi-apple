@@ -170,6 +170,18 @@ struct SettingsSheet: View {
                 options: LumiTheme.allCases,
                 label: { $0.label }
             )
+            pickerRow(
+                title: "Reading font",
+                detail: "Body font in the read pane. Editor stays monospaced.",
+                selection: $prefs.readingFontFamily,
+                options: LumiPreferences.ReadingFontFamily.allCases,
+                label: { $0.label }
+            )
+            toggleRow(
+                title: "Animate note transitions",
+                detail: "Brief fade when opening / switching notes and toggling read / edit.",
+                isOn: $prefs.contentAnimations
+            )
         }
     }
 
@@ -214,6 +226,11 @@ struct SettingsSheet: View {
     private var vimSection: some View {
         @Bindable var prefs = appState.preferences
         VStack(alignment: .leading, spacing: 14) {
+            toggleRow(
+                title: "Enable vim mode",
+                detail: "Off turns the editor into a plain text field with system shortcuts and Writing Tools. On routes every keystroke through the vim engine.",
+                isOn: $prefs.vimEnabled
+            )
             toggleRow(
                 title: "Block cursor in normal mode",
                 detail: "Tinted block over the character under the cursor, like terminal vim.",

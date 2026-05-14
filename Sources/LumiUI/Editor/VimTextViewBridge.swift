@@ -41,6 +41,14 @@ struct VimTextViewBridge: NSViewRepresentable {
         textView.allowsUndo = false
         textView.drawsBackground = false
         textView.textContainerInset = NSSize(width: 12, height: 12)
+        if #available(macOS 15.2, *) {
+            // Writing Tools (Apple Intelligence) — the user can invoke
+            // proofread / rewrite / summarize via the Edit menu or the
+            // contextual menu on selected text. Vim's intercepted keys
+            // are unaffected because Writing Tools surfaces through
+            // menus, not keystrokes.
+            textView.writingToolsBehavior = .default
+        }
 
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true

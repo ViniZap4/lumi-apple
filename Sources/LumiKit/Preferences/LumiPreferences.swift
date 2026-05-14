@@ -94,6 +94,37 @@ public final class LumiPreferences {
         didSet { defaults.set(showKeybindsBar, forKey: Keys.showKeybindsBar) }
     }
 
+    /// Master switch for vim mode in the edit pane. When off the editor
+    /// behaves like a regular text field (system shortcuts, no modal
+    /// states, Writing Tools enabled). When on the vim engine drives
+    /// every keystroke as before.
+    public var vimEnabled: Bool {
+        didSet { defaults.set(vimEnabled, forKey: Keys.vimEnabled) }
+    }
+
+    /// Animate note-content transitions (open / switch / scroll mode
+    /// toggle). Off matches a "snappy IDE" feel; on adds a brief opacity
+    /// fade so context shifts are visually obvious.
+    public var contentAnimations: Bool {
+        didSet { defaults.set(contentAnimations, forKey: Keys.contentAnimations) }
+    }
+
+    /// Body font for the read pane. Editor stays monospace.
+    public var readingFontFamily: ReadingFontFamily {
+        didSet { defaults.set(readingFontFamily.rawValue, forKey: Keys.readingFontFamily) }
+    }
+    public enum ReadingFontFamily: String, CaseIterable, Identifiable, Sendable {
+        case system, serif, monospace
+        public var id: String { rawValue }
+        public var label: String {
+            switch self {
+            case .system: return "Sans (default)"
+            case .serif: return "Serif"
+            case .monospace: return "Monospaced"
+            }
+        }
+    }
+
     /// Scale factor applied to read-mode typography. 1.0 = default; the UI
     /// exposes presets via the toolbar (Small / Default / Large / X-Large).
     /// Clamped to a sane range so it never breaks layout.
@@ -156,6 +187,10 @@ public final class LumiPreferences {
         self.vimBlockCursor = defaults.object(forKey: Keys.vimBlockCursor) as? Bool ?? true
         self.editorSyntaxColor = defaults.object(forKey: Keys.editorSyntaxColor) as? Bool ?? true
         self.showKeybindsBar = defaults.object(forKey: Keys.showKeybindsBar) as? Bool ?? true
+        self.vimEnabled = defaults.object(forKey: Keys.vimEnabled) as? Bool ?? true
+        self.contentAnimations = defaults.object(forKey: Keys.contentAnimations) as? Bool ?? true
+        let rawFamily = defaults.string(forKey: Keys.readingFontFamily) ?? ReadingFontFamily.system.rawValue
+        self.readingFontFamily = ReadingFontFamily(rawValue: rawFamily) ?? .system
         self.readingScale = defaults.object(forKey: Keys.readingScale) as? Double ?? 1.0
         self.readingWidth = defaults.object(forKey: Keys.readingWidth) as? Double ?? 760
         let rawTheme = defaults.string(forKey: Keys.themeMode) ?? ThemeMode.auto.rawValue
@@ -177,5 +212,8 @@ public final class LumiPreferences {
         static let themeMode = "lumi.pref.themeMode.v1"
         static let readingScale = "lumi.pref.readingScale.v1"
         static let readingWidth = "lumi.pref.readingWidth.v1"
+        static let vimEnabled = "lumi.pref.vimEnabled.v1"
+        static let contentAnimations = "lumi.pref.contentAnimations.v1"
+        static let readingFontFamily = "lumi.pref.readingFontFamily.v1"
     }
 }
