@@ -103,6 +103,71 @@ public struct KaTeXParagraphView: View {
     }
 }
 
+/// Heading (h1…h6) row whose inline content contains math. Renders the
+/// heading text + math expressions through the same KaTeX WebView the
+/// paragraph view uses, but with heading typography (level-dependent
+/// font size + semibold weight + tighter line-height) so `## $\Sigma_1$
+/// form of HALT` reads like a real heading rather than raw LaTeX next
+/// to prose. `level` is the markdown heading depth (1…6); the renderer
+/// picks the matching font size from the same scale `BlockView.heading`
+/// uses for non-math headings so the two look identical to the eye.
+public struct KaTeXHeadingView: View {
+    public let inline: [InlineNode]
+    public let level: Int
+    @Environment(\.theme) private var theme
+    @Environment(\.markdownScale) private var scale
+    @Environment(\.markdownLite) private var lite
+    @State private var measuredHeight: CGFloat = 36
+
+    public init(inline: [InlineNode], level: Int) {
+        self.inline = inline
+        self.level = level
+    }
+
+    public var body: some View {
+        // Heading font sizes — kept in sync with `BlockView.headingFont`
+        // in MarkdownView so a heading-with-math and a heading-without
+        // line up next to each other on the page.
+        let size: CGFloat = {
+            switch level {
+            case 1: return 30
+            case 2: return 24
+            case 3: return 19
+            case 4: return 17
+            case 5: return 15
+            default: return 14
+            }
+        }()
+        if lite {
+            // Preview pane fallback. Render natively with
+            // `InlineRenderer` (math falls back to italic-code styling)
+            // so the preview stays cheap.
+            Text(InlineRenderer.render(inline, theme: theme))
+                .font(.system(size: size * scale, weight: .semibold))
+                .foregroundStyle(theme.text)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            KaTeXWebRepresentable(
+                mode: .heading(
+                    html: paragraphHTML(from: inline),
+                    fontSize: size * scale,
+                    fontWeight: 600
+                ),
+                isDark: theme.isDark,
+                textHex: theme.textHex,
+                mutedHex: theme.textDimHex,
+                primaryHex: theme.primaryHex,
+                onHeight: { h in
+                    if h > 1 { measuredHeight = min(max(h, 16), 2000) }
+                }
+            )
+            .frame(height: measuredHeight)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
 // MARK: - HTML emission
 
 /// Render-mode discriminator. Block mode renders a single `katex.render`
@@ -112,7 +177,29 @@ public struct KaTeXParagraphView: View {
 fileprivate enum KaTeXRenderMode {
     case block(latex: String)
     case paragraph(html: String, fontSize: CGFloat)
+    /// A heading row with inline math (e.g. `## $\Sigma_1$ form of HALT`).
+    /// Rendered as a `<p>` element with the heading's typography (size +
+    /// weight + tighter line-height) so the math glyphs sit on the same
+    /// baseline as the surrounding heading text.
+    case heading(html: String, fontSize: CGFloat, fontWeight: Int)
 }
+
+/// Shared JS that walks every `<span class="math">` in the rendered body
+/// and asks KaTeX to render each one in-place. Used by both paragraph
+/// and heading modes — they only differ in the wrapping `<p>` styling,
+/// not in the math-rendering step.
+fileprivate let spanWalkingMathKickoff = """
+  try {
+    document.querySelectorAll('span.math').forEach(function(el) {
+      const latex = el.getAttribute('data-latex') || '';
+      const isBlock = el.classList.contains('math-display');
+      katex.render(latex, el, { displayMode: isBlock, throwOnError: false, output: 'html' });
+    });
+  } catch (e) {
+    // Leave the spans empty if KaTeX failed; raw LaTeX falls back to
+    // nothing rather than breaking the paragraph / heading render.
+  }
+"""
 
 /// HTML-escape so plain text doesn't break the surrounding template.
 private func escapeHTML(_ s: String) -> String {
@@ -263,18 +350,17 @@ fileprivate func katexHTML(
         \(html)
         </p>
         """
-        kickoff = """
-          try {
-            document.querySelectorAll('span.math').forEach(function(el) {
-              const latex = el.getAttribute('data-latex') || '';
-              const isBlock = el.classList.contains('math-display');
-              katex.render(latex, el, { displayMode: isBlock, throwOnError: false, output: 'html' });
-            });
-          } catch (e) {
-            // Leave the spans empty if KaTeX failed; raw LaTeX falls back
-            // to nothing rather than breaking the paragraph render.
-          }
+        kickoff = spanWalkingMathKickoff
+    case let .heading(html, fontSize, fontWeight):
+        // Headings sit tighter (line-height 1.25) and use a higher
+        // font-weight so the math glyphs match the surrounding bold
+        // prose. Same span-walking kickoff as paragraph mode.
+        body = """
+        <p id="heading" style="font-size: \(fontSize)px; font-weight: \(fontWeight); line-height: 1.25; margin: 0; padding: 0;">
+        \(html)
+        </p>
         """
+        kickoff = spanWalkingMathKickoff
     }
 
     return """
@@ -327,6 +413,8 @@ fileprivate struct KaTeXWebRepresentable {
             return "b|\(isDark ? "d" : "l")|\(primaryHex)|\(latex.hashValue)"
         case let .paragraph(html, fontSize):
             return "p|\(isDark ? "d" : "l")|\(primaryHex)|\(fontSize)|\(html.hashValue)"
+        case let .heading(html, fontSize, fontWeight):
+            return "h|\(isDark ? "d" : "l")|\(primaryHex)|\(fontSize)|\(fontWeight)|\(html.hashValue)"
         }
     }
 

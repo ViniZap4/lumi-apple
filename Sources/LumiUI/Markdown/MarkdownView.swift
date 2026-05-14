@@ -220,19 +220,30 @@ struct BlockView: View {
     var body: some View {
         switch block {
         case let .heading(level, inline):
-            Text(InlineRenderer.render(inline, theme: theme))
-                .font(headingFont(level))
-                .foregroundStyle(theme.text)
-                .padding(.top, (level <= 2 ? 8 : 4) * scale)
-                // Text inside an HStack (e.g. list items) negotiates its
-                // ideal one-line size with the parent, which truncates with
-                // ellipsis when the line overflows. fixedSize on the vertical
-                // axis forces wrapping; maxWidth makes the wrapped lines
-                // occupy the column instead of hugging their content.
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .textSelection(.enabled)
-                .pointingHandIfContainsLink(inline)
+            // Headings with inline math route through KaTeX so
+            // expressions like `## $\Sigma_1$ form of HALT` actually
+            // render the math glyph instead of falling back to raw
+            // LaTeX in italic-code styling.
+            if InlineRenderer.containsMath(inline) {
+                KaTeXHeadingView(inline: inline, level: level)
+                    .padding(.top, (level <= 2 ? 8 : 4) * scale)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .pointingHandIfContainsLink(inline)
+            } else {
+                Text(InlineRenderer.render(inline, theme: theme))
+                    .font(headingFont(level))
+                    .foregroundStyle(theme.text)
+                    .padding(.top, (level <= 2 ? 8 : 4) * scale)
+                    // Text inside an HStack (e.g. list items) negotiates its
+                    // ideal one-line size with the parent, which truncates with
+                    // ellipsis when the line overflows. fixedSize on the vertical
+                    // axis forces wrapping; maxWidth makes the wrapped lines
+                    // occupy the column instead of hugging their content.
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .pointingHandIfContainsLink(inline)
+            }
 
         case let .paragraph(inline):
             // Paragraphs that contain inline math route through the
