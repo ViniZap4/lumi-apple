@@ -89,11 +89,12 @@ final class AppState {
     /// overlay so users can jump notes without leaving the current one.
     var showQuickSwitcher: Bool = false
 
-    /// Column visibility for the navigation split. Defaults to the full
-    /// 3-column layout; auto-collapses to detail-only when a note opens so
-    /// the reading area takes the full window. The "Back to vault" toolbar
-    /// button restores the 3-column state.
-    var columnVisibility: NavigationSplitViewVisibility = .all
+    /// Column visibility for the navigation split. Default is
+    /// `.detailOnly` so the app opens straight onto the home pane (ASCII
+    /// logo + vault picker) like the TUI / web clients. Users can pop
+    /// the sidebar open with the toolbar toggle or the standard
+    /// ⌥⌘S shortcut.
+    var columnVisibility: NavigationSplitViewVisibility = .detailOnly
 
     /// Shared scroll coordinator for the read pane. Living here (rather
     /// than only inside ReadModeScroll's @State) gives the App-init

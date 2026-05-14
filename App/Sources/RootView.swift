@@ -156,7 +156,11 @@ struct RootView: View {
                   let remote = appState.remoteVaultsStore.vaults.first(where: { $0.id == remoteID }) {
             RemoteVaultDetailView(vault: remote)
         } else {
-            EmptyVaultPanel(onAdd: addVault)
+            EmptyVaultPanel(
+                vaults: vaults,
+                onAdd: addVault,
+                onSelect: selectLocalVault
+            )
         }
     }
 
