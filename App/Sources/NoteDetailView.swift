@@ -349,52 +349,18 @@ private struct MountFader<Content: View>: View {
 private struct ReadModeScroll<Content: View>: View {
     let jkEnabled: Bool
     @ViewBuilder let content: () -> Content
-    @FocusState private var focused: Bool
-    @State private var monitor: ReadKeyMonitor?
-    // Coordinator lives in @State so it survives across body
-    // re-executions. The prior design declared it as a `let` on
-    // NativeScrollHost — every body call constructed a new struct with
-    // a new Coordinator(), and SwiftUI's NSViewRepresentable lifecycle
-    // wires only the FIRST one. External callers (this wrapper)
-    // referenced the freshly-constructed unwired coordinator, so
-    // `scrollHalfPage` etc. were no-ops. With @State the same instance
-    // is reused on every render.
-    @State private var coordinator = ReadModeCoordinator()
+    @Environment(AppState.self) private var appState
 
     var body: some View {
         #if os(macOS)
-        NativeScrollHost(coordinator: coordinator, content: content)
-            .focusable()
-            .focused($focused)
-            .focusEffectDisabled()
-            .onAppear {
-                focused = true
-                // Install a single NSEvent local monitor that handles
-                // both plain-key (j/k/g/G/d/u/f/b) and Ctrl-letter
-                // (⌃D/U/F/B/T/G) scroll bindings. We don't rely on
-                // SwiftUI's `.onKeyPress` because the @FocusState we
-                // own is easy to lose silently (toolbar click, sheet
-                // dismiss, NSHostingController stealing first
-                // responder), and AppKit's legacy Emacs bindings
-                // swallow Ctrl-letter before keyboardShortcut sees
-                // them. The monitor sees every keyDown reaching the
-                // app and is gated on (a) read mode being active and
-                // (b) the focused responder not being a text view, so
-                // typing into the quick-switcher / settings still
-                // works as expected.
-                let coord = coordinator
-                monitor = ReadKeyMonitor(
-                    enabled: jkEnabled,
-                    glide: { coord.glide(by: CGFloat($0)) },
-                    halfPage: { coord.scrollHalfPage(direction: CGFloat($0)) },
-                    fullPage: { coord.scrollFullPage(direction: CGFloat($0)) },
-                    scrollToEdge: { coord.scrollTo($0) }
-                )
-            }
-            .onDisappear { monitor = nil }
-            .onChange(of: jkEnabled) { _, new in
-                monitor?.enabled = new
-            }
+        // The scroll coordinator lives on AppState so the App-init
+        // NSEvent monitor (registered before SwiftUI builds its
+        // sidebar / list typeahead monitors) has a stable handle to
+        // call into. Without that, SwiftUI's own keyDown monitor for
+        // List typeahead would fire first when the sidebar held
+        // focus, beep on "no matching item", and only then yield to
+        // our monitor.
+        NativeScrollHost(coordinator: appState.readCoordinator, content: content)
         #else
         ScrollView { content() }
         #endif
@@ -404,19 +370,22 @@ private struct ReadModeScroll<Content: View>: View {
 #if canImport(AppKit)
 /// Single NSEvent local monitor for every read-mode scroll key.
 /// Handles both plain-key bindings (j/k/g/G/d/u/f/b) and Ctrl-letter
-/// shortcuts (⌃D/U/F/B/T/G). Lifetime is scoped to the read-mode
-/// view: dropping the @State reference fires deinit and removes the
-/// monitor so we don't keep intercepting once the user leaves read
-/// mode.
+/// shortcuts (⌃D/U/F/B/T/G).
 ///
-/// Gating: the monitor passes events through untouched when the
-/// focused responder is an NSText / NSTextView (so typing into the
-/// quick-switcher, settings sheet, or any in-pane text input still
-/// works as expected). It only consumes events when the user is
-/// genuinely reading.
+/// Installed at App init (before SwiftUI's view tree builds its own
+/// monitors for List typeahead etc.), which puts it first in the
+/// NSEvent dispatch order. Without that, when the sidebar held focus
+/// SwiftUI's typeahead monitor would fire first on `j`, beep on "no
+/// matching item", then yield to our monitor — the beep we couldn't
+/// silence by returning nil because it already played.
+///
+/// `isActive` is consulted on every event so the monitor only consumes
+/// while a note is open in read mode. It passes everything through
+/// otherwise. The closures call into a shared ReadModeCoordinator on
+/// AppState so the monitor never has a stale scrollView reference.
 @MainActor
-private final class ReadKeyMonitor {
-    var enabled: Bool
+final class ReadKeyMonitor {
+    private let isActive: @MainActor () -> Bool
     private let glide: (Int) -> Void
     private let halfPage: (Int) -> Void
     private let fullPage: (Int) -> Void
@@ -424,13 +393,13 @@ private final class ReadKeyMonitor {
     nonisolated(unsafe) private var token: Any?
 
     init(
-        enabled: Bool,
+        isActive: @escaping @MainActor () -> Bool,
         glide: @escaping @MainActor (Int) -> Void,
         halfPage: @escaping @MainActor (Int) -> Void,
         fullPage: @escaping @MainActor (Int) -> Void,
         scrollToEdge: @escaping @MainActor (ReadModeCoordinator.Edge) -> Void
     ) {
-        self.enabled = enabled
+        self.isActive = isActive
         self.glide = glide
         self.halfPage = halfPage
         self.fullPage = fullPage
@@ -445,11 +414,10 @@ private final class ReadKeyMonitor {
     }
 
     private func handle(_ event: NSEvent) -> NSEvent? {
-        guard enabled else { return event }
-        // Don't shadow text input. The check must be *isEditable*, not
-        // just `is NSText`: read-mode uses .textSelection(.enabled),
-        // which makes SwiftUI install a non-editable NSTextView as
-        // first responder.
+        // Permanent monitor — bail out cleanly when no note is in read
+        // mode so we don't intercept keys in vault list / edit mode /
+        // before login.
+        guard isActive() else { return event }
         if let textResponder = NSApp.keyWindow?.firstResponder as? NSText,
            textResponder.isEditable {
             return event
@@ -460,28 +428,47 @@ private final class ReadKeyMonitor {
         let hasOpt = mods.contains(.option)
         let hasCtrl = mods.contains(.control)
         let hasShift = mods.contains(.shift)
-        // OS-level shortcuts pass through untouched.
         if hasCmd || hasOpt { return event }
 
-        // Non-character events (function keys without chars, etc.) —
-        // let them through so things like ↩ in dialogs still work.
-        guard let chars = event.charactersIgnoringModifiers?.lowercased(),
-              !chars.isEmpty
-        else { return event }
+        // Resolve the "letter" the user pressed in a way that survives
+        // non-US layouts AND the Ctrl-letter quirk where
+        // `charactersIgnoringModifiers` can return an empty string or a
+        // dead-key character. Order of trust:
+        //   1. event.charactersIgnoringModifiers — gives the layout-
+        //      resolved letter when present (most reliable for plain
+        //      keys).
+        //   2. event.characters → ASCII control code → letter. For
+        //      Ctrl+U the ASCII control is 0x15; subtracting 0x40 from
+        //      the uppercase form gives 0x15 → 'u'. Covers cases where
+        //      step 1 returns "" because AppKit didn't synthesize a
+        //      layout char for the Ctrl combo.
+        let letter: String? = {
+            if let s = event.charactersIgnoringModifiers?.lowercased(), !s.isEmpty, s.count == 1 {
+                return s
+            }
+            if hasCtrl,
+               let firstScalar = event.characters?.unicodeScalars.first {
+                let v = firstScalar.value
+                if v >= 0x01 && v <= 0x1A {
+                    return String(Unicode.Scalar(v + 0x60)!) // 0x01 → 'a' …
+                }
+            }
+            return nil
+        }()
 
-        // Special navigation keys (arrows, escape, return, tab) pass
-        // through so SwiftUI's focus / sheet navigation still works.
-        // Only character keyCodes get the read-mode treatment.
+        // Structural keys pass through.
         let passThroughKeyCodes: Set<UInt16> = [
-            53,   // escape
-            36, 76, // return / keypad enter
-            48,   // tab
-            123, 124, 125, 126 // arrow keys
+            53,            // escape
+            36, 76,        // return / keypad enter
+            48,            // tab
+            123, 124, 125, 126 // arrows
         ]
         if passThroughKeyCodes.contains(event.keyCode) { return event }
 
+        guard let letter else { return nil }
+
         if hasCtrl {
-            switch chars {
+            switch letter {
             case "d": halfPage(1); return nil
             case "u": halfPage(-1); return nil
             case "f": fullPage(1); return nil
@@ -492,7 +479,7 @@ private final class ReadKeyMonitor {
             }
         } else {
             let lineStep = 22
-            switch chars {
+            switch letter {
             case "j": glide(lineStep); return nil
             case "k": glide(-lineStep); return nil
             case "d": halfPage(1); return nil
@@ -505,12 +492,8 @@ private final class ReadKeyMonitor {
             default: break
             }
         }
-
-        // Read mode is read-only — no character input to deliver to
-        // anything in the document. Any remaining key here would land
-        // on the non-editable text-selection NSTextView in the hosted
-        // SwiftUI subtree, which can't insert it and routes through
-        // doCommand(by:) → NSBeep. Swallow silently to prevent that.
+        // Read mode is read-only — anything not handled above would
+        // route through the responder chain and end at NSBeep. Swallow.
         return nil
     }
 }

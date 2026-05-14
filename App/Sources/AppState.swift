@@ -95,6 +95,12 @@ final class AppState {
     /// button restores the 3-column state.
     var columnVisibility: NavigationSplitViewVisibility = .all
 
+    /// Shared scroll coordinator for the read pane. Living here (rather
+    /// than only inside ReadModeScroll's @State) gives the App-init
+    /// NSEvent monitor a stable target to call into, even when the
+    /// view tree hasn't constructed ReadModeScroll yet.
+    let readCoordinator = ReadModeCoordinator()
+
     init() {
         let auth = AuthService()
         self.authService = auth
