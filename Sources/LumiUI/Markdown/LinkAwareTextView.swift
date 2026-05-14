@@ -89,17 +89,18 @@ public struct LinkAwareTextView: View {
 
             if let hover {
                 LinkTooltipBubble(label: hover.label)
-                    .fixedSize()
-                    .position(
-                        x: max(80, min(measuredWidth - 80, hover.anchor.midX)),
-                        // Sit close to the link's underline so the
-                        // bubble doesn't drift down into the next
-                        // block's heading. Single-line truncation in
-                        // the bubble keeps the footprint shallow.
-                        y: hover.anchor.maxY + 16
+                    // Anchor the bubble's top-leading corner just below
+                    // the link's left edge via `.offset`. We avoid
+                    // `.position(x:y:)` here because position anchors
+                    // by the bubble's *center* — which requires knowing
+                    // the bubble's height up-front so a multi-line
+                    // wrap doesn't shift it visually.
+                    .offset(
+                        x: max(0, min(max(0, measuredWidth - tooltipMaxWidth), hover.anchor.minX)),
+                        y: hover.anchor.maxY + 8
                     )
                     .transition(
-                        .opacity.combined(with: .scale(scale: 0.92, anchor: .top))
+                        .opacity.combined(with: .scale(scale: 0.94, anchor: .topLeading))
                     )
                     .allowsHitTesting(false)
             }
@@ -124,6 +125,14 @@ public struct LinkAwareTextView: View {
     private var firstLineBaselineFromTop: CGFloat {
         NSFont.systemFont(ofSize: fontSize, weight: fontWeight).ascender
     }
+
+    /// Upper bound on the tooltip's width. The bubble shrinks
+    /// horizontally when the path is short; for long paths it wraps
+    /// inside this cap instead of shooting past the column. Exposed
+    /// as a static so `LinkTooltipBubble` can pin its `.frame
+    /// (maxWidth:)` to the same value.
+    fileprivate static let tooltipMaxWidth: CGFloat = 360
+    private var tooltipMaxWidth: CGFloat { Self.tooltipMaxWidth }
 
     @State private var measuredWidth: CGFloat = 0
 
@@ -180,26 +189,39 @@ private struct LinkTooltipBubble: View {
         Text(label)
             .font(.system(.caption2, design: .monospaced))
             .foregroundStyle(theme.text)
-            // Single line with middle truncation keeps the bubble
-            // shallow enough that it doesn't blanket the heading
-            // sitting under the next block. Long paths still convey
-            // their meaning — the ./prefix and the tail leaf name
-            // stay visible; the middle of the path is collapsed
-            // into an ellipsis.
-            .lineLimit(1)
-            .truncationMode(.middle)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
+            // Wrap onto multiple lines (up to four) so long paths read
+            // properly instead of getting middle-truncated. The
+            // `.fixedSize(horizontal: false, vertical: true)` plus the
+            // outer `maxWidth: tooltipMaxWidth` cap lets the bubble
+            // shrink horizontally to the path's natural width when it
+            // fits on one line, and wrap when it doesn't.
+            .lineLimit(4)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
             .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(theme.overlayBackground)
+                // Two-layer background gives the bubble a real "card"
+                // feel that reads on every theme:
+                //   1. Solid `theme.background` underlay so the bubble
+                //      is fully opaque even when the page content is
+                //      using `theme.overlayBackground`.
+                //   2. A faint `theme.accent` tint over it for a hint
+                //      of theme colour without competing with the
+                //      label text.
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(theme.background)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(theme.accent.opacity(0.07))
+                }
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(theme.border.opacity(0.7), lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(theme.accent.opacity(0.40), lineWidth: 0.7)
             )
-            .shadow(color: .black.opacity(0.32), radius: 8, x: 0, y: 3)
-            .frame(maxWidth: 480, alignment: .leading)
+            .shadow(color: .black.opacity(0.42), radius: 14, x: 0, y: 5)
+            .frame(maxWidth: LinkAwareTextView.tooltipMaxWidth, alignment: .leading)
     }
 }
 
