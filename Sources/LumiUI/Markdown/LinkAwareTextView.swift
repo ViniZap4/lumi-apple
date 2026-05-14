@@ -115,6 +115,14 @@ public struct LinkAwareTextView: View {
         .alignmentGuide(.firstTextBaseline) { _ in
             firstLineBaselineFromTop
         }
+        // While a tooltip is showing, push this whole paragraph above
+        // its LazyVStack siblings. The bubble's `.offset` paints
+        // outside the paragraph's frame, but SwiftUI's natural sibling
+        // ordering would have the *next* block draw on top — which
+        // clipped the bubble against the following paragraph or
+        // heading on every multi-link note. zIndex bumps draw order
+        // within the parent VStack.
+        .zIndex(hover != nil ? 100 : 0)
         .animation(.easeOut(duration: 0.16), value: hover)
     }
 
@@ -140,9 +148,17 @@ public struct LinkAwareTextView: View {
     /// tracking area) into the SwiftUI bubble's show / hide state.
     /// Same delay + animation envelope as the prior onContinuousHover
     /// path — only the event source changed.
+    ///
+    /// Dedup keys on the rect, not the link id: a single markdown link
+    /// that wraps across two visual line fragments produces two
+    /// LinkRect entries sharing the same `id` (the range location). If
+    /// we short-circuited on id-match the bubble would stay anchored
+    /// to the first line and never follow the cursor down to line two
+    /// of the same link. Comparing on `rect` makes each fragment
+    /// trigger its own positioning update.
     private func handleHoverChange(to rect: LinkRect?) {
         if let rect {
-            if hover?.id == rect.id { return }
+            if hover?.anchor == rect.rect { return }
             pendingShow?.cancel()
             pendingShow = Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 280_000_000) // ~280 ms
@@ -457,7 +473,13 @@ final class SelfSizingTextView: NSTextView {
     private var lastReported: CGFloat = -1
     private var lastPublishedRects: [LinkRect] = []
     private var hoverTrackingArea: NSTrackingArea?
-    private var lastHoveredLinkID: Int? = nil
+    /// Most-recently hovered link rect, used to dedup mouseMoved
+    /// events. Tracked by the *rect itself* rather than the link's id
+    /// so a wrapped link's two line-fragment rects each fire their
+    /// own update — the SwiftUI bubble needs the new anchor to
+    /// re-position when the cursor crosses from line one to line two
+    /// of the same link.
+    private var lastHoveredRect: CGRect? = nil
 
     override func layout() {
         super.layout()
@@ -495,16 +517,17 @@ final class SelfSizingTextView: NSTextView {
     override func mouseMoved(with event: NSEvent) {
         let local = convert(event.locationInWindow, from: nil)
         let hit = lastPublishedRects.first(where: { $0.rect.contains(local) })
-        if hit?.id != lastHoveredLinkID {
-            lastHoveredLinkID = hit?.id
+        // Compare rect rather than link id — see `lastHoveredRect`.
+        if hit?.rect != lastHoveredRect {
+            lastHoveredRect = hit?.rect
             onHoverLink?(hit)
         }
         super.mouseMoved(with: event)
     }
 
     override func mouseExited(with event: NSEvent) {
-        if lastHoveredLinkID != nil {
-            lastHoveredLinkID = nil
+        if lastHoveredRect != nil {
+            lastHoveredRect = nil
             onHoverLink?(nil)
         }
         super.mouseExited(with: event)
@@ -557,9 +580,9 @@ final class SelfSizingTextView: NSTextView {
             coordinator.publish(rects)
             // Re-evaluate the current hover against the new rects —
             // a reflow can move a link out from under the cursor.
-            if let lastHoveredLinkID,
-               !rects.contains(where: { $0.id == lastHoveredLinkID }) {
-                self.lastHoveredLinkID = nil
+            if let lastHoveredRect,
+               !rects.contains(where: { $0.rect == lastHoveredRect }) {
+                self.lastHoveredRect = nil
                 onHoverLink?(nil)
             }
         }
