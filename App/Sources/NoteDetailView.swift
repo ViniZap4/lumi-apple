@@ -414,10 +414,8 @@ final class ReadKeyMonitor {
     }
 
     private func handle(_ event: NSEvent) -> NSEvent? {
-        // Permanent monitor — bail out cleanly when no note is in read
-        // mode so we don't intercept keys in vault list / edit mode /
-        // before login.
-        guard isActive() else { return event }
+        // Editable text input always wins — we never want to shadow
+        // typing into the quick switcher / settings / etc.
         if let textResponder = NSApp.keyWindow?.firstResponder as? NSText,
            textResponder.isEditable {
             return event
@@ -429,6 +427,14 @@ final class ReadKeyMonitor {
         let hasCtrl = mods.contains(.control)
         let hasShift = mods.contains(.shift)
         if hasCmd || hasOpt { return event }
+
+        // The scroll bindings get consumed *regardless* of whether
+        // we'd actually scroll right now — passing them through to the
+        // sidebar's NSCollectionView meant typeahead beeped on "no
+        // matching item", which is what the user heard when they
+        // clicked the sidebar then pressed ⌃U. We just won't *do*
+        // anything when there's no note open in read mode.
+        let active = isActive()
 
         // Resolve the "letter" the user pressed in a way that survives
         // non-US layouts AND the Ctrl-letter quirk where
@@ -465,36 +471,50 @@ final class ReadKeyMonitor {
         ]
         if passThroughKeyCodes.contains(event.keyCode) { return event }
 
-        guard let letter else { return nil }
+        // If we couldn't resolve a letter, only consume when active
+        // (a note is open in read mode). Outside read mode unknown
+        // keys flow through so the rest of the app behaves normally.
+        guard let letter else { return active ? nil : event }
 
+        // Scroll-key set the monitor "owns". Outside read mode we
+        // still consume them — performing no scroll — so the sidebar
+        // typeahead doesn't beep on them.
+        let isScrollKey: Bool
         if hasCtrl {
-            switch letter {
-            case "d": halfPage(1); return nil
-            case "u": halfPage(-1); return nil
-            case "f": fullPage(1); return nil
-            case "b": fullPage(-1); return nil
-            case "t": halfPage(1); return nil
-            case "g": scrollToEdge(hasShift ? .bottom : .top); return nil
-            default: break
+            isScrollKey = ["d", "u", "f", "b", "t", "g"].contains(letter)
+            if active {
+                switch letter {
+                case "d": halfPage(1)
+                case "u": halfPage(-1)
+                case "f": fullPage(1)
+                case "b": fullPage(-1)
+                case "t": halfPage(1)
+                case "g": scrollToEdge(hasShift ? .bottom : .top)
+                default: break
+                }
             }
         } else {
-            let lineStep = 22
-            switch letter {
-            case "j": glide(lineStep); return nil
-            case "k": glide(-lineStep); return nil
-            case "d": halfPage(1); return nil
-            case "u": halfPage(-1); return nil
-            case "f": fullPage(1); return nil
-            case "b": fullPage(-1); return nil
-            case "g":
-                scrollToEdge(hasShift ? .bottom : .top)
-                return nil
-            default: break
+            isScrollKey = ["j", "k", "d", "u", "f", "b", "g"].contains(letter)
+            if active {
+                let lineStep = 22
+                switch letter {
+                case "j": glide(lineStep)
+                case "k": glide(-lineStep)
+                case "d": halfPage(1)
+                case "u": halfPage(-1)
+                case "f": fullPage(1)
+                case "b": fullPage(-1)
+                case "g": scrollToEdge(hasShift ? .bottom : .top)
+                default: break
+                }
             }
         }
-        // Read mode is read-only — anything not handled above would
-        // route through the responder chain and end at NSBeep. Swallow.
-        return nil
+
+        if isScrollKey { return nil }
+        // Other letters: in read mode swallow (no input destination
+        // for a read-only note); otherwise pass through so the rest
+        // of the app sees them.
+        return active ? nil : event
     }
 }
 #endif

@@ -6,12 +6,6 @@ import LumiUI
 @main
 struct LumiApp: App {
     @State private var appState = AppState()
-    /// Held strong here so it survives the App's lifetime. The monitor's
-    /// deinit removes the NSEvent token; we never want that until the
-    /// process exits, so the property is permanent (no clear).
-    #if canImport(AppKit)
-    @State private var readKeyMonitor: ReadKeyMonitor? = nil
-    #endif
 
     /// Map preferences.themeMode + the active theme into a SwiftUI
     /// preferredColorScheme. `auto` returns nil (system follows). `dark` /
@@ -41,9 +35,6 @@ struct LumiApp: App {
                 .environment(\.theme, appState.theme.tokens)
                 .preferredColorScheme(preferredScheme)
                 .tint(appState.theme.tokens.primary)
-                #if canImport(AppKit)
-                .onAppear { installReadKeyMonitorIfNeeded() }
-                #endif
         }
         .modelContainer(Self.sharedContainer)
         #if os(macOS)
@@ -99,29 +90,4 @@ struct LumiApp: App {
         #endif
     }
 
-    #if canImport(AppKit)
-    /// Installs the read-mode key monitor exactly once at App-init
-    /// time. Registering early matters: NSEvent local monitors fire in
-    /// registration order, and SwiftUI's List typeahead monitor (the
-    /// one that beeps on no-match when the sidebar has focus) installs
-    /// during view-tree construction. By installing in the App
-    /// lifecycle's onAppear we land in the table first and SwiftUI's
-    /// monitor never sees the scroll keys.
-    private func installReadKeyMonitorIfNeeded() {
-        guard readKeyMonitor == nil else { return }
-        let coord = appState.readCoordinator
-        let state = appState
-        readKeyMonitor = ReadKeyMonitor(
-            isActive: {
-                state.editorMode == .view
-                    && state.selectedEntry != nil
-                    && state.preferences.jkScrollInView
-            },
-            glide: { coord.glide(by: CGFloat($0)) },
-            halfPage: { coord.scrollHalfPage(direction: CGFloat($0)) },
-            fullPage: { coord.scrollFullPage(direction: CGFloat($0)) },
-            scrollToEdge: { coord.scrollTo($0) }
-        )
-    }
-    #endif
 }

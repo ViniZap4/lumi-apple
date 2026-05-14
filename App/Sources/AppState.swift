@@ -100,12 +100,41 @@ final class AppState {
     /// NSEvent monitor a stable target to call into, even when the
     /// view tree hasn't constructed ReadModeScroll yet.
     let readCoordinator = ReadModeCoordinator()
+    /// Permanent NSEvent monitor for read-mode scroll keys. Installed
+    /// during AppState init — which is App-struct @State init time —
+    /// so we beat SwiftUI's sidebar / List typeahead monitors into the
+    /// NSEvent dispatch order. Marked private; only its lifetime
+    /// matters here.
+    #if canImport(AppKit)
+    private var readKeyMonitor: ReadKeyMonitor?
+    #endif
 
     init() {
         let auth = AuthService()
         self.authService = auth
         self.remoteVaultsStore = RemoteVaultsStore(client: auth.apiClient)
+        #if canImport(AppKit)
+        installReadKeyMonitor()
+        #endif
     }
+
+    #if canImport(AppKit)
+    private func installReadKeyMonitor() {
+        let coord = readCoordinator
+        readKeyMonitor = ReadKeyMonitor(
+            isActive: { [weak self] in
+                guard let self else { return false }
+                return self.editorMode == .view
+                    && self.selectedEntry != nil
+                    && self.preferences.jkScrollInView
+            },
+            glide: { coord.glide(by: CGFloat($0)) },
+            halfPage: { coord.scrollHalfPage(direction: CGFloat($0)) },
+            fullPage: { coord.scrollFullPage(direction: CGFloat($0)) },
+            scrollToEdge: { coord.scrollTo($0) }
+        )
+    }
+    #endif
 
     /// Replace the active session, closing the previous one to release scope.
     func setSession(_ new: VaultSession?) {
