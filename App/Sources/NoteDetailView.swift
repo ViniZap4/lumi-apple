@@ -371,14 +371,33 @@ private struct ReadModeScroll<Content: View>: View {
                 // smooth instead of stepping. Critical-damping in the
                 // coordinator drains the buffer once the key releases.
                 let lineStep: CGFloat = 22
+                // SwiftUI hands us the unmodified character even when
+                // Ctrl is held — we need to consult `press.modifiers`
+                // explicitly to fire on ⌃d / ⌃u (vim's half-page
+                // motions) since plain d / u also map to the same thing
+                // for discoverability.
+                let ctrl = press.modifiers.contains(.control)
                 switch press.characters {
                 case "j": host.coordinator.glide(by: lineStep); return .handled
                 case "k": host.coordinator.glide(by: -lineStep); return .handled
                 case "d": host.coordinator.scrollHalfPage(direction: 1); return .handled
                 case "u": host.coordinator.scrollHalfPage(direction: -1); return .handled
+                case "f": host.coordinator.scrollFullPage(direction: 1); return .handled
+                case "b": host.coordinator.scrollFullPage(direction: -1); return .handled
                 case "g": host.coordinator.scrollTo(.top); return .handled
                 case "G": host.coordinator.scrollTo(.bottom); return .handled
-                default: return .ignored
+                default:
+                    // Some key layouts deliver ⌃d as an ASCII control
+                    // character (EOT = 0x04). Handle that fallthrough
+                    // so the binding works regardless.
+                    guard ctrl, let c = press.characters.first else { return .ignored }
+                    switch c.asciiValue {
+                    case 0x04: host.coordinator.scrollHalfPage(direction: 1); return .handled
+                    case 0x15: host.coordinator.scrollHalfPage(direction: -1); return .handled
+                    case 0x06: host.coordinator.scrollFullPage(direction: 1); return .handled
+                    case 0x02: host.coordinator.scrollFullPage(direction: -1); return .handled
+                    default: return .ignored
+                    }
                 }
             }
         #else
@@ -588,6 +607,14 @@ private struct NativeScrollHost<Content: View>: NSViewRepresentable {
             guard let view = scrollView else { return }
             let page = view.bounds.height - 40
             scroll(by: sign * page / 2, animated: true)
+        }
+
+        /// Full-page scroll for ⌃f / ⌃b. Leaves a small overlap so the
+        /// user keeps their reading context, mirroring vim.
+        func scrollFullPage(direction sign: CGFloat) {
+            guard let view = scrollView else { return }
+            let page = view.bounds.height - 40
+            scroll(by: sign * page, animated: true)
         }
 
         func scrollTo(_ edge: Edge) {
