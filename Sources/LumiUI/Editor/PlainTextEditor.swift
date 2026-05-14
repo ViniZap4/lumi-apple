@@ -55,12 +55,23 @@ public struct PlainTextEditor: NSViewRepresentable {
                 textView.setSelectedRange(selection)
             }
         }
+        // One-shot first-responder grab so the user can type
+        // immediately after switching to edit mode. Same pattern as
+        // VimTextViewBridge.
+        if !context.coordinator.didAutoFocus {
+            context.coordinator.didAutoFocus = true
+            DispatchQueue.main.async { [weak textView] in
+                guard let textView, let window = textView.window else { return }
+                window.makeFirstResponder(textView)
+            }
+        }
     }
 
     public func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     public final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: PlainTextEditor
+        var didAutoFocus: Bool = false
         init(_ parent: PlainTextEditor) { self.parent = parent }
 
         public func textDidChange(_ notification: Notification) {

@@ -446,11 +446,15 @@ private final class ReadKeyMonitor {
 
     private func handle(_ event: NSEvent) -> NSEvent? {
         guard enabled else { return event }
-        // Don't shadow text input. If the user is typing in any
-        // NSText / NSTextView (quick switcher field, settings sheet,
-        // future editor that pops up over a note), let the event flow.
-        let firstResponder = NSApp.keyWindow?.firstResponder
-        if firstResponder is NSText {
+        // Don't shadow text input. The check must be *isEditable*, not
+        // just `is NSText`: read-mode uses .textSelection(.enabled),
+        // which makes SwiftUI install a non-editable NSTextView as
+        // first responder. Letting events flow to that text view
+        // produced the system beep — the text view can't handle j /
+        // k / ⌃d either, so AppKit's responder chain falls through to
+        // NSBeep().
+        if let textResponder = NSApp.keyWindow?.firstResponder as? NSText,
+           textResponder.isEditable {
             return event
         }
 

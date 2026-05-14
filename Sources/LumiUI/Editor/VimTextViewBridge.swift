@@ -27,6 +27,12 @@ struct VimTextViewBridge: NSViewRepresentable {
         /// selection actually changed, so manual drag-to-copy persists
         /// long enough for Cmd-C to run against it.
         var lastAppliedSelection: NSRange?
+        /// One-shot flag: the very first time the text view ends up in
+        /// a window we grab first responder so the user can start
+        /// typing without an extra click. Subsequent updates leave
+        /// responder alone (otherwise toolbar interactions would steal
+        /// and restore focus on every render).
+        var didAutoFocus: Bool = false
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -123,6 +129,18 @@ struct VimTextViewBridge: NSViewRepresentable {
             // region with the viewport stuck where it was.
             textView.scrollRangeToVisible(selection)
             coord.lastAppliedSelection = selection
+        }
+
+        // Grab first responder on initial display so the user can
+        // start typing immediately after switching to edit mode. We
+        // defer to the next runloop turn so the window is in place;
+        // makeNSView fires before the view is mounted in a window.
+        if !coord.didAutoFocus {
+            coord.didAutoFocus = true
+            DispatchQueue.main.async { [weak textView] in
+                guard let textView, let window = textView.window else { return }
+                window.makeFirstResponder(textView)
+            }
         }
     }
 
