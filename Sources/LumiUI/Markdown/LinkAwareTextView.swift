@@ -127,14 +127,15 @@ public struct LinkAwareTextView: View {
         .alignmentGuide(.firstTextBaseline) { _ in
             firstLineBaselineFromTop
         }
-        // While a tooltip is showing, push this whole paragraph above
-        // its LazyVStack siblings. The bubble's `.offset` paints
-        // outside the paragraph's frame, but SwiftUI's natural sibling
-        // ordering would have the *next* block draw on top — which
-        // clipped the bubble against the following paragraph or
-        // heading on every multi-link note. zIndex bumps draw order
-        // within the parent VStack.
-        .zIndex(hover != nil ? 100 : 0)
+        // Publish hover state through a PreferenceKey. The wrapping
+        // block container (MarkdownView's LazyVStack child) AND the
+        // wrapping row container (ListBlockView's row) both observe
+        // this preference and bump their own `.zIndex` when set —
+        // putting `.zIndex` here on the leaf doesn't help because
+        // SwiftUI's drawing order is determined by ancestors at the
+        // level where overlapping siblings sit (LazyVStack siblings,
+        // list-row siblings), not at the deeply-nested leaf.
+        .preference(key: LinkHoverActivePreferenceKey.self, value: hover != nil)
         .animation(.easeOut(duration: 0.16), value: hover)
         // LazyVStack scrolls views in and out as the user moves. Any
         // tooltip-show Task that was mid-flight when the view leaves
@@ -476,6 +477,22 @@ private func resolveURL(_ link: Any) -> URL? {
     case let direct as URL: return direct
     case let str as String: return URL(string: str)
     default: return nil
+    }
+}
+
+/// Preference key broadcast upward by `LinkAwareTextView` whenever its
+/// hover bubble is showing. Container views that wrap groups of blocks
+/// — `MarkdownView`'s LazyVStack child wrapper, `ListBlockView`'s row
+/// wrapper — observe this via `.onPreferenceChange` and apply their
+/// own `.zIndex` so the tooltip can paint above its sibling rows /
+/// blocks. The leaf can't bump z-index itself because `.zIndex` only
+/// affects ordering within the immediate parent layout container, and
+/// the leaf's parent is its own ZStack — well below the level where
+/// rows and blocks actually sit as siblings.
+public struct LinkHoverActivePreferenceKey: PreferenceKey {
+    public static let defaultValue: Bool = false
+    public static func reduce(value: inout Bool, nextValue: () -> Bool) {
+        value = value || nextValue()
     }
 }
 

@@ -173,12 +173,33 @@ public struct MarkdownView: View {
         // viewport that `LazyVStack` needs to do its lazy enumeration.
         LazyVStack(alignment: .leading, spacing: 14 * scale) {
             ForEach(Array(document.blocks.enumerated()), id: \.offset) { index, block in
-                StaggeredBlock(index: index + indexOffset) {
-                    BlockView(block: block)
+                BlockHoverContainer {
+                    StaggeredBlock(index: index + indexOffset) {
+                        BlockView(block: block)
+                    }
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Wraps each LazyVStack child so that when a descendant
+/// `LinkAwareTextView` shows its hover tooltip, this whole block
+/// floats above its sibling blocks via `.zIndex`. Without this the
+/// tooltip's `.offset` paints into the next block's region but the
+/// next block draws on top (natural LazyVStack child order), and the
+/// user sees the next block's text bleeding through the tooltip.
+private struct BlockHoverContainer<Content: View>: View {
+    @ViewBuilder var content: Content
+    @State private var hoverActive: Bool = false
+
+    var body: some View {
+        content
+            .onPreferenceChange(LinkHoverActivePreferenceKey.self) { active in
+                hoverActive = active
+            }
+            .zIndex(hoverActive ? 100 : 0)
     }
 }
 
@@ -492,16 +513,45 @@ struct ListBlockView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(items.enumerated()), id: \.offset) { index, item in
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    markerView(for: item, index: index)
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(Array(item.blocks.enumerated()), id: \.offset) { _, block in
-                            BlockView(block: block)
-                        }
-                    }
+                ListRowView(
+                    item: item,
+                    index: index,
+                    ordered: ordered,
+                    start: start
+                )
+            }
+        }
+    }
+}
+
+/// One row in a list. Tracks its own hover-active flag (via the same
+/// `LinkHoverActivePreferenceKey` that the LinkAwareTextView publishes)
+/// and bumps `.zIndex` while active so the tooltip can paint over the
+/// rows beneath. Without this each row was a sibling of the next row
+/// inside `ListBlockView`'s VStack, drawing in declaration order; the
+/// tooltip from row 0 was painted *under* row 1's content even though
+/// row 0 had a descendant zIndex set.
+private struct ListRowView: View {
+    let item: ListItemContent
+    let index: Int
+    let ordered: Bool
+    let start: Int
+    @State private var hoverActive: Bool = false
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            markerView()
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(item.blocks.enumerated()), id: \.offset) { _, block in
+                    BlockView(block: block)
                 }
             }
         }
+        .onPreferenceChange(LinkHoverActivePreferenceKey.self) { active in
+            hoverActive = active
+        }
+        .zIndex(hoverActive ? 100 : 0)
     }
 
     /// Either a numeric/bullet marker (regular list) or a checkbox glyph
@@ -510,7 +560,7 @@ struct ListBlockView: View {
     /// even though click-to-toggle isn't wired yet, the affordance is
     /// in place for when it lands.
     @ViewBuilder
-    private func markerView(for item: ListItemContent, index: Int) -> some View {
+    private func markerView() -> some View {
         if let cb = item.checkbox {
             Image(systemName: cb == .checked ? "checkmark.square.fill" : "square")
                 .font(.body)
@@ -518,14 +568,14 @@ struct ListBlockView: View {
                 .frame(minWidth: 18, alignment: .trailing)
                 .pointingHandOnHover()
         } else {
-            Text(textMarker(for: index))
+            Text(textMarker)
                 .font(.body.monospacedDigit())
                 .foregroundStyle(theme.textDim)
                 .frame(minWidth: 18, alignment: .trailing)
         }
     }
 
-    private func textMarker(for index: Int) -> String {
+    private var textMarker: String {
         ordered ? "\(start + index)." : "•"
     }
 }
