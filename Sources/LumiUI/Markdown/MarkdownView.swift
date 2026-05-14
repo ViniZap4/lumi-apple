@@ -8,6 +8,15 @@ public struct MarkdownScaleKey: EnvironmentKey {
     public static let defaultValue: Double = 1.0
 }
 
+/// Controls the per-block staggered fade when a markdown document
+/// mounts. Off → all blocks land instantly (no animation transactions
+/// kicked off). On → each block fades + slides up with a small delay
+/// based on its index, capped so very long notes don't take seconds to
+/// settle.
+public struct MarkdownStaggerKey: EnvironmentKey {
+    public static let defaultValue: Bool = false
+}
+
 /// Body-font choice for markdown rendering. Default = system sans; the
 /// read pane injects this from `preferences.readingFontFamily`.
 public enum MarkdownFontFamily: Sendable {
@@ -27,6 +36,10 @@ public extension EnvironmentValues {
         get { self[MarkdownFontFamilyKey.self] }
         set { self[MarkdownFontFamilyKey.self] = newValue }
     }
+    var markdownStagger: Bool {
+        get { self[MarkdownStaggerKey.self] }
+        set { self[MarkdownStaggerKey.self] = newValue }
+    }
 }
 
 /// Resolves a Font for the active family + size. Headings stay on the
@@ -44,19 +57,69 @@ func markdownBodyFont(size: CGFloat, weight: Font.Weight, family: MarkdownFontFa
 /// to dedicated views (video player, PDF viewer, embed).
 public struct MarkdownView: View {
     public let document: MarkdownDocument
+    /// Where this document's block indices sit in the surrounding
+    /// stagger cascade. Lets a host (e.g. a reader with its own header
+    /// items) reserve the first N indices and have the body continue
+    /// the cascade smoothly.
+    public let indexOffset: Int
     @Environment(\.markdownScale) private var scale
 
-    public init(_ document: MarkdownDocument) {
+    public init(_ document: MarkdownDocument, indexOffset: Int = 0) {
         self.document = document
+        self.indexOffset = indexOffset
     }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 14 * scale) {
-            ForEach(Array(document.blocks.enumerated()), id: \.offset) { _, block in
-                BlockView(block: block)
+            ForEach(Array(document.blocks.enumerated()), id: \.offset) { index, block in
+                StaggeredBlock(index: index + indexOffset) {
+                    BlockView(block: block)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Cascade pacing for `StaggeredBlock`. 14 blocks fade in within ~0.5s;
+/// anything past the cap lands at the same time so long documents don't
+/// take seconds to settle.
+private enum StaggerCascade {
+    static let stepDelay: Double = 0.035
+    static let delayCap: Double = 0.45
+
+    static func delay(for index: Int) -> Double {
+        min(Double(index) * stepDelay, delayCap)
+    }
+}
+
+/// Per-block wrapper that fades + slides into place when the markdown
+/// document mounts. Cascade pacing comes from `StaggerCascade`.
+public struct StaggeredBlock<Content: View>: View {
+    let index: Int
+    @ViewBuilder let content: () -> Content
+
+    @Environment(\.markdownStagger) private var stagger
+    @State private var visible = false
+
+    public init(index: Int, @ViewBuilder content: @escaping () -> Content) {
+        self.index = index
+        self.content = content
+    }
+
+    public var body: some View {
+        content()
+            .opacity(visible ? 1 : (stagger ? 0 : 1))
+            .offset(y: visible ? 0 : (stagger ? 8 : 0))
+            .onAppear {
+                guard stagger else { visible = true; return }
+                let delay = StaggerCascade.delay(for: index)
+                Task { @MainActor in
+                    withAnimation(.easeOut(duration: 0.30).delay(delay)) {
+                        visible = true
+                    }
+                }
+            }
     }
 }
 
@@ -122,27 +185,37 @@ struct CodeBlockView: View {
     let language: String?
     let code: String
     @Environment(\.theme) private var theme
+    @Environment(\.markdownScale) private var scale
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             Text(code)
-                .font(.system(.callout, design: .monospaced))
+                .font(.system(size: 13 * scale, design: .monospaced))
                 .foregroundStyle(theme.text)
-                .padding(12)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
         }
         .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(theme.overlayBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(theme.border.opacity(0.4), lineWidth: 0.5)
         )
         .overlay(alignment: .topTrailing) {
             if let language, !language.isEmpty {
-                Text(language)
-                    .font(.caption2.monospaced())
+                Text(language.lowercased())
+                    .font(.system(size: 10, design: .monospaced).weight(.medium))
                     .foregroundStyle(theme.textDim)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
+                    .background(
+                        Capsule().fill(theme.background.opacity(0.7))
+                    )
+                    .padding(8)
             }
         }
     }
@@ -153,18 +226,23 @@ struct BlockQuoteView: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Rectangle()
-                .fill(theme.accent)
+        HStack(alignment: .top, spacing: 14) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(theme.accent.opacity(0.6))
                 .frame(width: 3)
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                     BlockView(block: block)
-                        .opacity(0.85)
+                        .opacity(0.82)
                 }
             }
+            .padding(.vertical, 4)
         }
         .padding(.leading, 4)
+        .background(
+            theme.accent.opacity(0.04)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+        )
     }
 }
 

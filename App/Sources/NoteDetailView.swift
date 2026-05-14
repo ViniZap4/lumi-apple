@@ -52,11 +52,21 @@ struct NoteDetailView: View {
         // the preference is on. Driven by `mode` so toggling the picker
         // (or hitting ⌘E) flips with a brief cross-fade instead of a
         // hard cut.
+        // The two animation triggers — `mode` for read↔edit toggle and
+        // `entry.relativePath` for note switch — both run the same easing
+        // curve. Without the second, .id changes would replace the
+        // subtree without firing the inner `.transition` modifiers.
         .animation(
             appState.preferences.contentAnimations
-                ? .easeInOut(duration: 0.18)
+                ? .easeInOut(duration: 0.22)
                 : nil,
             value: mode
+        )
+        .animation(
+            appState.preferences.contentAnimations
+                ? .easeInOut(duration: 0.22)
+                : nil,
+            value: entry.relativePath
         )
         .navigationTitle(displayTitle)
         #if os(iOS) || os(visionOS)
@@ -68,48 +78,55 @@ struct NoteDetailView: View {
     private func content(editor: EditorState) -> some View {
         switch mode {
         case .view:
-            MountFader(animated: appState.preferences.contentAnimations) {
-                ReadModeScroll(jkEnabled: appState.preferences.jkScrollInView) {
-                    MarkdownReader(
-                        title: displayTitle,
-                        tags: displayTags,
-                        text: editor.currentText,
-                        baseURL: baseURL
-                    )
-                }
+            ReadModeScroll(jkEnabled: appState.preferences.jkScrollInView) {
+                MarkdownReader(
+                    title: displayTitle,
+                    tags: displayTags,
+                    text: editor.currentText,
+                    baseURL: baseURL
+                )
             }
-            // A new entry → fresh MountFader → opacity replays from 0,
-            // giving us a true mount animation per note. Also forces a
-            // new scroll-host coordinator so the velocity-ticker
-            // baseline is clean.
+            // Per-note identity: new entry → fresh scroll-host coord,
+            // fresh stagger cascade for the header / blocks inside the
+            // reader. Combined with `.animation(value: entry.relativePath)`
+            // higher up, the swap fades out the old before the new
+            // cascades in.
             .id(entry.relativePath)
+            .transition(
+                appState.preferences.contentAnimations
+                    ? .opacity.combined(with: .move(edge: .top))
+                    : .identity
+            )
         case .edit:
-            MountFader(animated: appState.preferences.contentAnimations) {
-                Group {
-                    if appState.preferences.vimEnabled {
-                        VimEditor(
-                            text: Binding(
-                                get: { editor.currentText },
-                                set: { editor.currentText = $0 }
-                            ),
-                            onModeChange: { appState.liveVimMode = $0 },
-                            onEffect: { effect in
-                                handleVimEffect(effect, editor: editor)
-                            },
-                            jjEscapeEnabled: appState.preferences.jjEscapeMapping,
-                            showLineNumbers: appState.preferences.showLineNumbers,
-                            relativeLineNumbers: appState.preferences.relativeLineNumbers
-                        )
-                        .overlay(alignment: .top) { editModeStripe }
-                    } else {
-                        PlainTextEditor(text: Binding(
+            Group {
+                if appState.preferences.vimEnabled {
+                    VimEditor(
+                        text: Binding(
                             get: { editor.currentText },
                             set: { editor.currentText = $0 }
-                        ))
-                    }
+                        ),
+                        onModeChange: { appState.liveVimMode = $0 },
+                        onEffect: { effect in
+                            handleVimEffect(effect, editor: editor)
+                        },
+                        jjEscapeEnabled: appState.preferences.jjEscapeMapping,
+                        showLineNumbers: appState.preferences.showLineNumbers,
+                        relativeLineNumbers: appState.preferences.relativeLineNumbers
+                    )
+                    .overlay(alignment: .top) { editModeStripe }
+                } else {
+                    PlainTextEditor(text: Binding(
+                        get: { editor.currentText },
+                        set: { editor.currentText = $0 }
+                    ))
                 }
             }
             .id(entry.relativePath)
+            .transition(
+                appState.preferences.contentAnimations
+                    ? .opacity
+                    : .identity
+            )
         }
     }
 
@@ -231,40 +248,49 @@ private struct MarkdownReader: View {
     }
 
     var body: some View {
+        // The header items (title, tags, separator) live in the same
+        // stagger pipeline as the markdown blocks so the page assembles
+        // top-down on mount. Each block animates independently via
+        // `StaggeredBlock`; the cascade is gated by
+        // `preferences.contentAnimations`.
         VStack(alignment: .leading, spacing: 22 * scale) {
-            // Header: oversized title + thin tag row + subtle separator.
-            // Tight stack so the body's whitespace stays consistent.
-            VStack(alignment: .leading, spacing: 10 * scale) {
-                Text(title)
-                    .font(.system(size: 34 * scale, weight: .bold, design: .default))
-                    .foregroundStyle(theme.primary)
-                    .lineSpacing(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                if !tags.isEmpty {
-                    HStack(spacing: 6) {
-                        ForEach(tags, id: \.self) { tag in
-                            TagChip(tag: tag)
+            StaggeredBlock(index: 0) {
+                VStack(alignment: .leading, spacing: 10 * scale) {
+                    Text(title)
+                        .font(.system(size: 34 * scale, weight: .bold, design: .default))
+                        .foregroundStyle(theme.primary)
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if !tags.isEmpty {
+                        HStack(spacing: 6) {
+                            ForEach(tags, id: \.self) { tag in
+                                TagChip(tag: tag)
+                            }
                         }
                     }
                 }
+                .padding(.bottom, 4)
             }
-            .padding(.bottom, 4)
 
-            Rectangle()
-                .fill(theme.border)
-                .frame(height: 0.5)
-                .padding(.bottom, 2)
+            StaggeredBlock(index: 1) {
+                Rectangle()
+                    .fill(theme.border)
+                    .frame(height: 0.5)
+                    .padding(.bottom, 2)
+            }
 
             if let parsed {
-                MarkdownView(parsed)
+                MarkdownView(parsed, indexOffset: 2)
                     .environment(\.markdownScale, scale)
                     .environment(\.markdownFontFamily, fontFamilyEnv)
+                    .environment(\.markdownStagger, appState.preferences.contentAnimations)
             } else {
                 Text("loading…")
                     .font(.system(.callout, design: .monospaced))
                     .foregroundStyle(theme.textDim)
             }
         }
+        .environment(\.markdownStagger, appState.preferences.contentAnimations)
         .padding(.horizontal, 48)
         .padding(.top, 32)
         .padding(.bottom, 40)
@@ -696,16 +722,23 @@ private struct TagChip: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        Text(tag)
-            .font(.system(.caption, design: .monospaced))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(
-                Capsule()
-                    .fill(theme.overlayBackground)
-                    .overlay(Capsule().stroke(theme.border, lineWidth: 0.5))
-            )
-            .foregroundStyle(theme.accent)
+        HStack(spacing: 4) {
+            Image(systemName: "number")
+                .font(.system(size: 9, weight: .semibold))
+                .opacity(0.7)
+            Text(tag)
+                .font(.system(.caption, design: .rounded).weight(.medium))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(
+            Capsule()
+                .fill(theme.accent.opacity(0.12))
+        )
+        .overlay(
+            Capsule().stroke(theme.accent.opacity(0.25), lineWidth: 0.5)
+        )
+        .foregroundStyle(theme.accent)
     }
 }
 
