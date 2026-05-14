@@ -16,6 +16,12 @@ struct EmptyVaultPanel: View {
 
     @State private var showImporter = false
     @State private var highlightedID: PersistentIdentifier?
+    /// Keyboard cursor — index into `vaults`. j/k move it; ⏎ opens.
+    /// Tracked separately from `highlightedID` (which mirrors mouse
+    /// hover) so the two interaction modes don't fight when the user
+    /// has the mouse parked over one row while pressing j/k.
+    @State private var keyboardCursor: Int = 0
+    @FocusState private var focused: Bool
     @Environment(\.theme) private var theme
 
     var body: some View {
@@ -39,6 +45,18 @@ struct EmptyVaultPanel: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.background)
+        #if os(macOS)
+        .focusable()
+        .focused($focused)
+        .focusEffectDisabled()
+        .onAppear { focused = true }
+        .onKeyPress(phases: [.down, .repeat]) { press in
+            handleKey(press)
+        }
+        .onChange(of: vaults.count) { _, _ in
+            keyboardCursor = min(keyboardCursor, max(0, vaults.count - 1))
+        }
+        #endif
         .fileImporter(
             isPresented: $showImporter,
             allowedContentTypes: [.folder],
@@ -49,6 +67,44 @@ struct EmptyVaultPanel: View {
             }
         }
     }
+
+    #if os(macOS)
+    private func handleKey(_ press: KeyPress) -> KeyPress.Result {
+        guard !vaults.isEmpty else { return .ignored }
+        switch press.characters {
+        case "j":
+            keyboardCursor = min(keyboardCursor + 1, vaults.count - 1)
+            return .handled
+        case "k":
+            keyboardCursor = max(keyboardCursor - 1, 0)
+            return .handled
+        case "g":
+            keyboardCursor = 0
+            return .handled
+        case "G":
+            keyboardCursor = vaults.count - 1
+            return .handled
+        case "\r", "l", " ":
+            if vaults.indices.contains(keyboardCursor) {
+                onSelect(vaults[keyboardCursor])
+            }
+            return .handled
+        default:
+            switch press.key {
+            case .upArrow:
+                keyboardCursor = max(keyboardCursor - 1, 0); return .handled
+            case .downArrow:
+                keyboardCursor = min(keyboardCursor + 1, vaults.count - 1); return .handled
+            case .return:
+                if vaults.indices.contains(keyboardCursor) {
+                    onSelect(vaults[keyboardCursor])
+                }
+                return .handled
+            default: return .ignored
+            }
+        }
+    }
+    #endif
 
     // MARK: - States
 
@@ -72,8 +128,8 @@ struct EmptyVaultPanel: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 4)
             VStack(spacing: 6) {
-                ForEach(vaults) { vault in
-                    vaultRow(vault)
+                ForEach(Array(vaults.enumerated()), id: \.element.id) { index, vault in
+                    vaultRow(vault, index: index)
                 }
             }
             openFolderButton(label: "Open another folder…")
@@ -82,8 +138,10 @@ struct EmptyVaultPanel: View {
     }
 
     @ViewBuilder
-    private func vaultRow(_ vault: VaultRecord) -> some View {
+    private func vaultRow(_ vault: VaultRecord, index: Int) -> some View {
         let isHovered = highlightedID == vault.persistentModelID
+        let isCursor = keyboardCursor == index
+        let isActive = isHovered || isCursor
         Button {
             onSelect(vault)
         } label: {
@@ -91,7 +149,7 @@ struct EmptyVaultPanel: View {
                 Image(systemName: "folder.fill")
                     .foregroundStyle(theme.accent)
                     .frame(width: 18)
-                    .scaleEffect(isHovered ? 1.08 : 1.0)
+                    .scaleEffect(isActive ? 1.08 : 1.0)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(vault.name)
                         .font(.system(.body, design: .monospaced))
@@ -105,25 +163,30 @@ struct EmptyVaultPanel: View {
                 Spacer()
                 Image(systemName: "chevron.right")
                     .font(.caption2)
-                    .foregroundStyle(isHovered ? theme.accent : theme.textDim)
-                    .offset(x: isHovered ? 3 : 0)
+                    .foregroundStyle(isActive ? theme.accent : theme.textDim)
+                    .offset(x: isActive ? 3 : 0)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(isHovered ? theme.accent.opacity(0.14) : theme.overlayBackground)
+                    .fill(isActive ? theme.accent.opacity(0.14) : theme.overlayBackground)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(isHovered ? theme.accent.opacity(0.5) : theme.border.opacity(0.4), lineWidth: 0.5)
+                    .stroke(isActive ? theme.accent.opacity(0.5) : theme.border.opacity(0.4), lineWidth: 0.5)
             )
-            .scaleEffect(isHovered ? 1.01 : 1.0)
+            .scaleEffect(isActive ? 1.01 : 1.0)
         }
         .buttonStyle(.plain)
-        .animation(.easeOut(duration: 0.14), value: isHovered)
+        .animation(.easeOut(duration: 0.14), value: isActive)
         .onHover { hovering in
             highlightedID = hovering ? vault.persistentModelID : nil
+            // Mouse hover wins — sync the keyboard cursor so a follow-up
+            // ⏎ opens the row the user is pointing at.
+            if hovering {
+                keyboardCursor = index
+            }
         }
     }
 
@@ -152,7 +215,10 @@ struct EmptyVaultPanel: View {
     @ViewBuilder
     private var footer: some View {
         HStack(spacing: 18) {
-            hint(key: "↩", label: "open")
+            if !vaults.isEmpty {
+                hint(key: "j/k", label: "move")
+                hint(key: "↩", label: "open")
+            }
             hint(key: "⌘O", label: "switcher")
             hint(key: "⌘,", label: "settings")
         }
