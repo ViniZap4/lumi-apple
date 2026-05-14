@@ -78,6 +78,7 @@ struct TreeBrowserView: View {
                     items: parent.items ?? [],
                     highlightedID: "folder:" + state.currentFolder.relativePath,
                     cursorIsActive: false,
+                    cadence: .parent,
                     onTap: { item in
                         // Clicking a parent-column row navigates back to
                         // that folder. Lets users jump up the breadcrumb
@@ -273,30 +274,74 @@ private struct ColumnContainer<Content: View>: View {
 
 // MARK: - Generic column list
 
+/// Cadence for a column's row mount cascade. Letting parent / current /
+/// preview tune their own delays makes the navigation read as
+/// "current column leads, parent and preview follow" instead of
+/// "everything cascades at the same pace".
+enum ColumnRowCadence {
+    /// Active column — fastest cascade, leads the visual hierarchy.
+    case current
+    /// Parent column — secondary; longer per-row delay so it reads as
+    /// "settling into place" behind the current column.
+    case parent
+    /// Preview pane — single block (not per-row) so use a tiny step.
+    case preview
+
+    var stepDelay: Double {
+        switch self {
+        case .current: return 0.010
+        case .parent: return 0.022
+        case .preview: return 0.0
+        }
+    }
+
+    var initialDelay: Double {
+        switch self {
+        case .current: return 0.0
+        case .parent: return 0.06
+        case .preview: return 0.04
+        }
+    }
+
+    var duration: Double {
+        switch self {
+        case .current: return 0.22
+        case .parent: return 0.30
+        case .preview: return 0.24
+        }
+    }
+
+    var delayCap: Double {
+        switch self {
+        case .current: return 0.18
+        case .parent: return 0.32
+        case .preview: return 0.04
+        }
+    }
+}
+
 /// Per-row mount animation. Each row fades + slides into place when it
-/// first appears in the LazyVStack, with a small per-index delay so the
-/// column reads as cascading in from the top. The cascade caps at
-/// `delayCap` so very long columns don't take seconds to settle.
+/// first appears in the LazyVStack, with a per-index delay so the
+/// column reads as cascading in from the top. The cadence parameter
+/// lets columns differentiate (parent column trails current, etc.).
 /// Unmount (column swap on h / l navigation) is handled by SwiftUI's
 /// implicit removal of the parent column under `.animation`.
 private struct ColumnRowMount<Content: View>: View {
     let index: Int
     let animated: Bool
+    var cadence: ColumnRowCadence = .current
     @ViewBuilder let content: () -> Content
     @State private var visible = false
 
-    private static var stepDelay: Double { 0.012 }
-    private static var delayCap: Double { 0.22 }
-
     var body: some View {
-        let delay = min(Double(index) * Self.stepDelay, Self.delayCap)
+        let delay = cadence.initialDelay + min(Double(index) * cadence.stepDelay, cadence.delayCap)
         content()
             .opacity(visible ? 1 : (animated ? 0 : 1))
             .offset(x: visible ? 0 : (animated ? -6 : 0))
             .onAppear {
                 guard animated else { visible = true; return }
                 Task { @MainActor in
-                    withAnimation(.easeOut(duration: 0.22).delay(delay)) {
+                    withAnimation(.easeOut(duration: cadence.duration).delay(delay)) {
                         visible = true
                     }
                 }
@@ -308,6 +353,7 @@ private struct ColumnList: View {
     let items: [FolderNode.Item]
     let highlightedID: String?
     let cursorIsActive: Bool
+    var cadence: ColumnRowCadence = .current
     let onTap: (FolderNode.Item) -> Void
     var onActivate: ((FolderNode.Item) -> Void)? = nil
 
@@ -326,7 +372,7 @@ private struct ColumnList: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                            ColumnRowMount(index: index, animated: animateRows) {
+                            ColumnRowMount(index: index, animated: animateRows, cadence: cadence) {
                                 row(item: item, isHighlighted: item.id == highlightedID)
                                     .onTapGesture(count: 2) {
                                         onTap(item)

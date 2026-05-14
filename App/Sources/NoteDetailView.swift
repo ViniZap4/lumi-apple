@@ -350,6 +350,7 @@ private struct ReadModeScroll<Content: View>: View {
     let jkEnabled: Bool
     @ViewBuilder let content: () -> Content
     @FocusState private var focused: Bool
+    @State private var monitor: CtrlKeyMonitor?
 
     var body: some View {
         #if os(macOS)
@@ -358,43 +359,36 @@ private struct ReadModeScroll<Content: View>: View {
             .focusable()
             .focused($focused)
             .focusEffectDisabled()
-            .onAppear { focused = true }
-            // Ctrl+letter shortcuts go through SwiftUI's keyboardShortcut
-            // pipeline — `.onKeyPress` doesn't reliably surface
-            // Ctrl-letter on macOS (AppKit swallows them for legacy
-            // Emacs bindings). Hidden zero-size buttons attach the
-            // dispatch; same destinations as the j/k handlers below.
-            .background {
-                ZStack {
-                    Button("") { host.coordinator.scrollHalfPage(direction: 1) }
-                        .keyboardShortcut("d", modifiers: .control)
-                    Button("") { host.coordinator.scrollHalfPage(direction: -1) }
-                        .keyboardShortcut("u", modifiers: .control)
-                    Button("") { host.coordinator.scrollFullPage(direction: 1) }
-                        .keyboardShortcut("f", modifiers: .control)
-                    Button("") { host.coordinator.scrollFullPage(direction: -1) }
-                        .keyboardShortcut("b", modifiers: .control)
-                    // Ctrl-T is non-vim but the user binds it to half
-                    // page down for symmetry with Ctrl-D (one hand
-                    // reach).
-                    Button("") { host.coordinator.scrollHalfPage(direction: 1) }
-                        .keyboardShortcut("t", modifiers: .control)
-                }
-                .opacity(0)
-                .allowsHitTesting(false)
-                .disabled(!jkEnabled)
+            .onAppear {
+                focused = true
+                // Install an NSEvent local monitor — SwiftUI's
+                // keyboardShortcut on hidden buttons turned out to be
+                // unreliable inside `.background`, and onKeyPress
+                // doesn't surface Ctrl-letter at all because AppKit's
+                // legacy Emacs bindings swallow those at a lower
+                // responder level. NSEvent.addLocalMonitorForEvents
+                // sees every keyDown reaching the app and lets us
+                // return nil to consume it. Lifetime is scoped to this
+                // view via .onDisappear so we don't intercept while in
+                // edit mode.
+                let coord = host.coordinator
+                monitor = CtrlKeyMonitor(
+                    enabled: jkEnabled,
+                    halfPage: { coord.scrollHalfPage(direction: CGFloat($0)) },
+                    fullPage: { coord.scrollFullPage(direction: CGFloat($0)) }
+                )
             }
+            .onDisappear { monitor = nil }
+            .onChange(of: jkEnabled) { _, new in
+                monitor?.enabled = new
+            }
+            // Plain-key shortcuts go through SwiftUI's onKeyPress —
+            // those don't conflict with AppKit text-editing bindings.
             // `.repeat` catches the auto-fired keydowns when the user
-            // *holds* j or k, so scrolling continues smoothly rather than
-            // stuttering one line per discrete press. We pass animated:
-            // false on repeat so each nudge happens immediately — chained
-            // 100ms animations from holding the key would stutter.
+            // holds j / k, so scrolling continues smoothly rather than
+            // stuttering one line per discrete press.
             .onKeyPress(phases: [.down, .repeat]) { press in
                 guard jkEnabled else { return .ignored }
-                // Vim-style plain-key shortcuts. Ctrl variants are
-                // handled by the keyboardShortcut buttons above; this
-                // path catches the unmodified keys (and dead-simple
-                // single-key navigation).
                 let lineStep: CGFloat = 22
                 switch press.characters {
                 case "j": host.coordinator.glide(by: lineStep); return .handled
@@ -413,6 +407,57 @@ private struct ReadModeScroll<Content: View>: View {
         #endif
     }
 }
+
+#if canImport(AppKit)
+/// Owns an NSEvent local monitor that swallows Ctrl-letter shortcuts
+/// (⌃D, ⌃U, ⌃F, ⌃B, ⌃T) and forwards them to a pair of caller-provided
+/// scroll closures. Generic-free so it can live at file scope without
+/// dragging `Content` along; the closures bridge to whatever
+/// coordinator instance owns the actual scroll. Lifetime is scoped to
+/// the read-mode view: dropping the @State reference fires deinit and
+/// removes the monitor — we don't keep intercepting once the user
+/// leaves read mode.
+@MainActor
+private final class CtrlKeyMonitor {
+    var enabled: Bool
+    private let halfPage: (Int) -> Void
+    private let fullPage: (Int) -> Void
+    nonisolated(unsafe) private var token: Any?
+
+    init(
+        enabled: Bool,
+        halfPage: @escaping @MainActor (Int) -> Void,
+        fullPage: @escaping @MainActor (Int) -> Void
+    ) {
+        self.enabled = enabled
+        self.halfPage = halfPage
+        self.fullPage = fullPage
+        token = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.handle(event) ?? event
+        }
+    }
+
+    deinit {
+        if let token { NSEvent.removeMonitor(token) }
+    }
+
+    private func handle(_ event: NSEvent) -> NSEvent? {
+        guard enabled,
+              event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .control,
+              let chars = event.charactersIgnoringModifiers?.lowercased()
+        else { return event }
+        switch chars {
+        case "d": halfPage(1); return nil
+        case "u": halfPage(-1); return nil
+        case "f": fullPage(1); return nil
+        case "b": fullPage(-1); return nil
+        // Non-vim alias — symmetry with ⌃D for one-hand reach.
+        case "t": halfPage(1); return nil
+        default: return event
+        }
+    }
+}
+#endif
 
 #if os(macOS)
 import AppKit
