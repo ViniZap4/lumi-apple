@@ -3,10 +3,29 @@ import PDFKit
 
 struct PDFMediaView: View {
     let url: URL
+    @Environment(\.theme) private var theme
+    @Environment(\.markdownLite) private var lite
 
     var body: some View {
-        PDFRepresentable(url: url)
-            .frame(minHeight: 400)
+        if lite {
+            HStack(spacing: 6) {
+                Image(systemName: "doc.fill")
+                    .font(.caption)
+                    .foregroundStyle(theme.accent)
+                Text("pdf · \(url.lastPathComponent)")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(theme.textDim)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+            }
+            .padding(.vertical, 6).padding(.horizontal, 8)
+            .background(theme.overlayBackground.opacity(0.4))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        } else {
+            PDFRepresentable(url: url)
+                .frame(minHeight: 400)
+        }
     }
 }
 

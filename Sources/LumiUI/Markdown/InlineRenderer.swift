@@ -98,4 +98,24 @@ public enum InlineRenderer {
         }
         return false
     }
+
+    /// True iff the inline tree contains at least one `.link` node anywhere.
+    /// Drives the read-pane's pointing-hand cursor swap on macOS — SwiftUI
+    /// Text doesn't change cursor for AttributedString `.link` attributes
+    /// natively, so the renderer attaches an `.onHover` to whole-paragraph
+    /// granularity when this is true.
+    public static func containsLink(_ nodes: [InlineNode]) -> Bool {
+        for node in nodes {
+            switch node {
+            case .link: return true
+            case let .strong(children),
+                 let .emphasis(children),
+                 let .strikethrough(children):
+                if containsLink(children) { return true }
+            case .text, .code, .image, .math, .lineBreak, .softBreak:
+                continue
+            }
+        }
+        return false
+    }
 }

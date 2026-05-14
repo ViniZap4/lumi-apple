@@ -8,6 +8,7 @@ import LumiKit
 public struct KaTeXBlockView: View {
     public let latex: String
     @Environment(\.theme) private var theme
+    @Environment(\.markdownLite) private var lite
     @State private var measuredHeight: CGFloat = 64
 
     public init(latex: String) {
@@ -15,17 +16,39 @@ public struct KaTeXBlockView: View {
     }
 
     public var body: some View {
-        KaTeXWebRepresentable(
-            mode: .block(latex: latex),
-            isDark: theme.isDark,
-            textHex: theme.textHex,
-            mutedHex: theme.textDimHex,
-            onHeight: { h in
-                if h > 1 { measuredHeight = min(max(h, 24), 1600) }
+        if lite {
+            // Preview-pane fallback — single Text glyph + truncated
+            // LaTeX so the user can still tell the block contains math
+            // without paying the cost of a fresh WKWebView + KaTeX CDN
+            // fetch on every j/k cursor sweep.
+            HStack(spacing: 6) {
+                Image(systemName: "sum")
+                    .font(.system(.caption))
+                    .foregroundStyle(theme.accent)
+                Text(latex)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(theme.textDim)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
             }
-        )
-        .frame(height: measuredHeight)
-        .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+            .padding(.horizontal, 8)
+            .background(theme.overlayBackground.opacity(0.4))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            KaTeXWebRepresentable(
+                mode: .block(latex: latex),
+                isDark: theme.isDark,
+                textHex: theme.textHex,
+                mutedHex: theme.textDimHex,
+                onHeight: { h in
+                    if h > 1 { measuredHeight = min(max(h, 24), 1600) }
+                }
+            )
+            .frame(height: measuredHeight)
+            .frame(maxWidth: .infinity)
+        }
     }
 }
 
@@ -40,6 +63,7 @@ public struct KaTeXParagraphView: View {
     public let inline: [InlineNode]
     @Environment(\.theme) private var theme
     @Environment(\.markdownScale) private var scale
+    @Environment(\.markdownLite) private var lite
     @State private var measuredHeight: CGFloat = 36
 
     public init(inline: [InlineNode]) {
@@ -47,20 +71,33 @@ public struct KaTeXParagraphView: View {
     }
 
     public var body: some View {
-        KaTeXWebRepresentable(
-            mode: .paragraph(
-                html: paragraphHTML(from: inline),
-                fontSize: 15 * scale
-            ),
-            isDark: theme.isDark,
-            textHex: theme.textHex,
-            mutedHex: theme.textDimHex,
-            onHeight: { h in
-                if h > 1 { measuredHeight = min(max(h, 16), 4000) }
-            }
-        )
-        .frame(height: measuredHeight)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        if lite {
+            // Preview-pane fallback — render the paragraph natively with
+            // raw LaTeX shown in code styling (via InlineRenderer's
+            // `.math` fallback). Much cheaper than spawning a WKWebView
+            // per paragraph while the user is just glancing at notes.
+            Text(InlineRenderer.render(inline, theme: theme))
+                .font(.system(size: 15 * scale, weight: .regular))
+                .foregroundStyle(theme.text)
+                .lineSpacing(3 * scale)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            KaTeXWebRepresentable(
+                mode: .paragraph(
+                    html: paragraphHTML(from: inline),
+                    fontSize: 15 * scale
+                ),
+                isDark: theme.isDark,
+                textHex: theme.textHex,
+                mutedHex: theme.textDimHex,
+                onHeight: { h in
+                    if h > 1 { measuredHeight = min(max(h, 16), 4000) }
+                }
+            )
+            .frame(height: measuredHeight)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 

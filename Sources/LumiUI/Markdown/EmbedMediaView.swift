@@ -17,15 +17,40 @@ enum EmbedSource: Hashable, Sendable {
 
 struct EmbedMediaView: View {
     let embed: EmbedSource
+    @Environment(\.theme) private var theme
+    @Environment(\.markdownLite) private var lite
 
     var body: some View {
-        Group {
-            if let url = embed.iframeURL {
-                EmbedWebViewRepresentable(url: url)
-                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
-            } else {
-                Color.clear.frame(height: 1)
+        if lite {
+            // Preview-pane fallback — no WebView spawn. Just a label so
+            // the reader can tell the slot contains a YouTube/Vimeo embed
+            // without paying the iframe-load cost on every selection.
+            HStack(spacing: 6) {
+                Image(systemName: "play.rectangle")
+                    .font(.caption)
+                    .foregroundStyle(theme.accent)
+                Text(embed.shortLabel)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(theme.textDim)
+                Spacer()
             }
+            .padding(.vertical, 6).padding(.horizontal, 8)
+            .background(theme.overlayBackground.opacity(0.4))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        } else if let url = embed.iframeURL {
+            EmbedWebViewRepresentable(url: url)
+                .aspectRatio(16.0 / 9.0, contentMode: .fit)
+        } else {
+            Color.clear.frame(height: 1)
+        }
+    }
+}
+
+extension EmbedSource {
+    var shortLabel: String {
+        switch self {
+        case let .youtube(id): return "youtube · \(id)"
+        case let .vimeo(id): return "vimeo · \(id)"
         }
     }
 }

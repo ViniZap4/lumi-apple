@@ -975,7 +975,17 @@ private struct PreviewPane: View {
                 // re-render. The work happens once in handleItemChange
                 // on a detached task; we just hand the doc to
                 // MarkdownView here.
+                //
+                // `markdownLite = true` swaps every WebView-based
+                // renderer (KaTeX block + paragraph, Mermaid, YouTube /
+                // Vimeo embeds, inline video, PDF, embedded markdown)
+                // for a compact placeholder. Without this flag, a fast
+                // j/k sweep through a folder of math-heavy or
+                // media-heavy notes was spinning up a fresh WKWebView +
+                // CDN fetch per matching block per selection — the
+                // user-visible perf regression we're solving.
                 MarkdownView(document)
+                    .environment(\.markdownLite, true)
             } else {
                 ProgressView().controlSize(.small)
             }

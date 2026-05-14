@@ -1,5 +1,8 @@
 import SwiftUI
 import LumiKit
+#if canImport(AppKit)
+import AppKit
+#endif
 
 /// Scale factor applied to all markdown typography. The read pane injects
 /// this from `preferences.readingScale` so users can resize on the fly. The
@@ -14,6 +17,19 @@ public struct MarkdownScaleKey: EnvironmentKey {
 /// based on its index, capped so very long notes don't take seconds to
 /// settle.
 public struct MarkdownStaggerKey: EnvironmentKey {
+    public static let defaultValue: Bool = false
+}
+
+/// Lightweight-render flag for the three-column browser's preview pane.
+/// When `true`, expensive WebView-based renderers (KaTeX block + paragraph,
+/// Mermaid, YouTube/Vimeo embeds, inline video, PDF, embedded markdown)
+/// collapse to a compact placeholder. Without this flag a fast `j/k` sweep
+/// through a folder of math-heavy or media-heavy notes was spawning a
+/// fresh WKWebView per matching block per selection — each one re-fetched
+/// KaTeX / mermaid / etc. from the CDN. The opened-note view never sets
+/// the flag, so full rendering still happens once the user commits to a
+/// note. Off by default.
+public struct MarkdownLiteKey: EnvironmentKey {
     public static let defaultValue: Bool = false
 }
 
@@ -39,6 +55,44 @@ public extension EnvironmentValues {
     var markdownStagger: Bool {
         get { self[MarkdownStaggerKey.self] }
         set { self[MarkdownStaggerKey.self] = newValue }
+    }
+    /// See `MarkdownLiteKey`. Read by every heavy renderer (KaTeX block
+    /// + paragraph, Mermaid, EmbedMedia, VideoMedia, PDFMedia,
+    /// EmbeddedMarkdown) so they can opt out of WebView spawns inside a
+    /// preview pass.
+    var markdownLite: Bool {
+        get { self[MarkdownLiteKey.self] }
+        set { self[MarkdownLiteKey.self] = newValue }
+    }
+}
+
+/// macOS cursor swap so paragraphs containing links visibly invite a
+/// click. SwiftUI's Text + AttributedString `.link` doesn't trigger
+/// `NSCursor.pointingHand` natively (the I-beam from
+/// `.textSelection(.enabled)` wins). We attach the swap on the whole
+/// paragraph: less precise than per-glyph hit-testing, but a single
+/// `.onHover` is cheap and matches the typical lumi note shape (most
+/// link-heavy paragraphs are bullets whose content is mostly the link).
+/// iOS / iPadOS / visionOS keep the default cursor — touch UIs don't
+/// have a hover state to react to.
+extension View {
+    @ViewBuilder
+    func pointingHandIfContainsLink(_ inline: [InlineNode]) -> some View {
+        #if canImport(AppKit) && !targetEnvironment(macCatalyst)
+        if InlineRenderer.containsLink(inline) {
+            self.onHover { hovering in
+                if hovering {
+                    NSCursor.pointingHand.set()
+                } else {
+                    NSCursor.arrow.set()
+                }
+            }
+        } else {
+            self
+        }
+        #else
+        self
+        #endif
     }
 }
 
@@ -159,6 +213,7 @@ struct BlockView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
+                .pointingHandIfContainsLink(inline)
 
         case let .paragraph(inline):
             // Paragraphs that contain inline math route through the
@@ -177,6 +232,7 @@ struct BlockView: View {
                     .lineSpacing(3 * scale)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .pointingHandIfContainsLink(inline)
             }
 
         case let .codeBlock(language, code):

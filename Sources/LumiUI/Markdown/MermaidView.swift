@@ -24,6 +24,7 @@ import LumiKit
 public struct MermaidView: View {
     public let code: String
     @Environment(\.theme) private var theme
+    @Environment(\.markdownLite) private var lite
     @State private var measuredHeight: CGFloat = 360
 
     public init(code: String) {
@@ -31,6 +32,27 @@ public struct MermaidView: View {
     }
 
     public var body: some View {
+        if lite {
+            HStack(spacing: 6) {
+                Image(systemName: "chart.xyaxis.line")
+                    .font(.caption)
+                    .foregroundStyle(theme.accent)
+                Text("mermaid diagram")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(theme.textDim)
+                Spacer()
+            }
+            .padding(.vertical, 6).padding(.horizontal, 8)
+            .background(theme.overlayBackground.opacity(0.4))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            renderedBody
+        }
+    }
+
+    @ViewBuilder
+    private var renderedBody: some View {
         MermaidWebRepresentable(
             code: code,
             isDark: theme.isDark,

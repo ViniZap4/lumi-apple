@@ -20,6 +20,7 @@ public struct EmbeddedMarkdownView: View {
     public let alt: String
     @Environment(\.theme) private var theme
     @Environment(\.markdownEmbedDepth) private var depth
+    @Environment(\.markdownLite) private var lite
     @State private var parsed: MarkdownDocument?
     @State private var loadError: String?
 
@@ -29,6 +30,33 @@ public struct EmbeddedMarkdownView: View {
     }
 
     public var body: some View {
+        // Lite mode (preview pane) — never load the target file. The
+        // disk read alone can cost 10s of ms per item on a busy folder
+        // and the recursive parse blows up worst-case (long embed chains
+        // would re-walk every cursor flip). Show a compact pointer
+        // instead; the full embed renders when the user opens the note.
+        if lite {
+            HStack(spacing: 6) {
+                Image(systemName: "doc.text")
+                    .font(.caption)
+                    .foregroundStyle(theme.primary)
+                Text("embed · \(url.lastPathComponent)")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(theme.textDim)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+            }
+            .padding(.vertical, 6).padding(.horizontal, 8)
+            .background(theme.overlayBackground.opacity(0.4))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        } else {
+            fullBody
+        }
+    }
+
+    @ViewBuilder
+    private var fullBody: some View {
         Group {
             if depth >= EmbedDepth.cap {
                 placeholder(message: "embed depth limit (\(EmbedDepth.cap)) reached", url: url)
