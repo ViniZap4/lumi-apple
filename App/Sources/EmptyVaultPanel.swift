@@ -29,9 +29,13 @@ struct EmptyVaultPanel: View {
             Spacer(minLength: 0)
             VStack(spacing: 26) {
                 ASCIILogo()
+                // Subtitle uses `text` rather than `textDim` so it reads
+                // cleanly on the lighter palettes (tokyo-day, catppuccin-
+                // latte, lgbt-light, trans-light) where `textDim` slides
+                // into the noise.
                 Text("local-first markdown notes")
                     .font(.system(.callout, design: .monospaced))
-                    .foregroundStyle(theme.textDim)
+                    .foregroundStyle(theme.text.opacity(0.7))
 
                 if vaults.isEmpty {
                     emptyState
@@ -155,9 +159,12 @@ struct EmptyVaultPanel: View {
                         .font(.system(.body, design: .monospaced))
                         .foregroundStyle(theme.text)
                     if let lastOpened = vault.lastOpenedAt {
+                        // Same readability tweak as the subtitle: pulled
+                        // up from textDim to ~70% text so light themes
+                        // don't lose the timestamp.
                         Text(lastOpened.formatted(.relative(presentation: .numeric)))
                             .font(.system(.caption2, design: .monospaced))
-                            .foregroundStyle(theme.textDim)
+                            .foregroundStyle(theme.text.opacity(0.65))
                     }
                 }
                 Spacer()
@@ -238,38 +245,83 @@ struct EmptyVaultPanel: View {
                 .padding(.horizontal, 6).padding(.vertical, 2)
                 .background(
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(theme.background)
+                        // Was `theme.background`; that's the same color
+                        // as the home-pane base behind the footer, so on
+                        // any theme where `overlayBackground.opacity(0.4)`
+                        // doesn't differ enough from base (e.g. obsidian),
+                        // the pill became invisible. `selectedBackground`
+                        // is a guaranteed-distinct slot in all 12 themes.
+                        .fill(theme.selectedBackground)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .stroke(theme.border.opacity(0.5), lineWidth: 0.5)
                 )
                 .foregroundStyle(theme.accent)
             Text(label)
+                // Bumped from `theme.textDim` to `theme.text` so the
+                // descriptive label reads on light themes too (textDim
+                // hits AA-fail territory against the footer's tinted
+                // overlay on tokyo-day / catppuccin-latte).
                 .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(theme.textDim)
+                .foregroundStyle(theme.text)
         }
     }
 }
 
-/// ASCII art LUMI wordmark, matching the TUI / web clients. Each character
-/// column is rendered at its own theme color slot so the wordmark gets
-/// the same rainbow gradient lumi uses everywhere else.
+/// ASCII art LUMI wordmark, matching the TUI / web clients exactly.
+///
+/// The source-of-truth lines live in `web-client/src/lib/store.svelte.ts`
+/// and `tui-client/ui/view_home.go`. The canonical pattern is:
+///
+///   - Line 0 has no leading space (it's the "top edge" of the wordmark)
+///   - Lines 1…5 each carry a single leading space
+///
+/// The leading space on the lower rows is what gives the wordmark its
+/// slight rightward shear under the top edge — the same shear the TUI
+/// renders. Before this fix the Apple lines were flush-left across the
+/// board, which made line 0 appear "stuck out to the left" since it has
+/// 1-column-narrower decorations than the lower rows' bodies.
+///
+/// Per-line color uses `theme.logoColors[i]` so the wordmark gets the
+/// same six-stop rainbow the TUI (`theme.Current.LogoColors[i]`) and
+/// web (`var(--color-logo-i)`) clients use.
 private struct ASCIILogo: View {
     @Environment(\.theme) private var theme
 
+    /// Whitespace at the start is significant — keep these strings
+    /// verbatim. Indices match the source-of-truth lists in the web
+    /// store and TUI view_home.go.
     private let lines = [
         "██╗     ██╗   ██╗███╗   ███╗██╗",
-        "██║     ██║   ██║████╗ ████║██║",
-        "██║     ██║   ██║██╔████╔██║██║",
-        "██║     ██║   ██║██║╚██╔╝██║██║",
-        "███████╗╚██████╔╝██║ ╚═╝ ██║██║",
-        "╚══════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝"
+        " ██║     ██║   ██║████╗ ████║██║",
+        " ██║     ██║   ██║██╔████╔██║██║",
+        " ██║     ██║   ██║██║╚██╔╝██║██║",
+        " ███████╗╚██████╔╝██║ ╚═╝ ██║██║",
+        " ╚══════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝"
     ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+            ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
                 Text(line)
                     .font(.system(size: 14, weight: .regular, design: .monospaced))
-                    .foregroundStyle(theme.accent)
+                    .foregroundStyle(colorForLine(index))
             }
         }
+        // Belt and braces: SwiftUI's `Text` collapses leading whitespace
+        // in some monospaced contexts when paired with default kerning.
+        // Explicit identity tracking via index keeps the leading-space
+        // distinction stable, and the .monospacedDigit() modifier ahead
+        // of any future digit work isn't needed here — keep the layout
+        // strict (kerning .monospaced is implied by the design).
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("LUMI")
+    }
+
+    private func colorForLine(_ index: Int) -> Color {
+        let palette = theme.logoColors
+        guard !palette.isEmpty else { return theme.accent }
+        return palette[index % palette.count]
     }
 }
