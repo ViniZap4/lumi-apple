@@ -156,7 +156,7 @@ private struct MermaidWebRepresentable: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
         cfg.userContentController.add(context.coordinator, name: "mermaidHeight")
-        let view = WKWebView(frame: .zero, configuration: cfg)
+        let view = ScrollForwardingWKWebView(frame: .zero, configuration: cfg)
         view.isOpaque = false
         view.backgroundColor = .clear
         view.scrollView.backgroundColor = .clear
@@ -207,7 +207,7 @@ private struct MermaidWebRepresentable: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
         cfg.userContentController.add(context.coordinator, name: "mermaidHeight")
-        let view = WKWebView(frame: .zero, configuration: cfg)
+        let view = ScrollForwardingWKWebView(frame: .zero, configuration: cfg)
         view.setValue(false, forKey: "drawsBackground")
         loadHTML(into: view)
         return view

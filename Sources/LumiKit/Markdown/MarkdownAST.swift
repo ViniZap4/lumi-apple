@@ -8,14 +8,33 @@ public indirect enum MarkdownBlock: Sendable, Hashable {
     case paragraph(inline: [InlineNode])
     case codeBlock(language: String?, code: String)
     case blockQuote(blocks: [MarkdownBlock])
-    case unorderedList(items: [[MarkdownBlock]])
-    case orderedList(start: Int, items: [[MarkdownBlock]])
+    case unorderedList(items: [ListItemContent])
+    case orderedList(start: Int, items: [ListItemContent])
     case thematicBreak
     case media(MediaReference)
     /// Display-style LaTeX: a paragraph whose entire content was a single
     /// `$$ … $$` expression. Rendered as a centered KaTeX block by the
     /// renderer; the host paragraph is dropped.
     case mathBlock(latex: String)
+}
+
+/// One row of an `unorderedList` / `orderedList`. The `checkbox` field is
+/// `nil` for regular bullets and `.unchecked` / `.checked` for GitHub-style
+/// task list items (`- [ ]` / `- [x]`) — those swap the bullet marker for
+/// a tinted check glyph in the renderer.
+public struct ListItemContent: Sendable, Hashable {
+    public let checkbox: ListItemCheckbox?
+    public let blocks: [MarkdownBlock]
+
+    public init(checkbox: ListItemCheckbox?, blocks: [MarkdownBlock]) {
+        self.checkbox = checkbox
+        self.blocks = blocks
+    }
+}
+
+public enum ListItemCheckbox: Sendable, Hashable {
+    case unchecked
+    case checked
 }
 
 /// Inline-level element. Strings carry through verbatim; styles and links wrap

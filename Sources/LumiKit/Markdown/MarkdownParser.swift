@@ -244,12 +244,18 @@ public enum MarkdownParser {
         case let .blockQuote(children):
             return .blockQuote(blocks: children.map { liftDisplayMath(in: $0) })
         case let .unorderedList(items):
-            return .unorderedList(items: items.map { itemBlocks in
-                itemBlocks.map { liftDisplayMath(in: $0) }
+            return .unorderedList(items: items.map { item in
+                ListItemContent(
+                    checkbox: item.checkbox,
+                    blocks: item.blocks.map { liftDisplayMath(in: $0) }
+                )
             })
         case let .orderedList(start, items):
-            return .orderedList(start: start, items: items.map { itemBlocks in
-                itemBlocks.map { liftDisplayMath(in: $0) }
+            return .orderedList(start: start, items: items.map { item in
+                ListItemContent(
+                    checkbox: item.checkbox,
+                    blocks: item.blocks.map { liftDisplayMath(in: $0) }
+                )
             })
         default:
             return block
@@ -407,7 +413,7 @@ public enum MarkdownParser {
 
         case let list as UnorderedList:
             return .unorderedList(items: list.listItems.map { item in
-                item.children.compactMap { convertBlock($0, context: context) }
+                convertListItem(item, context: context)
             })
 
         case let list as OrderedList:
@@ -415,7 +421,7 @@ public enum MarkdownParser {
             return .orderedList(
                 start: start,
                 items: list.listItems.map { item in
-                    item.children.compactMap { convertBlock($0, context: context) }
+                    convertListItem(item, context: context)
                 }
             )
 
@@ -425,6 +431,21 @@ public enum MarkdownParser {
         default:
             return nil
         }
+    }
+
+    /// Convert a swift-markdown `ListItem` into our internal descriptor,
+    /// preserving the GFM checkbox state when present.
+    private static func convertListItem(_ item: ListItem, context: ParseContext) -> ListItemContent {
+        let checkbox: ListItemCheckbox? = {
+            switch item.checkbox {
+            case .checked: return .checked
+            case .unchecked: return .unchecked
+            case nil: return nil
+            @unknown default: return nil
+            }
+        }()
+        let blocks = item.children.compactMap { convertBlock($0, context: context) }
+        return ListItemContent(checkbox: checkbox, blocks: blocks)
     }
 
     private static func blockMedia(from paragraph: Paragraph, baseURL: URL?) -> MediaReference? {

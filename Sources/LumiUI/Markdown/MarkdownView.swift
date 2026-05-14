@@ -94,6 +94,25 @@ extension View {
         self
         #endif
     }
+
+    /// Unconditional pointing-hand on hover. Used for definitely-clickable
+    /// affordances (task-list checkboxes, future toggle pills) where the
+    /// element is always interactive, not "interactive only if it
+    /// happens to contain a link".
+    @ViewBuilder
+    func pointingHandOnHover() -> some View {
+        #if canImport(AppKit) && !targetEnvironment(macCatalyst)
+        self.onHover { hovering in
+            if hovering {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
+        #else
+        self
+        #endif
+    }
 }
 
 /// Resolves a Font for the active family + size. Headings stay on the
@@ -358,21 +377,18 @@ struct BlockQuoteView: View {
 }
 
 struct ListBlockView: View {
-    let items: [[MarkdownBlock]]
+    let items: [ListItemContent]
     let ordered: Bool
     let start: Int
     @Environment(\.theme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(items.enumerated()), id: \.offset) { index, blocks in
+            ForEach(Array(items.enumerated()), id: \.offset) { index, item in
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text(marker(for: index))
-                        .font(.body.monospacedDigit())
-                        .foregroundStyle(theme.textDim)
-                        .frame(minWidth: 18, alignment: .trailing)
+                    markerView(for: item, index: index)
                     VStack(alignment: .leading, spacing: 6) {
-                        ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                        ForEach(Array(item.blocks.enumerated()), id: \.offset) { _, block in
                             BlockView(block: block)
                         }
                     }
@@ -381,7 +397,28 @@ struct ListBlockView: View {
         }
     }
 
-    private func marker(for index: Int) -> String {
+    /// Either a numeric/bullet marker (regular list) or a checkbox glyph
+    /// (GitHub-style task list). Task-list markers carry pointing-hand
+    /// cursor on macOS so the reader can tell they're interactive —
+    /// even though click-to-toggle isn't wired yet, the affordance is
+    /// in place for when it lands.
+    @ViewBuilder
+    private func markerView(for item: ListItemContent, index: Int) -> some View {
+        if let cb = item.checkbox {
+            Image(systemName: cb == .checked ? "checkmark.square.fill" : "square")
+                .font(.body)
+                .foregroundStyle(cb == .checked ? theme.accent : theme.textDim)
+                .frame(minWidth: 18, alignment: .trailing)
+                .pointingHandOnHover()
+        } else {
+            Text(textMarker(for: index))
+                .font(.body.monospacedDigit())
+                .foregroundStyle(theme.textDim)
+                .frame(minWidth: 18, alignment: .trailing)
+        }
+    }
+
+    private func textMarker(for index: Int) -> String {
         ordered ? "\(start + index)." : "•"
     }
 }

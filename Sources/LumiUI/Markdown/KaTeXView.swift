@@ -42,6 +42,7 @@ public struct KaTeXBlockView: View {
                 isDark: theme.isDark,
                 textHex: theme.textHex,
                 mutedHex: theme.textDimHex,
+                primaryHex: theme.primaryHex,
                 onHeight: { h in
                     if h > 1 { measuredHeight = min(max(h, 24), 1600) }
                 }
@@ -91,6 +92,7 @@ public struct KaTeXParagraphView: View {
                 isDark: theme.isDark,
                 textHex: theme.textHex,
                 mutedHex: theme.textDimHex,
+                primaryHex: theme.primaryHex,
                 onHeight: { h in
                     if h > 1 { measuredHeight = min(max(h, 16), 4000) }
                 }
@@ -209,16 +211,22 @@ fileprivate func katexHTML(
     mode: KaTeXRenderMode,
     isDark: Bool,
     textHex: String,
-    mutedHex: String
+    mutedHex: String,
+    primaryHex: String
 ) -> String {
     let bg = "transparent"
     // KaTeX picks colors from CSS; we set color/background on body so
     // any non-math text in paragraph mode picks up the lumi theme.
+    // Links pick `primary` rather than the body text color so the math
+    // paragraphs match the native SwiftUI Text link styling everywhere
+    // else (under .link in InlineRenderer the foreground is theme.primary).
     let cssVars = """
       html, body { margin: 0; padding: 0; background: \(bg); color: \(textHex);
                    font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
                    -webkit-font-smoothing: antialiased; }
-      a { color: \(textHex); text-decoration: underline; }
+      a { color: \(primaryHex); text-decoration: underline;
+          text-decoration-color: \(primaryHex); text-underline-offset: 2px; }
+      a:hover { cursor: pointer; }
       code { background: rgba(127,127,127,0.16); padding: 1px 4px; border-radius: 4px;
              font-family: ui-monospace, SF Mono, Menlo, monospace; font-size: 0.9em; }
       .img-alt { color: \(mutedHex); }
@@ -310,19 +318,26 @@ fileprivate struct KaTeXWebRepresentable {
     let isDark: Bool
     let textHex: String
     let mutedHex: String
+    let primaryHex: String
     let onHeight: (CGFloat) -> Void
 
     fileprivate func makeContentKey() -> String {
         switch mode {
         case let .block(latex):
-            return "b|\(isDark ? "d" : "l")|\(latex.hashValue)"
+            return "b|\(isDark ? "d" : "l")|\(primaryHex)|\(latex.hashValue)"
         case let .paragraph(html, fontSize):
-            return "p|\(isDark ? "d" : "l")|\(fontSize)|\(html.hashValue)"
+            return "p|\(isDark ? "d" : "l")|\(primaryHex)|\(fontSize)|\(html.hashValue)"
         }
     }
 
     fileprivate func makeHTML() -> String {
-        katexHTML(mode: mode, isDark: isDark, textHex: textHex, mutedHex: mutedHex)
+        katexHTML(
+            mode: mode,
+            isDark: isDark,
+            textHex: textHex,
+            mutedHex: mutedHex,
+            primaryHex: primaryHex
+        )
     }
 }
 
@@ -333,7 +348,7 @@ extension KaTeXWebRepresentable: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
         cfg.userContentController.add(context.coordinator, name: "katexHeight")
-        let view = WKWebView(frame: .zero, configuration: cfg)
+        let view = ScrollForwardingWKWebView(frame: .zero, configuration: cfg)
         view.isOpaque = false
         view.backgroundColor = .clear
         view.scrollView.backgroundColor = .clear
@@ -375,7 +390,7 @@ extension KaTeXWebRepresentable: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
         cfg.userContentController.add(context.coordinator, name: "katexHeight")
-        let view = WKWebView(frame: .zero, configuration: cfg)
+        let view = ScrollForwardingWKWebView(frame: .zero, configuration: cfg)
         view.setValue(false, forKey: "drawsBackground")
         load(into: view)
         return view
@@ -419,6 +434,7 @@ private extension ThemeTokens {
     /// the template valid.
     var textHex: String { text.hexString ?? "#dddddd" }
     var textDimHex: String { textDim.hexString ?? "#888888" }
+    var primaryHex: String { primary.hexString ?? "#88c0d0" }
 }
 
 private extension Color {

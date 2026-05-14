@@ -62,7 +62,7 @@ private struct EmbedWebViewRepresentable: UIViewRepresentable {
     let url: URL
 
     func makeUIView(context: Context) -> WKWebView {
-        let view = WKWebView()
+        let view = ScrollForwardingWKWebView()
         view.isOpaque = false
         view.backgroundColor = .clear
         view.scrollView.backgroundColor = .clear
@@ -82,7 +82,7 @@ private struct EmbedWebViewRepresentable: NSViewRepresentable {
     let url: URL
 
     func makeNSView(context: Context) -> WKWebView {
-        let view = WKWebView()
+        let view = ScrollForwardingWKWebView()
         view.setValue(false, forKey: "drawsBackground")
         return view
     }
