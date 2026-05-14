@@ -300,7 +300,17 @@ private struct MarkdownReader: View {
         // that note in-app; everything else (https, mailto, etc.)
         // falls through to the system handler.
         .environment(\.openURL, OpenURLAction { url in
-            openMarkdownLink(url)
+            handleInAppLink(url) ? .handled : .systemAction
+        })
+        // NSTextView-backed paragraph + heading renderers route link
+        // clicks through this synchronous action instead of SwiftUI's
+        // async openURL chain — faster than the round-trip through
+        // OpenURLAction, and the only path the AppKit text view will
+        // see for clickedOnLink. Closure returns true when it
+        // intercepted the URL (in-app navigation) so the caller knows
+        // not to fall through to the system handler.
+        .environment(\.markdownLinkAction, MarkdownLinkAction { url in
+            handleInAppLink(url)
         })
         .padding(.horizontal, 48)
         .padding(.top, 32)
@@ -334,18 +344,21 @@ private struct MarkdownReader: View {
         }
     }
 
-    /// Custom OpenURLAction body. Inline-link taps from MarkdownView's
-    /// AttributedString pass through here. Local .md files are loaded
-    /// into the editor as a new note; everything else hands back to
-    /// AppKit for the system handler to deal with.
-    private func openMarkdownLink(_ url: URL) -> OpenURLAction.Result {
+    /// Pure helper: returns `true` when `url` is a `file://*.md` inside
+    /// the active vault and we successfully kicked off the in-app
+    /// navigation to it; `false` otherwise. The two link paths
+    /// (`OpenURLAction` for SwiftUI Text + `MarkdownLinkAction` for
+    /// NSTextView) both reuse this so the routing logic stays in one
+    /// place. Returning Bool sidesteps `OpenURLAction.Result` not
+    /// conforming to Equatable on this SDK.
+    private func handleInAppLink(_ url: URL) -> Bool {
         guard url.isFileURL, url.pathExtension.lowercased() == "md" else {
-            return .systemAction
+            return false
         }
         guard let session = appState.session,
               FileManager.default.fileExists(atPath: url.path)
         else {
-            return .systemAction
+            return false
         }
         let vaultRoot = session.rootURL.standardizedFileURL
         let resolved = url.standardizedFileURL
@@ -363,12 +376,27 @@ private struct MarkdownReader: View {
         appState.selectedNoteID = relativePath
         appState.selectedEntry = entry
         appState.editorMode = .view
-        return .handled
+        return true
     }
 
     private func reparseIfNeeded() {
         guard text != parsedFor else { return }
         parsedFor = text
+
+        // Cache check: same file + same mtime → reuse the prior parse.
+        // The lookup runs on the main actor (so does the surrounding
+        // SwiftUI body), so we don't have to hop. When a link tap
+        // navigates back to a recently-viewed note, this skips the
+        // 5–30 ms parse entirely — visible win on math-heavy notes
+        // where every paragraph spins up a KaTeX WebView and parse
+        // latency stacks on top of WebView spawn time.
+        if let baseURL,
+           let mtime = mtime(for: baseURL),
+           let cached = MarkdownDocumentCache.shared.document(for: baseURL, mtime: mtime) {
+            parsed = cached
+            return
+        }
+
         // For tiny notes the cost of an async hop dwarfs the parse, so
         // keep the synchronous path for those. Above ~32 KB the parse
         // can stutter the UI (we're holding the main actor while
@@ -376,7 +404,11 @@ private struct MarkdownReader: View {
         // shows the existing parsed view until the new document
         // arrives — no flash to empty.
         if text.count < 32_000 {
-            parsed = MarkdownParser.parse(text, baseURL: baseURL)
+            let document = MarkdownParser.parse(text, baseURL: baseURL)
+            parsed = document
+            if let baseURL, let mtime = mtime(for: baseURL) {
+                MarkdownDocumentCache.shared.store(document, for: baseURL, mtime: mtime)
+            }
             return
         }
         let snapshot = text
@@ -390,9 +422,21 @@ private struct MarkdownReader: View {
                 // race a stale parse home.
                 if parsedFor == snapshot {
                     parsed = document
+                    if let url, let mtime = self.mtime(for: url) {
+                        MarkdownDocumentCache.shared.store(document, for: url, mtime: mtime)
+                    }
                 }
             }
         }
+    }
+
+    /// Resource mtime for the active note's URL. Returns nil for vaults
+    /// where the URL isn't a real file (server-bound vaults, in-memory
+    /// previews) so the caller knows to skip the cache.
+    private func mtime(for url: URL) -> Date? {
+        guard url.isFileURL else { return nil }
+        return (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+            .contentModificationDate
     }
 }
 

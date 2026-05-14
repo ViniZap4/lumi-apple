@@ -228,41 +228,21 @@ struct BlockView: View {
                 KaTeXHeadingView(inline: inline, level: level)
                     .padding(.top, (level <= 2 ? 8 : 4) * scale)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .pointingHandIfContainsLink(inline)
             } else {
-                Text(InlineRenderer.render(inline, theme: theme))
-                    .font(headingFont(level))
-                    .foregroundStyle(theme.text)
-                    .padding(.top, (level <= 2 ? 8 : 4) * scale)
-                    // Text inside an HStack (e.g. list items) negotiates its
-                    // ideal one-line size with the parent, which truncates with
-                    // ellipsis when the line overflows. fixedSize on the vertical
-                    // axis forces wrapping; maxWidth makes the wrapped lines
-                    // occupy the column instead of hugging their content.
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-                    .pointingHandIfContainsLink(inline)
+                headingView(level: level, inline: inline)
             }
 
         case let .paragraph(inline):
-            // Paragraphs that contain inline math route through the
-            // KaTeX-aware WebView so the math glyphs sit on the same
-            // baseline as the surrounding text. Pure-prose paragraphs
-            // stay on the native Text path so most of the document
-            // keeps its native selection / theme integration.
+            // Routing logic for paragraphs:
+            //   - math present → KaTeXParagraphView (WKWebView)
+            //   - link present (no math) → LinkAwareTextView (NSTextView)
+            //     for native pointing-hand cursor + synchronous click
+            //   - pure prose → SwiftUI Text (cheapest path)
             if InlineRenderer.containsMath(inline) {
                 KaTeXParagraphView(inline: inline)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                Text(InlineRenderer.render(inline, theme: theme))
-                    .font(markdownBodyFont(size: 15 * scale, weight: .regular, family: fontFamily))
-                    .foregroundStyle(theme.text)
-                    .textSelection(.enabled)
-                    .lineSpacing(3 * scale)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .pointingHandIfContainsLink(inline)
+                paragraphView(inline: inline)
             }
 
         case let .codeBlock(language, code):
@@ -296,6 +276,87 @@ struct BlockView: View {
 
         case let .mathBlock(latex):
             KaTeXBlockView(latex: latex)
+        }
+    }
+
+    /// Heading dispatch when no inline math is present. macOS uses the
+    /// NSTextView-backed LinkAwareTextView when any link sits in the
+    /// inline tree (so the pointing-hand cursor + click are native and
+    /// reliable); pure-text headings stay on SwiftUI Text.
+    @ViewBuilder
+    private func headingView(level: Int, inline: [InlineNode]) -> some View {
+        let attributed = InlineRenderer.render(inline, theme: theme)
+        let baseSize = headingSize(level)
+        #if canImport(AppKit) && !targetEnvironment(macCatalyst)
+        if InlineRenderer.containsLink(inline) {
+            LinkAwareTextView(
+                attributed: attributed,
+                fontSize: baseSize * scale,
+                fontWeight: .semibold,
+                lineSpacing: 2
+            )
+            .padding(.top, (level <= 2 ? 8 : 4) * scale)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            plainHeading(level: level, attributed: attributed)
+        }
+        #else
+        plainHeading(level: level, attributed: attributed)
+        #endif
+    }
+
+    /// Paragraph dispatch when no inline math is present. Mirror of
+    /// `headingView` but with body typography.
+    @ViewBuilder
+    private func paragraphView(inline: [InlineNode]) -> some View {
+        let attributed = InlineRenderer.render(inline, theme: theme)
+        #if canImport(AppKit) && !targetEnvironment(macCatalyst)
+        if InlineRenderer.containsLink(inline) {
+            LinkAwareTextView(
+                attributed: attributed,
+                fontSize: 15 * scale,
+                fontWeight: .regular,
+                lineSpacing: 3 * scale
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            plainParagraph(attributed: attributed)
+        }
+        #else
+        plainParagraph(attributed: attributed)
+        #endif
+    }
+
+    @ViewBuilder
+    private func plainHeading(level: Int, attributed: AttributedString) -> some View {
+        Text(attributed)
+            .font(headingFont(level))
+            .foregroundStyle(theme.text)
+            .padding(.top, (level <= 2 ? 8 : 4) * scale)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .textSelection(.enabled)
+    }
+
+    @ViewBuilder
+    private func plainParagraph(attributed: AttributedString) -> some View {
+        Text(attributed)
+            .font(markdownBodyFont(size: 15 * scale, weight: .regular, family: fontFamily))
+            .foregroundStyle(theme.text)
+            .textSelection(.enabled)
+            .lineSpacing(3 * scale)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func headingSize(_ level: Int) -> CGFloat {
+        switch level {
+        case 1: return 30
+        case 2: return 24
+        case 3: return 19
+        case 4: return 17
+        case 5: return 15
+        default: return 14
         }
     }
 
