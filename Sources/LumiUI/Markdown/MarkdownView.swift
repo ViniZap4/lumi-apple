@@ -170,7 +170,15 @@ struct BlockView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
         case let .codeBlock(language, code):
-            CodeBlockView(language: language, code: code)
+            // Fenced code blocks whose language label is `mermaid` get
+            // rendered as a live diagram via WKWebView instead of as
+            // syntax-highlighted source. Standard fences fall through
+            // to CodeBlockView.
+            if language?.lowercased() == "mermaid" {
+                MermaidView(code: code)
+            } else {
+                CodeBlockView(language: language, code: code)
+            }
 
         case let .blockQuote(blocks):
             BlockQuoteView(blocks: blocks)
@@ -251,19 +259,28 @@ struct BlockQuoteView: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        HStack(alignment: .top, spacing: 14) {
+        // Earlier version put the left accent bar in an HStack as a
+        // RoundedRectangle(width: 3) with no explicit height. In an
+        // HStack(.top), a Shape with one axis fixed and the other
+        // unconstrained claims "fill" on the unconstrained axis — there
+        // was no upper bound, so the bar (and the HStack) stretched
+        // through the rest of the document, pushing every block after
+        // the blockquote far off-screen. Switching to an overlay anchors
+        // the bar's height to the content VStack instead.
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                BlockView(block: block)
+                    .opacity(0.82)
+            }
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 8)
+        .padding(.vertical, 6)
+        .overlay(alignment: .leading) {
             RoundedRectangle(cornerRadius: 2)
                 .fill(theme.accent.opacity(0.6))
                 .frame(width: 3)
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                    BlockView(block: block)
-                        .opacity(0.82)
-                }
-            }
-            .padding(.vertical, 4)
         }
-        .padding(.leading, 4)
         .background(
             theme.accent.opacity(0.04)
                 .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))

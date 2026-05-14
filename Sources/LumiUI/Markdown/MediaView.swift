@@ -9,28 +9,40 @@ public struct MediaView: View {
     @Environment(\.theme) private var theme
 
     public var body: some View {
-        Group {
-            switch reference.kind {
-            case .image:
-                ImageMediaView(url: reference.url, alt: reference.alt)
-            case .video:
-                VideoMediaView(url: reference.url)
-            case .pdf:
-                PDFMediaView(url: reference.url)
-            case let .youtube(id):
-                EmbedMediaView(embed: .youtube(id: id))
-            case let .vimeo(id):
-                EmbedMediaView(embed: .vimeo(id: id))
-            case .unknown:
-                UnknownMediaView(reference: reference)
+        // Markdown embeds have their own styled container (left rail +
+        // header strip showing the source path) and shouldn't get the
+        // generic rounded border the other media types share. Splitting
+        // the dispatch keeps both cases readable.
+        switch reference.kind {
+        case .markdown:
+            EmbeddedMarkdownView(url: reference.url, alt: reference.alt)
+                .frame(maxWidth: .infinity)
+        case .image, .video, .pdf, .youtube, .vimeo, .unknown:
+            Group {
+                switch reference.kind {
+                case .image:
+                    ImageMediaView(url: reference.url, alt: reference.alt)
+                case .video:
+                    VideoMediaView(url: reference.url)
+                case .pdf:
+                    PDFMediaView(url: reference.url)
+                case let .youtube(id):
+                    EmbedMediaView(embed: .youtube(id: id))
+                case let .vimeo(id):
+                    EmbedMediaView(embed: .vimeo(id: id))
+                case .unknown:
+                    UnknownMediaView(reference: reference)
+                case .markdown:
+                    EmptyView() // handled in outer switch
+                }
             }
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(theme.border, lineWidth: 1)
+            )
+            .frame(maxWidth: .infinity)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(theme.border, lineWidth: 1)
-        )
-        .frame(maxWidth: .infinity)
     }
 }
 

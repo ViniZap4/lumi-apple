@@ -9,6 +9,10 @@ public enum MediaKind: Sendable, Hashable {
     case pdf
     case youtube(videoID: String)
     case vimeo(videoID: String)
+    /// Local markdown note embed (`![alt](./other.md)` form). The renderer
+    /// loads the target file, parses it as markdown, and renders it inline
+    /// in a styled container — Obsidian-style note inclusion.
+    case markdown
     case unknown
 }
 
@@ -32,6 +36,8 @@ public extension MediaKind {
             return .video
         case "pdf":
             return .pdf
+        case "md", "markdown":
+            return .markdown
         default:
             return .unknown
         }
