@@ -68,50 +68,48 @@ struct NoteDetailView: View {
     private func content(editor: EditorState) -> some View {
         switch mode {
         case .view:
-            ReadModeScroll(jkEnabled: appState.preferences.jkScrollInView) {
-                MarkdownReader(
-                    title: displayTitle,
-                    tags: displayTags,
-                    text: editor.currentText,
-                    baseURL: baseURL
-                )
+            MountFader(animated: appState.preferences.contentAnimations) {
+                ReadModeScroll(jkEnabled: appState.preferences.jkScrollInView) {
+                    MarkdownReader(
+                        title: displayTitle,
+                        tags: displayTags,
+                        text: editor.currentText,
+                        baseURL: baseURL
+                    )
+                }
             }
-            // Resetting on entry id forces a fresh scroll-host coordinator
-            // per note, killing any stale velocity-ticker target the
-            // previous note left behind. Pair with a fade so the switch
-            // doesn't look like a hard cut.
+            // A new entry → fresh MountFader → opacity replays from 0,
+            // giving us a true mount animation per note. Also forces a
+            // new scroll-host coordinator so the velocity-ticker
+            // baseline is clean.
             .id(entry.relativePath)
-            .transition(appState.preferences.contentAnimations
-                ? .opacity.animation(.easeInOut(duration: 0.18))
-                : .identity)
         case .edit:
-            Group {
-                if appState.preferences.vimEnabled {
-                    VimEditor(
-                        text: Binding(
+            MountFader(animated: appState.preferences.contentAnimations) {
+                Group {
+                    if appState.preferences.vimEnabled {
+                        VimEditor(
+                            text: Binding(
+                                get: { editor.currentText },
+                                set: { editor.currentText = $0 }
+                            ),
+                            onModeChange: { appState.liveVimMode = $0 },
+                            onEffect: { effect in
+                                handleVimEffect(effect, editor: editor)
+                            },
+                            jjEscapeEnabled: appState.preferences.jjEscapeMapping,
+                            showLineNumbers: appState.preferences.showLineNumbers,
+                            relativeLineNumbers: appState.preferences.relativeLineNumbers
+                        )
+                        .overlay(alignment: .top) { editModeStripe }
+                    } else {
+                        PlainTextEditor(text: Binding(
                             get: { editor.currentText },
                             set: { editor.currentText = $0 }
-                        ),
-                        onModeChange: { appState.liveVimMode = $0 },
-                        onEffect: { effect in
-                            handleVimEffect(effect, editor: editor)
-                        },
-                        jjEscapeEnabled: appState.preferences.jjEscapeMapping,
-                        showLineNumbers: appState.preferences.showLineNumbers,
-                        relativeLineNumbers: appState.preferences.relativeLineNumbers
-                    )
-                    .overlay(alignment: .top) { editModeStripe }
-                } else {
-                    PlainTextEditor(text: Binding(
-                        get: { editor.currentText },
-                        set: { editor.currentText = $0 }
-                    ))
+                        ))
+                    }
                 }
             }
             .id(entry.relativePath)
-            .transition(appState.preferences.contentAnimations
-                ? .opacity.animation(.easeInOut(duration: 0.18))
-                : .identity)
         }
     }
 
@@ -285,6 +283,33 @@ private struct MarkdownReader: View {
     }
 }
 
+/// Wraps content in a state-driven opacity that fades in on appear. Pair
+/// with `.id(...)` so each identity change re-runs the mount animation.
+/// `animated: false` skips the fade entirely — content lands fully visible
+/// on first render with no animation transaction kicked off.
+private struct MountFader<Content: View>: View {
+    let animated: Bool
+    @ViewBuilder let content: () -> Content
+    @State private var visible = false
+
+    var body: some View {
+        content()
+            .opacity(visible ? 1 : (animated ? 0 : 1))
+            .onAppear {
+                guard animated else { visible = true; return }
+                // A trivial async hop lets SwiftUI settle the initial
+                // layout pass before we kick off the animation — without
+                // it the `withAnimation` block sometimes races the same
+                // frame the view first laid out in, producing no fade.
+                Task { @MainActor in
+                    withAnimation(.easeInOut(duration: 0.22)) {
+                        visible = true
+                    }
+                }
+            }
+    }
+}
+
 /// macOS-focused scroll container that supports `j` / `k` keyboard scrolling
 /// when the host enables it via preferences. iOS falls back to a plain
 /// ScrollView with no key intercept (tap/drag/scroll wheel still work
@@ -384,6 +409,20 @@ private struct NativeScrollHost<Content: View>: NSViewRepresentable {
         NSLayoutConstraint.activate([
             host.view.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor)
         ])
+
+        // Native scroll input (trackpad, mouse wheel, scroll bar drag)
+        // takes priority over the keyboard velocity ticker. Without
+        // this the user's trackpad gesture fights the easing tick and
+        // the view jitters. As soon as AppKit kicks off a live scroll
+        // we stop ticking; the next j/k call rehydrates the target.
+        let center = NotificationCenter.default
+        center.addObserver(
+            forName: NSScrollView.willStartLiveScrollNotification,
+            object: scroll,
+            queue: .main
+        ) { [weak coordinator] _ in
+            Task { @MainActor in coordinator?.stopTickerForExternalScroll() }
+        }
         return scroll
     }
 
@@ -507,6 +546,16 @@ private struct NativeScrollHost<Content: View>: NSViewRepresentable {
         private func stopTicker() {
             ticker?.invalidate()
             ticker = nil
+        }
+
+        /// Cancels the velocity ticker because the user started a native
+        /// scroll (trackpad / wheel / scrollbar drag). The next `glide`
+        /// call re-anchors `targetY` to the new clip-view origin.
+        func stopTickerForExternalScroll() {
+            stopTicker()
+            if let view = scrollView {
+                targetY = view.contentView.bounds.origin.y
+            }
         }
 
         func scrollHalfPage(direction sign: CGFloat) {

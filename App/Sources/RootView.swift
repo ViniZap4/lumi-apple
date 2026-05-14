@@ -272,31 +272,33 @@ private struct ReadingLayoutMenu: View {
 
     var body: some View {
         Menu {
-            Section("Text size") {
-                Button("Small")     { preferences.readingScale = 0.9 }
-                Button("Default")   { preferences.readingScale = 1.0 }
-                Button("Large")     { preferences.readingScale = 1.15 }
-                Button("Extra large") { preferences.readingScale = 1.3 }
+            // Each axis is its own labeled picker — checkmark indicates
+            // the active option, so the user gets a state-aware menu
+            // instead of a flat button list.
+            Picker("Text size", selection: $preferences.readingScale) {
+                Text("Small").tag(0.9)
+                Text("Default").tag(1.0)
+                Text("Large").tag(1.15)
+                Text("Extra large").tag(1.3)
             }
-            Section("Width") {
-                Button("Narrow (640)") { preferences.readingWidth = 640 }
-                Button("Default (760)") { preferences.readingWidth = 760 }
-                Button("Wide (900)") { preferences.readingWidth = 900 }
-                Button("Full (1100)") { preferences.readingWidth = 1100 }
+            Picker("Width", selection: $preferences.readingWidth) {
+                Text("Narrow").tag(640.0)
+                Text("Default").tag(760.0)
+                Text("Wide").tag(900.0)
+                Text("Full").tag(1100.0)
             }
-            Section("Font") {
-                Picker("Family", selection: $preferences.readingFontFamily) {
-                    ForEach(LumiPreferences.ReadingFontFamily.allCases) { f in
-                        Text(f.label).tag(f)
-                    }
+            Picker("Font", selection: $preferences.readingFontFamily) {
+                ForEach(LumiPreferences.ReadingFontFamily.allCases) { f in
+                    Text(f.label).tag(f)
                 }
             }
-            Section {
-                Toggle("Animate transitions", isOn: $preferences.contentAnimations)
-            }
+            Divider()
+            Toggle("Animate transitions", isOn: $preferences.contentAnimations)
+            Toggle("j / k scrolls in read mode", isOn: $preferences.jkScrollInView)
         } label: {
             Image(systemName: "textformat.size")
         }
+        .menuStyle(.button)
         .help("Reading layout (text size, width, font)")
     }
 }

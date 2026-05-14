@@ -49,7 +49,6 @@ final class LineNumberRulerView: NSRulerView {
         bgColor.setFill()
         bounds.fill()
 
-        // Soft divider on the right edge.
         dividerColor.setStroke()
         let edge = NSBezierPath()
         edge.move(to: NSPoint(x: bounds.maxX - 0.5, y: bounds.minY))
@@ -59,73 +58,97 @@ final class LineNumberRulerView: NSRulerView {
 
         let nsText = textView.string as NSString
         let totalLength = nsText.length
-        guard totalLength > 0 else { return }
 
-        // Cursor's line number — used to determine current-line styling
-        // and relative deltas.
+        // Cursor's line number (1-based).
         let cursorLine = lineNumber(at: min(textView.selectedRange().location, totalLength), in: nsText)
 
-        // The visible portion of the document (in textView coordinates).
-        let visibleRect = scrollView?.contentView.bounds ?? bounds
+        // Visible portion of the document — in textView (a.k.a.
+        // documentView) coordinates, which is the same coordinate space
+        // the ruler uses for drawing once the scrollView has translated
+        // its bounds. Note: `scrollView?.documentVisibleRect` gives us
+        // the visible area in documentView coords directly, which is
+        // exactly what we need to feed back into `lineFragmentRect`'s
+        // result for proper Y alignment.
+        let visibleRect = scrollView?.documentVisibleRect ?? textView.visibleRect
         let glyphRange = layoutManager.glyphRange(forBoundingRect: visibleRect, in: textContainer)
-        let charRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
-
-        // Line number of the first visible character.
-        var line = lineNumber(at: charRange.location, in: nsText)
 
         let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         let currentFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+        // textContainerOrigin = textContainerInset offset of the
+        // container relative to the textView's frame origin. We add it
+        // so the line numbers sit precisely next to the rendered text
+        // baseline rather than 12pt above.
+        let containerOrigin = textView.textContainerOrigin
 
-        var charIndex = nsText.lineRange(for: NSRange(location: charRange.location, length: 0)).location
-        let endLocation = min(NSMaxRange(charRange), totalLength)
-        let inset = textView.textContainerInset.height
-        let textViewOrigin = textView.frame.origin
+        // Walk the line-fragment rects in the visible glyph range.
+        // Enumerate gives us one callback per visual line (handles soft
+        // wraps automatically — but we still only label the first
+        // fragment of each newline-bounded logical line).
+        var labeledLine: Int = -1
+        layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) { fragRect, _, _, fragGlyphRange, _ in
+            let charRange = layoutManager.characterRange(forGlyphRange: fragGlyphRange, actualGlyphRange: nil)
+            let lineRange = nsText.lineRange(for: NSRange(location: charRange.location, length: 0))
+            // Skip soft-wrapped continuations — only label when this
+            // fragment starts at the beginning of a logical line.
+            guard charRange.location == lineRange.location else { return }
 
-        while charIndex <= endLocation {
-            let lineRange = nsText.lineRange(for: NSRange(location: charIndex, length: 0))
-            let lineGlyphRange = layoutManager.glyphRange(forCharacterRange: lineRange, actualCharacterRange: nil)
-            guard lineGlyphRange.length > 0 || charIndex == totalLength else {
-                charIndex = NSMaxRange(lineRange)
-                line += 1
-                continue
-            }
-            let fragRect = layoutManager.lineFragmentRect(
-                forGlyphAt: lineGlyphRange.location,
-                effectiveRange: nil
-            )
+            let line = self.lineNumber(at: charRange.location, in: nsText)
+            guard line != labeledLine else { return }
+            labeledLine = line
 
-            // Convert fragment rect → ruler-view coordinates.
-            // Fragment rect is in textContainer coords; offset by inset
-            // and the textView's origin within the scrollView.
-            let clientY = fragRect.minY + inset + textViewOrigin.y
-            let rulerPoint = NSPoint(x: 0, y: clientY)
-            let p = convert(rulerPoint, from: superview)
+            // Convert the fragment rect (in textContainer coords) into
+            // the documentView coord space — which is the same space
+            // the ruler is scrolled with, so Y maps 1:1 onto our
+            // drawing.
+            let y = fragRect.minY + containerOrigin.y
 
             let isCurrent = line == cursorLine
             let displayed: Int
-            if showRelative {
+            if self.showRelative {
                 displayed = isCurrent ? line : abs(line - cursorLine)
             } else {
                 displayed = line
             }
-
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: isCurrent ? currentFont : font,
                 .foregroundColor: isCurrent ? strongColor : dimColor
             ]
             let label = "\(displayed)" as NSString
             let size = label.size(withAttributes: attrs)
+            // Vertically center within the fragment so multi-line
+            // heights still produce nicely-aligned numbers.
+            let drawY = y + (fragRect.height - size.height) / 2
             let drawRect = NSRect(
-                x: ruleThickness - size.width - 8,
-                y: p.y,
+                x: self.ruleThickness - size.width - 8,
+                y: drawY,
                 width: size.width,
                 height: size.height
             )
             label.draw(in: drawRect, withAttributes: attrs)
+        }
 
-            charIndex = NSMaxRange(lineRange)
-            line += 1
-            if charIndex >= totalLength { break }
+        // Trailing newline → label one more line so the user sees the
+        // last (empty) logical line numbered too. AppKit doesn't emit a
+        // fragment for it.
+        if totalLength > 0 && nsText.character(at: totalLength - 1) == 0x0A {
+            let lastLine = lineNumber(at: totalLength, in: nsText)
+            if lastLine != labeledLine {
+                let usedRect = layoutManager.usedRect(for: textContainer)
+                let y = usedRect.maxY + containerOrigin.y
+                if visibleRect.contains(NSPoint(x: visibleRect.midX, y: y)) {
+                    let isCurrent = lastLine == cursorLine
+                    let displayed: Int = showRelative
+                        ? (isCurrent ? lastLine : abs(lastLine - cursorLine))
+                        : lastLine
+                    let attrs: [NSAttributedString.Key: Any] = [
+                        .font: isCurrent ? currentFont : font,
+                        .foregroundColor: isCurrent ? strongColor : dimColor
+                    ]
+                    let label = "\(displayed)" as NSString
+                    let size = label.size(withAttributes: attrs)
+                    label.draw(at: NSPoint(x: ruleThickness - size.width - 8, y: y), withAttributes: attrs)
+                }
+            }
         }
     }
 
