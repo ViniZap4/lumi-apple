@@ -83,7 +83,8 @@ struct NoteDetailView: View {
                     title: displayTitle,
                     tags: displayTags,
                     text: editor.currentText,
-                    baseURL: baseURL
+                    baseURL: baseURL,
+                    vaultRoot: vaultRoot
                 )
             }
             // Per-note identity: new entry → fresh scroll-host coord,
@@ -232,6 +233,10 @@ private struct MarkdownReader: View {
     let tags: [String]
     let text: String
     let baseURL: URL?
+    /// Active vault root. Threaded into the markdown env so leaf views
+    /// (`LinkAwareTextView`) can render in-vault file:// URLs as
+    /// vault-relative paths inside their hover tooltips.
+    let vaultRoot: URL?
     @Environment(\.theme) private var theme
     @Environment(AppState.self) private var appState
     @State private var parsed: MarkdownDocument?
@@ -285,10 +290,18 @@ private struct MarkdownReader: View {
             }
 
             if let parsed {
+                // Stagger fade-in is nice on small notes; on large
+                // notes the same effect fires continuously as LazyVStack
+                // materialises new blocks during scroll, which is both
+                // visually noisy and expensive (one Task + animation
+                // transaction per block). Gate it on block count so the
+                // animation auto-disables for the heavy-document case.
+                let useStagger = appState.preferences.contentAnimations
+                    && parsed.blocks.count <= largeMarkdownBlockThreshold
                 MarkdownView(parsed, indexOffset: 2)
                     .environment(\.markdownScale, scale)
                     .environment(\.markdownFontFamily, fontFamilyEnv)
-                    .environment(\.markdownStagger, appState.preferences.contentAnimations)
+                    .environment(\.markdownStagger, useStagger)
             } else {
                 Text("loading…")
                     .font(.system(.callout, design: .monospaced))
@@ -296,6 +309,11 @@ private struct MarkdownReader: View {
             }
         }
         .environment(\.markdownStagger, appState.preferences.contentAnimations)
+        // Vault root for tooltips + link-relative rendering. The
+        // LinkAwareTextView uses this to translate file:// URLs back
+        // to vault-relative paths in tooltips so the hover shows
+        // `./subfolder/note.md` instead of a full home-directory path.
+        .environment(\.markdownVaultRoot, vaultRoot)
         // Intercept link taps. For file:// .md URLs we navigate to
         // that note in-app; everything else (https, mailto, etc.)
         // falls through to the system handler.

@@ -34,6 +34,7 @@ public struct LinkAwareTextView: View {
     public let lineSpacing: CGFloat
     @Environment(\.theme) private var theme
     @Environment(\.markdownLinkAction) private var linkAction
+    @Environment(\.markdownVaultRoot) private var vaultRoot
     @State private var measuredHeight: CGFloat = 22
 
     public init(
@@ -56,6 +57,7 @@ public struct LinkAwareTextView: View {
             lineSpacing: lineSpacing,
             theme: theme,
             linkAction: linkAction,
+            vaultRoot: vaultRoot,
             onHeight: { h in
                 if h > 1, abs(h - measuredHeight) > 0.5 {
                     measuredHeight = h
@@ -74,6 +76,7 @@ private struct LinkAwareNSTextViewRepresentable: NSViewRepresentable {
     let lineSpacing: CGFloat
     let theme: ThemeTokens
     let linkAction: MarkdownLinkAction
+    let vaultRoot: URL?
     let onHeight: (CGFloat) -> Void
 
     func makeNSView(context: Context) -> SelfSizingTextView {
@@ -88,25 +91,27 @@ private struct LinkAwareNSTextViewRepresentable: NSViewRepresentable {
         textView.isVerticallyResizable = true
         textView.autoresizingMask = [.width]
         textView.delegate = context.coordinator
+        textView.tooltipProvider = context.coordinator
         textView.onHeightChange = { h in
             // Hop to main async so we don't mutate SwiftUI state from
             // inside the layout pass that triggered the height update.
             DispatchQueue.main.async { onHeight(h) }
         }
-        applyAttributes(to: textView)
+        applyAttributes(to: textView, context: context)
         return textView
     }
 
     func updateNSView(_ nsView: SelfSizingTextView, context: Context) {
         context.coordinator.linkAction = linkAction
-        applyAttributes(to: nsView)
+        context.coordinator.vaultRoot = vaultRoot
+        applyAttributes(to: nsView, context: context)
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(linkAction: linkAction)
+        Coordinator(linkAction: linkAction, vaultRoot: vaultRoot)
     }
 
-    private func applyAttributes(to textView: SelfSizingTextView) {
+    private func applyAttributes(to textView: SelfSizingTextView, context: Context) {
         let ns = NSMutableAttributedString(attributed)
         let full = NSRange(location: 0, length: ns.length)
 
@@ -125,13 +130,21 @@ private struct LinkAwareNSTextViewRepresentable: NSViewRepresentable {
             .cursor: NSCursor.pointingHand
         ]
         textView.textStorage?.setAttributedString(ns)
+        textView.refreshLinkTooltips(coordinator: context.coordinator)
         textView.scheduleHeightReport()
     }
 
-    final class Coordinator: NSObject, NSTextViewDelegate {
+    final class Coordinator: NSObject, NSTextViewDelegate, LinkTooltipProvider {
         var linkAction: MarkdownLinkAction
-        init(linkAction: MarkdownLinkAction) {
+        var vaultRoot: URL?
+        /// Most-recently-computed per-link rect → tooltip string map.
+        /// Refreshed every time `refreshLinkTooltips` runs (after each
+        /// attribute pass). Used to answer `view(_:stringForToolTip:point:userData:)`.
+        var linkTooltipRects: [(rect: NSRect, label: String)] = []
+
+        init(linkAction: MarkdownLinkAction, vaultRoot: URL?) {
             self.linkAction = linkAction
+            self.vaultRoot = vaultRoot
         }
 
         func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
@@ -142,13 +155,55 @@ private struct LinkAwareNSTextViewRepresentable: NSViewRepresentable {
             default: url = nil
             }
             guard let url else { return false }
-            // Synchronous: the SwiftUI side mutates AppState on this
-            // exact frame, so the read-pane swap feels immediate.
             return MainActor.assumeIsolated {
                 linkAction.handle(url)
             }
         }
+
+        // MARK: - Tooltip
+
+        func tooltipString(for point: NSPoint) -> String? {
+            for entry in linkTooltipRects where entry.rect.contains(point) {
+                return entry.label
+            }
+            return nil
+        }
+
+        /// Resolve a link URL into a display label for the hover
+        /// tooltip. In-vault `file://*.md` URLs become vault-relative
+        /// paths (`./subfolder/note.md`); external URLs surface as
+        /// their `absoluteString`; everything else falls back to
+        /// `path`.
+        func tooltipLabel(for url: URL) -> String {
+            if url.isFileURL {
+                if let vaultRoot {
+                    let vaultPath = vaultRoot.standardizedFileURL.path
+                    let urlPath = url.standardizedFileURL.path
+                    let prefix = vaultPath.hasSuffix("/") ? vaultPath : vaultPath + "/"
+                    if urlPath == vaultPath {
+                        return "./"
+                    }
+                    if urlPath.hasPrefix(prefix) {
+                        return "./" + String(urlPath.dropFirst(prefix.count))
+                    }
+                }
+                let home = NSHomeDirectory()
+                if url.path.hasPrefix(home + "/") {
+                    return "~/" + String(url.path.dropFirst(home.count + 1))
+                }
+                return url.path
+            }
+            return url.absoluteString
+        }
     }
+}
+
+/// Protocol the NSTextView calls when AppKit asks for tooltip text.
+/// Decoupled so the text view's tooltip lookup doesn't need to know
+/// about SwiftUI types or the coordinator's storage shape.
+protocol LinkTooltipProvider: AnyObject {
+    func tooltipString(for point: NSPoint) -> String?
+    func tooltipLabel(for url: URL) -> String
 }
 
 /// NSTextView subclass that reports its laid-out height back via a
@@ -158,11 +213,19 @@ private struct LinkAwareNSTextViewRepresentable: NSViewRepresentable {
 /// or clips its last line.
 final class SelfSizingTextView: NSTextView {
     var onHeightChange: ((CGFloat) -> Void)?
+    weak var tooltipProvider: LinkTooltipProvider?
     private var lastReported: CGFloat = -1
 
     override func layout() {
         super.layout()
         scheduleHeightReport()
+        // Tooltip rects depend on layout geometry — re-register them
+        // every time AppKit re-runs the layout pass so window-resize
+        // and font-load reflows keep the hover targets aligned with
+        // the visible link glyphs.
+        if let provider = tooltipProvider as? AnyObject as? LinkAwareNSTextViewRepresentable.Coordinator {
+            refreshLinkTooltips(coordinator: provider)
+        }
     }
 
     func scheduleHeightReport() {
@@ -174,6 +237,61 @@ final class SelfSizingTextView: NSTextView {
             lastReported = h
             onHeightChange?(h)
         }
+    }
+
+    /// Walk the text storage, find every `.link` attribute run, compute
+    /// its bounding rect in view coordinates, and register an AppKit
+    /// tooltip rect for it. The tooltip body resolves at hover time via
+    /// the coordinator's `tooltipString(for:)` — that way the rect can
+    /// move (re-layout) without re-registering the strings.
+    fileprivate func refreshLinkTooltips(coordinator: LinkAwareNSTextViewRepresentable.Coordinator) {
+        removeAllToolTips()
+        coordinator.linkTooltipRects.removeAll(keepingCapacity: true)
+        guard let storage = textStorage,
+              let layoutManager,
+              let textContainer
+        else { return }
+
+        layoutManager.ensureLayout(for: textContainer)
+        let fullRange = NSRange(location: 0, length: storage.length)
+        storage.enumerateAttribute(.link, in: fullRange, options: []) { value, range, _ in
+            let url: URL?
+            switch value {
+            case let direct as URL: url = direct
+            case let str as String: url = URL(string: str)
+            default: url = nil
+            }
+            guard let url else { return }
+            let label = coordinator.tooltipLabel(for: url)
+            // A single link can span multiple line fragments inside a
+            // wrapping paragraph; enumerate fragments so each visual
+            // chunk gets its own tooltip rect.
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) { _, _, _, lineGlyphRange, _ in
+                let used = lineGlyphRange.intersection(glyphRange) ?? lineGlyphRange
+                guard used.length > 0 else { return }
+                let rect = layoutManager.boundingRect(forGlyphRange: used, in: textContainer)
+                let inset = self.textContainerInset
+                let viewRect = NSRect(
+                    x: rect.origin.x + inset.width,
+                    y: rect.origin.y + inset.height,
+                    width: rect.width,
+                    height: rect.height
+                )
+                coordinator.linkTooltipRects.append((rect: viewRect, label: label))
+                self.addToolTip(viewRect, owner: self, userData: nil)
+            }
+        }
+    }
+
+    /// AppKit calls this whenever the cursor sits on a registered
+    /// tooltip rect for the system delay (~0.5 s). Returning a string
+    /// shows the native tooltip popover, which fades in/out via
+    /// AppKit's standard animation. The method comes from
+    /// `NSToolTipOwner` (a Foundation protocol), not from NSView's own
+    /// surface — so we implement it without `override`.
+    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData: UnsafeMutableRawPointer?) -> String {
+        tooltipProvider?.tooltipString(for: point) ?? ""
     }
 }
 #endif

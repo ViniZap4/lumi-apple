@@ -20,6 +20,17 @@ public struct MarkdownStaggerKey: EnvironmentKey {
     public static let defaultValue: Bool = false
 }
 
+/// Vault root URL for the active note. Threaded through the renderer
+/// so leaf views (currently `LinkAwareTextView`'s tooltip resolver)
+/// can produce vault-relative paths for in-vault `file://` links —
+/// `./subfolder/note.md` rather than `/Users/…/Notes/myvault/subfolder/note.md`.
+/// Optional because the renderer also runs in non-vault contexts
+/// (previews, embedded markdown, server-bound vaults without a local
+/// FS mirror).
+public struct MarkdownVaultRootKey: EnvironmentKey {
+    public static let defaultValue: URL? = nil
+}
+
 /// Lightweight-render flag for the three-column browser's preview pane.
 /// When `true`, expensive WebView-based renderers (KaTeX block + paragraph,
 /// Mermaid, YouTube/Vimeo embeds, inline video, PDF, embedded markdown)
@@ -63,6 +74,11 @@ public extension EnvironmentValues {
     var markdownLite: Bool {
         get { self[MarkdownLiteKey.self] }
         set { self[MarkdownLiteKey.self] = newValue }
+    }
+    /// See `MarkdownVaultRootKey`.
+    var markdownVaultRoot: URL? {
+        get { self[MarkdownVaultRootKey.self] }
+        set { self[MarkdownVaultRootKey.self] = newValue }
     }
 }
 
@@ -143,7 +159,19 @@ public struct MarkdownView: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 14 * scale) {
+        // `LazyVStack` only materialises blocks as they enter the scroll
+        // viewport, which is the single biggest perf win for large
+        // notes. Every paragraph-with-math spawns a WKWebView and every
+        // paragraph-with-link spawns an NSTextView; eagerly creating
+        // hundreds of those (the old VStack path) ran the read-pane
+        // open into seconds for a math-heavy notebook. With the lazy
+        // path each of those native hosts is created on first scroll
+        // into view and never created at all for blocks the user
+        // never sees.
+        //
+        // The wrapping NSScrollView (NativeScrollHost) supplies the
+        // viewport that `LazyVStack` needs to do its lazy enumeration.
+        LazyVStack(alignment: .leading, spacing: 14 * scale) {
             ForEach(Array(document.blocks.enumerated()), id: \.offset) { index, block in
                 StaggeredBlock(index: index + indexOffset) {
                     BlockView(block: block)
@@ -153,6 +181,13 @@ public struct MarkdownView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
+
+/// Heuristic threshold for the per-block fade-in cascade. Below this
+/// the stagger animation feels nice (and the count is small enough
+/// that the timers don't pile up). Above it the cascade fires once
+/// per scroll into-view inside LazyVStack — visually distracting and
+/// expensive — so the renderer flips stagger off for large notes.
+public let largeMarkdownBlockThreshold: Int = 60
 
 /// Cascade pacing for `StaggeredBlock`. 14 blocks fade in within ~0.5s;
 /// anything past the cap lands at the same time so long documents don't
