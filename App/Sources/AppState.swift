@@ -114,6 +114,12 @@ final class AppState {
         self.authService = auth
         self.remoteVaultsStore = RemoteVaultsStore(client: auth.apiClient)
         #if canImport(AppKit)
+        // Silence the system beep app-wide. Method-swizzles
+        // NSResponder.noResponderFor(_:) to a no-op so AppKit's
+        // responder-chain dead-end doesn't ring NSBeep. The previous
+        // attempts (NSEvent monitor returning nil) were racing
+        // SwiftUI's internal monitors that beeped *before* yielding.
+        BeepSilencer.install()
         installReadKeyMonitor()
         #endif
     }
