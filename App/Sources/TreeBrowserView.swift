@@ -256,7 +256,7 @@ struct TreeBrowserView: View {
             if let n = state.enterSelection() { onOpen(n) }
             return .handled
         case "h":
-            _ = state.goBack(); return .handled
+            goBackOrHome(); return .handled
         case "g":
             state.moveCursorToStart(); return .handled
         case "G":
@@ -265,14 +265,27 @@ struct TreeBrowserView: View {
             switch press.key {
             case .upArrow: state.moveCursor(by: -1); return .handled
             case .downArrow: state.moveCursor(by: 1); return .handled
-            case .leftArrow: _ = state.goBack(); return .handled
+            case .leftArrow: goBackOrHome(); return .handled
             case .rightArrow:
                 if let n = state.enterSelection() { onOpen(n) }
                 return .handled
             case .escape:
-                _ = state.goBack(); return .handled
+                goBackOrHome(); return .handled
             default: return .ignored
             }
+        }
+    }
+
+    /// Walk up one folder; if already at the vault root, land on the
+    /// home pane (clear the selected vault). Mirrors what users expect
+    /// from a yazi-style back chain that ends at the home screen.
+    private func goBackOrHome() {
+        if !state.goBack() {
+            appState.selectedVaultID = nil
+            appState.selectedRemoteVaultID = nil
+            appState.browserState = nil
+            appState.rootFolder = nil
+            appState.setSession(nil)
         }
     }
     #endif

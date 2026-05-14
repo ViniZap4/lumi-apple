@@ -80,6 +80,18 @@ struct LumiApp: App {
                 .keyboardShortcut(.escape, modifiers: [])
                 .disabled(appState.selectedEntry == nil)
 
+                Button("Home") {
+                    if appState.editor.isDirty { appState.editor.save() }
+                    appState.selectedEntry = nil
+                    appState.selectedNoteID = nil
+                    appState.selectedVaultID = nil
+                    appState.selectedRemoteVaultID = nil
+                    appState.browserState = nil
+                    appState.rootFolder = nil
+                    appState.setSession(nil)
+                }
+                .keyboardShortcut("h", modifiers: [.command, .shift])
+
                 Button("Quick Switcher…") {
                     appState.showQuickSwitcher = true
                 }

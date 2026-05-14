@@ -305,7 +305,30 @@ private struct MarkdownReader: View {
     private func reparseIfNeeded() {
         guard text != parsedFor else { return }
         parsedFor = text
-        parsed = MarkdownParser.parse(text, baseURL: baseURL)
+        // For tiny notes the cost of an async hop dwarfs the parse, so
+        // keep the synchronous path for those. Above ~32 KB the parse
+        // can stutter the UI (we're holding the main actor while
+        // walking AST nodes); offload to a background task. SwiftUI
+        // shows the existing parsed view until the new document
+        // arrives — no flash to empty.
+        if text.count < 32_000 {
+            parsed = MarkdownParser.parse(text, baseURL: baseURL)
+            return
+        }
+        let snapshot = text
+        let url = baseURL
+        Task.detached(priority: .userInitiated) {
+            let document = MarkdownParser.parse(snapshot, baseURL: url)
+            await MainActor.run {
+                // Only apply if the user hasn't moved on to a newer
+                // text since we started — protects against stale
+                // overwrites if they typed fast in edit mode and we
+                // race a stale parse home.
+                if parsedFor == snapshot {
+                    parsed = document
+                }
+            }
+        }
     }
 }
 
@@ -390,6 +413,7 @@ final class ReadKeyMonitor {
     private let halfPage: (Int) -> Void
     private let fullPage: (Int) -> Void
     private let scrollToEdge: (ReadModeCoordinator.Edge) -> Void
+    private let closeNote: () -> Void
     nonisolated(unsafe) private var token: Any?
 
     init(
@@ -397,13 +421,15 @@ final class ReadKeyMonitor {
         glide: @escaping @MainActor (Int) -> Void,
         halfPage: @escaping @MainActor (Int) -> Void,
         fullPage: @escaping @MainActor (Int) -> Void,
-        scrollToEdge: @escaping @MainActor (ReadModeCoordinator.Edge) -> Void
+        scrollToEdge: @escaping @MainActor (ReadModeCoordinator.Edge) -> Void,
+        closeNote: @escaping @MainActor () -> Void
     ) {
         self.isActive = isActive
         self.glide = glide
         self.halfPage = halfPage
         self.fullPage = fullPage
         self.scrollToEdge = scrollToEdge
+        self.closeNote = closeNote
         token = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.handle(event) ?? event
         }
@@ -462,9 +488,19 @@ final class ReadKeyMonitor {
             return nil
         }()
 
-        // Structural keys pass through.
+        // Escape — handled specially: in read mode it closes the note
+        // and returns to the tree browser. Outside read mode it
+        // passes through so it can dismiss sheets / cancel buttons.
+        if event.keyCode == 53 {
+            if active {
+                closeNote()
+                return nil
+            }
+            return event
+        }
+
+        // Other structural keys pass through.
         let passThroughKeyCodes: Set<UInt16> = [
-            53,            // escape
             36, 76,        // return / keypad enter
             48,            // tab
             123, 124, 125, 126 // arrows

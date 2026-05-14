@@ -91,6 +91,7 @@ struct EmptyVaultPanel: View {
                 Image(systemName: "folder.fill")
                     .foregroundStyle(theme.accent)
                     .frame(width: 18)
+                    .scaleEffect(isHovered ? 1.08 : 1.0)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(vault.name)
                         .font(.system(.body, design: .monospaced))
@@ -104,20 +105,23 @@ struct EmptyVaultPanel: View {
                 Spacer()
                 Image(systemName: "chevron.right")
                     .font(.caption2)
-                    .foregroundStyle(theme.textDim)
+                    .foregroundStyle(isHovered ? theme.accent : theme.textDim)
+                    .offset(x: isHovered ? 3 : 0)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(isHovered ? theme.accent.opacity(0.12) : theme.overlayBackground)
+                    .fill(isHovered ? theme.accent.opacity(0.14) : theme.overlayBackground)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(theme.border.opacity(0.4), lineWidth: 0.5)
+                    .stroke(isHovered ? theme.accent.opacity(0.5) : theme.border.opacity(0.4), lineWidth: 0.5)
             )
+            .scaleEffect(isHovered ? 1.01 : 1.0)
         }
         .buttonStyle(.plain)
+        .animation(.easeOut(duration: 0.14), value: isHovered)
         .onHover { hovering in
             highlightedID = hovering ? vault.persistentModelID : nil
         }

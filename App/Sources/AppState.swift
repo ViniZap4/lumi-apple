@@ -138,7 +138,13 @@ final class AppState {
             glide: { coord.glide(by: CGFloat($0)) },
             halfPage: { coord.scrollHalfPage(direction: CGFloat($0)) },
             fullPage: { coord.scrollFullPage(direction: CGFloat($0)) },
-            scrollToEdge: { coord.scrollTo($0) }
+            scrollToEdge: { coord.scrollTo($0) },
+            closeNote: { [weak self] in
+                guard let self else { return }
+                if self.editor.isDirty { self.editor.save() }
+                self.selectedEntry = nil
+                self.selectedNoteID = nil
+            }
         )
     }
     #endif
