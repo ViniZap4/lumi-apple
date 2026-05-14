@@ -36,6 +36,16 @@ struct TreeBrowserView: View {
     /// column. Same ReadModeCoordinator used by the note pane —
     /// shared smooth-scroll behaviour.
     @State private var previewCoord = ReadModeCoordinator()
+    /// File-operation modal state. `nil` means no sheet; non-nil
+    /// surfaces a single text-field input that handles create-note,
+    /// create-folder, and rename in one place.
+    @State private var fileOpInput: FileOpInput?
+    /// Pending delete confirmation. Two-state model: nil = no prompt,
+    /// otherwise the alert shows with the captured item.
+    @State private var pendingDelete: FolderNode.Item?
+    /// Surfaces filesystem errors from a failed op so the user gets
+    /// feedback instead of silent failure.
+    @State private var fileOpError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -63,6 +73,32 @@ struct TreeBrowserView: View {
             .animation(.easeInOut(duration: 0.12), value: state.selectedItem?.id)
         }
         .background(theme.background)
+        .sheet(item: $fileOpInput) { op in
+            FileOpInputSheet(op: op, onCommit: { applyFileOp(op, name: $0) })
+                .environment(\.theme, theme)
+        }
+        .alert(
+            "Delete \(pendingDelete?.name ?? "")?",
+            isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+            presenting: pendingDelete
+        ) { item in
+            Button("Delete", role: .destructive) { performDelete(item) }
+            Button("Cancel", role: .cancel) { pendingDelete = nil }
+        } message: { item in
+            if case .folder = item {
+                Text("This folder and all its contents will be moved to the Trash.")
+            } else {
+                Text("This note will be moved to the Trash.")
+            }
+        }
+        .alert(
+            "File operation failed",
+            isPresented: Binding(get: { fileOpError != nil }, set: { if !$0 { fileOpError = nil } })
+        ) {
+            Button("OK", role: .cancel) { fileOpError = nil }
+        } message: {
+            Text(fileOpError ?? "")
+        }
         #if os(macOS)
         .focusable()
         .focused($focused)
@@ -261,6 +297,26 @@ struct TreeBrowserView: View {
             state.moveCursorToStart(); return .handled
         case "G":
             state.moveCursorToEnd(); return .handled
+        // File ops (mirror TUI bindings)
+        case "n":
+            fileOpInput = FileOpInput(kind: .createNote, target: state.currentFolder.url, prefill: "")
+            return .handled
+        case "N":
+            fileOpInput = FileOpInput(kind: .createFolder, target: state.currentFolder.url, prefill: "")
+            return .handled
+        case "r":
+            if let item = state.selectedItem {
+                fileOpInput = FileOpInput(kind: .rename, target: itemURL(item), prefill: item.name)
+            }
+            return .handled
+        case "d":
+            if let item = state.selectedItem { pendingDelete = item }
+            return .handled
+        case "D":
+            if let item = state.selectedItem, case let .note(n) = item {
+                performDuplicate(noteURL: n.url)
+            }
+            return .handled
         default:
             switch press.key {
             case .upArrow: state.moveCursor(by: -1); return .handled
@@ -269,7 +325,9 @@ struct TreeBrowserView: View {
             case .rightArrow:
                 if let n = state.enterSelection() { onOpen(n) }
                 return .handled
-            case .escape:
+            case .escape, .delete:
+                // Both Esc and Backspace walk up the folder stack;
+                // Backspace mirrors macOS Finder's "go to parent".
                 goBackOrHome(); return .handled
             default: return .ignored
             }
@@ -286,6 +344,101 @@ struct TreeBrowserView: View {
             appState.browserState = nil
             appState.rootFolder = nil
             appState.setSession(nil)
+        }
+    }
+
+    // MARK: - File operations
+
+    private func itemURL(_ item: FolderNode.Item) -> URL {
+        switch item {
+        case .folder(let f): return f.url
+        case .note(let n): return n.url
+        }
+    }
+
+    /// Dispatches the sheet's submitted name into the matching
+    /// FileOperations call and refreshes the active folder so the
+    /// browser reflects the change.
+    private func applyFileOp(_ op: FileOpInput, name: String) {
+        do {
+            switch op.kind {
+            case .createNote:
+                let url = try FileOperations.createNote(in: op.target, title: name)
+                reloadCurrent()
+                selectByURL(url)
+            case .createFolder:
+                _ = try FileOperations.createFolder(in: op.target, name: name)
+                reloadCurrent()
+            case .rename:
+                let stem = (op.target.pathExtension.lowercased() == "md")
+                    ? op.target.deletingPathExtension().lastPathComponent
+                    : op.target.lastPathComponent
+                if name == stem || name == op.target.lastPathComponent {
+                    fileOpInput = nil
+                    return
+                }
+                let newURL = try FileOperations.rename(at: op.target, to: name)
+                reloadCurrent()
+                selectByURL(newURL)
+            }
+            fileOpInput = nil
+        } catch {
+            fileOpError = (error as? FileOperations.Error)?.errorDescription
+                ?? error.localizedDescription
+            fileOpInput = nil
+        }
+    }
+
+    private func performDelete(_ item: FolderNode.Item) {
+        defer { pendingDelete = nil }
+        do {
+            try FileOperations.delete(at: itemURL(item))
+            reloadCurrent()
+        } catch {
+            fileOpError = (error as? FileOperations.Error)?.errorDescription
+                ?? error.localizedDescription
+        }
+    }
+
+    private func performDuplicate(noteURL: URL) {
+        do {
+            let newURL = try FileOperations.duplicateNote(at: noteURL)
+            reloadCurrent()
+            selectByURL(newURL)
+        } catch {
+            fileOpError = (error as? FileOperations.Error)?.errorDescription
+                ?? error.localizedDescription
+        }
+    }
+
+    /// Drops the cached items on the current folder + re-walks disk so
+    /// the browser shows the new state. Async-reload so the UI doesn't
+    /// stutter on slow volumes.
+    private func reloadCurrent() {
+        let folder = state.currentFolder
+        Task { await folder.reloadAsync() }
+    }
+
+    /// After a create / duplicate / rename, move the cursor onto the
+    /// new (or renamed) item so the user sees what they just made.
+    private func selectByURL(_ url: URL) {
+        let folder = state.currentFolder
+        Task {
+            // Wait one runloop cycle for the reload to land.
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            await folder.reloadAsync()
+            if let items = folder.items {
+                if let match = items.firstIndex(where: { itemMatchesURL($0, url: url) }) {
+                    state.cursor = match
+                }
+            }
+        }
+    }
+
+    private func itemMatchesURL(_ item: FolderNode.Item, url: URL) -> Bool {
+        switch item {
+        case .folder(let f): return f.url.standardizedFileURL == url.standardizedFileURL
+        case .note(let n): return n.url.standardizedFileURL == url.standardizedFileURL
         }
     }
     #endif
@@ -309,6 +462,95 @@ private struct ColumnContainer<Content: View>: View {
         }
         .frame(maxHeight: .infinity, alignment: .top)
         .background(theme.background)
+    }
+}
+
+// MARK: - File operation input sheet
+
+/// Sheet state for create-note / create-folder / rename. One struct
+/// keeps the three flows in a single `.sheet(item:)` modifier and
+/// drives the title prompt, prefill value, and target path.
+struct FileOpInput: Identifiable {
+    enum Kind { case createNote, createFolder, rename }
+    let id = UUID()
+    let kind: Kind
+    /// For create flows this is the parent folder URL. For rename it's
+    /// the item's own URL.
+    let target: URL
+    let prefill: String
+
+    var title: String {
+        switch kind {
+        case .createNote: return "New note"
+        case .createFolder: return "New folder"
+        case .rename: return "Rename"
+        }
+    }
+
+    var placeholder: String {
+        switch kind {
+        case .createNote: return "Title"
+        case .createFolder: return "Folder name"
+        case .rename: return "Name"
+        }
+    }
+
+    var confirmLabel: String {
+        switch kind {
+        case .createNote, .createFolder: return "Create"
+        case .rename: return "Rename"
+        }
+    }
+}
+
+/// Minimal text-field sheet for the three file-op flows. Returns the
+/// trimmed name via `onCommit`; cancelled / empty inputs close the
+/// sheet without dispatching.
+private struct FileOpInputSheet: View {
+    let op: FileOpInput
+    let onCommit: (String) -> Void
+
+    @State private var value: String
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    @FocusState private var fieldFocused: Bool
+
+    init(op: FileOpInput, onCommit: @escaping (String) -> Void) {
+        self.op = op
+        self.onCommit = onCommit
+        _value = State(initialValue: op.prefill)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(op.title)
+                .font(.system(.title3, design: .monospaced).weight(.semibold))
+                .foregroundStyle(theme.text)
+            TextField(op.placeholder, text: $value)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.body, design: .monospaced))
+                .focused($fieldFocused)
+                .onSubmit { submit() }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.escape, modifiers: [])
+                Button(op.confirmLabel) { submit() }
+                    .keyboardShortcut(.return, modifiers: [])
+                    .buttonStyle(.borderedProminent)
+                    .disabled(value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 360)
+        .background(theme.background)
+        .onAppear { fieldFocused = true }
+    }
+
+    private func submit() {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        onCommit(trimmed)
     }
 }
 
@@ -528,6 +770,14 @@ private struct PreviewPane: View {
     let coordinator: ReadModeCoordinator
     @Environment(\.theme) private var theme
     @State private var noteExcerpt: NoteExcerpt?
+    /// Cached parse of the current excerpt. Body re-renders no longer
+    /// pay the parse cost — that work happens once per selection on
+    /// a detached task and is memoized here.
+    @State private var previewDocument: MarkdownDocument?
+    /// Identity token for the in-flight parse. Stale parses bail out
+    /// when they finish so a fast cursor sweep doesn't flash older
+    /// content onto a newer selection.
+    @State private var previewToken: UUID = UUID()
 
     var body: some View {
         // Wrapped in NSScrollView via NativeScrollHost so the
@@ -565,11 +815,33 @@ private struct PreviewPane: View {
     /// or a note excerpt read. Folders auto-load so the user doesn't have
     /// to click "Peek into folder".
     private func handleItemChange() {
+        let token = UUID()
+        previewToken = token
+        previewDocument = nil
         switch item {
         case .folder(let f):
             Task { await f.loadIfNeededAsync() }
         case .note(let n):
-            noteExcerpt = NoteExcerpt.load(from: n.url)
+            // File read can pull up to 1 MB synchronously; running it
+            // on a detached task keeps the cursor sweep responsive on
+            // large markdown notes. The token guard prevents a slow
+            // read from clobbering the UI after the user moves on.
+            let url = n.url
+            let baseURL = self.baseURL
+            Task.detached(priority: .userInitiated) {
+                let excerpt = NoteExcerpt.load(from: url)
+                let document: MarkdownDocument?
+                if let body = excerpt?.bodyExcerpt {
+                    document = MarkdownParser.parse(body, baseURL: baseURL)
+                } else {
+                    document = nil
+                }
+                await MainActor.run {
+                    guard previewToken == token else { return }
+                    noteExcerpt = excerpt
+                    previewDocument = document
+                }
+            }
         case nil:
             break
         }
@@ -683,12 +955,12 @@ private struct PreviewPane: View {
 
             Rectangle().fill(theme.border).frame(height: 0.5)
 
-            if let excerpt = noteExcerpt {
-                // Render the excerpt as actual markdown — was raw text
-                // with all the `#` and `**` showing. Same MarkdownView the
-                // read pane uses, so links/images resolve relative to the
-                // note's own directory via `baseURL`.
-                let document = MarkdownParser.parse(excerpt.bodyExcerpt, baseURL: baseURL)
+            if let document = previewDocument {
+                // Parse is memoized in `previewDocument` so flipping
+                // through items doesn't re-walk the AST on every body
+                // re-render. The work happens once in handleItemChange
+                // on a detached task; we just hand the doc to
+                // MarkdownView here.
                 MarkdownView(document)
             } else {
                 ProgressView().controlSize(.small)

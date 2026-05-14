@@ -488,10 +488,11 @@ final class ReadKeyMonitor {
             return nil
         }()
 
-        // Escape — handled specially: in read mode it closes the note
-        // and returns to the tree browser. Outside read mode it
-        // passes through so it can dismiss sheets / cancel buttons.
-        if event.keyCode == 53 {
+        // Escape / Backspace — handled specially: in read mode either
+        // one closes the note and returns to the tree browser. Outside
+        // read mode they pass through so the system handles them
+        // (cancel buttons, sheet dismissal, text-field deletion).
+        if event.keyCode == 53 || event.keyCode == 51 {
             if active {
                 closeNote()
                 return nil

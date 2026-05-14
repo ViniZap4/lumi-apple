@@ -78,7 +78,7 @@ struct KeybindsBar: View {
                 [   // navigation
                     .init(key: "j/k", label: "move"),
                     .init(key: "l ↩", label: "open"),
-                    .init(key: "h ⎋", label: "back"),
+                    .init(key: "h ⎋ ⌫", label: "back"),
                 ],
                 [   // jumps
                     .init(key: "gg", label: "top"),
@@ -87,10 +87,18 @@ struct KeybindsBar: View {
                 [   // preview
                     .init(key: "J/K", label: "preview ↑↓"),
                 ],
+                [   // file ops
+                    .init(key: "n", label: "new note"),
+                    .init(key: "N", label: "new folder"),
+                    .init(key: "r", label: "rename"),
+                    .init(key: "d", label: "delete"),
+                    .init(key: "D", label: "duplicate"),
+                ],
                 [   // app
                     .init(key: "⌘O", label: "switcher"),
                     .init(key: "⌘E", label: "edit"),
                     .init(key: "⌘D", label: "read/edit"),
+                    .init(key: "⇧⌘H", label: "home"),
                 ],
             ]
         case .noteView:
@@ -113,10 +121,11 @@ struct KeybindsBar: View {
                 [   // mode
                     .init(key: "⌘E", label: "edit"),
                     .init(key: "⌘D", label: "toggle"),
-                    .init(key: "⎋", label: "back"),
+                    .init(key: "⎋ ⌫", label: "back"),
                 ],
                 [   // app
                     .init(key: "⌘O", label: "switcher"),
+                    .init(key: "⇧⌘H", label: "home"),
                 ],
             ]
         case .noteEdit:
