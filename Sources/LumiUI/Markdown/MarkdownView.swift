@@ -94,13 +94,15 @@ private enum StaggerCascade {
 }
 
 /// Per-block wrapper that fades + slides into place when the markdown
-/// document mounts. Cascade pacing comes from `StaggerCascade`.
+/// document mounts. Cascade pacing comes from `StaggerCascade`. When
+/// `markdownStagger` is off we short-circuit to the bare content view
+/// — no @State, no .onAppear, no animation transactions — so a
+/// 500-block preview doesn't fire 500 closures.
 public struct StaggeredBlock<Content: View>: View {
     let index: Int
     @ViewBuilder let content: () -> Content
 
     @Environment(\.markdownStagger) private var stagger
-    @State private var visible = false
 
     public init(index: Int, @ViewBuilder content: @escaping () -> Content) {
         self.index = index
@@ -108,11 +110,24 @@ public struct StaggeredBlock<Content: View>: View {
     }
 
     public var body: some View {
+        if stagger {
+            AnimatedBlock(index: index, content: content)
+        } else {
+            content()
+        }
+    }
+}
+
+private struct AnimatedBlock<Content: View>: View {
+    let index: Int
+    @ViewBuilder let content: () -> Content
+    @State private var visible = false
+
+    var body: some View {
         content()
-            .opacity(visible ? 1 : (stagger ? 0 : 1))
-            .offset(y: visible ? 0 : (stagger ? 8 : 0))
+            .opacity(visible ? 1 : 0)
+            .offset(y: visible ? 0 : 8)
             .onAppear {
-                guard stagger else { visible = true; return }
                 let delay = StaggerCascade.delay(for: index)
                 Task { @MainActor in
                     withAnimation(.easeOut(duration: 0.30).delay(delay)) {

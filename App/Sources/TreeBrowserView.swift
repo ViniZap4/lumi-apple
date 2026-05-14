@@ -66,11 +66,8 @@ struct TreeBrowserView: View {
                 resizer(width: $previewColumnWidth, min: 280, max: 700, dragFromRight: true)
                 previewColumn
                     .frame(width: previewColumnWidth)
-                    .id("preview-\(state.selectedItem?.id ?? "-")")
-                    .transition(.opacity)
             }
             .animation(.easeInOut(duration: 0.16), value: state.pathStack.count)
-            .animation(.easeInOut(duration: 0.12), value: state.selectedItem?.id)
         }
         .background(theme.background)
         .sheet(item: $fileOpInput) { op in
@@ -822,13 +819,22 @@ private struct PreviewPane: View {
         case .folder(let f):
             Task { await f.loadIfNeededAsync() }
         case .note(let n):
-            // File read can pull up to 1 MB synchronously; running it
-            // on a detached task keeps the cursor sweep responsive on
-            // large markdown notes. The token guard prevents a slow
-            // read from clobbering the UI after the user moves on.
+            // Two-stage debounce + async work so the cursor stays
+            // responsive when the user holds j/k through a folder of
+            // large notes:
+            //   1. Sleep ~120 ms before touching disk. If the user
+            //      moves on within that window, the token mismatches
+            //      and we bail before doing any work — no thrashing
+            //      I/O or AST parses on items the user skipped.
+            //   2. Read + parse on a detached task so the main actor
+            //      isn't held for the (up to) 1 MB file plus the
+            //      markdown walk. Token-check again before publishing.
             let url = n.url
             let baseURL = self.baseURL
             Task.detached(priority: .userInitiated) {
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                let stillCurrent = await MainActor.run { previewToken == token }
+                guard stillCurrent else { return }
                 let excerpt = NoteExcerpt.load(from: url)
                 let document: MarkdownDocument?
                 if let body = excerpt?.bodyExcerpt {
