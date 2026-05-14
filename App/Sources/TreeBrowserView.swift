@@ -265,6 +265,14 @@ struct TreeBrowserView: View {
     #if os(macOS)
     private func handleKey(_ press: KeyPress) -> KeyPress.Result {
         guard appState.preferences.vimNavigationInList else { return .ignored }
+        // While a modal (file-op sheet, delete confirmation, error
+        // alert) is up, every keystroke belongs to the modal — the
+        // text field there should receive `r`, `n`, ⏎, ⎋ etc. Without
+        // this guard the tree handler fired in parallel and ate the
+        // ⏎ that should have submitted the rename / create form.
+        if fileOpInput != nil || pendingDelete != nil || fileOpError != nil {
+            return .ignored
+        }
         // Uppercase variants (Shift + J/K) glide the preview column
         // without disturbing the cursor in the current column —
         // mirrors yazi's behaviour where you can peek deeper into a
