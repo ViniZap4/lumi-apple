@@ -351,31 +351,38 @@ private struct ReadModeScroll<Content: View>: View {
     @ViewBuilder let content: () -> Content
     @FocusState private var focused: Bool
     @State private var monitor: CtrlKeyMonitor?
+    // Coordinator lives in @State so it survives across body
+    // re-executions. The prior design declared it as a `let` on
+    // NativeScrollHost — every body call constructed a new struct with
+    // a new Coordinator(), and SwiftUI's NSViewRepresentable lifecycle
+    // wires only the FIRST one. External callers (this wrapper)
+    // referenced the freshly-constructed unwired coordinator, so
+    // `scrollHalfPage` etc. were no-ops. With @State the same instance
+    // is reused on every render.
+    @State private var coordinator = ReadModeCoordinator()
 
     var body: some View {
         #if os(macOS)
-        let host = NativeScrollHost(content: content)
-        host
+        NativeScrollHost(coordinator: coordinator, content: content)
             .focusable()
             .focused($focused)
             .focusEffectDisabled()
             .onAppear {
                 focused = true
-                // Install an NSEvent local monitor — SwiftUI's
-                // keyboardShortcut on hidden buttons turned out to be
-                // unreliable inside `.background`, and onKeyPress
-                // doesn't surface Ctrl-letter at all because AppKit's
-                // legacy Emacs bindings swallow those at a lower
-                // responder level. NSEvent.addLocalMonitorForEvents
-                // sees every keyDown reaching the app and lets us
-                // return nil to consume it. Lifetime is scoped to this
-                // view via .onDisappear so we don't intercept while in
-                // edit mode.
-                let coord = host.coordinator
+                // Install an NSEvent local monitor — keyboardShortcut /
+                // onKeyPress don't reliably surface Ctrl-letter because
+                // AppKit's legacy Emacs bindings consume them at a
+                // lower responder level. addLocalMonitorForEvents sees
+                // every keyDown reaching the app and lets us return
+                // nil to consume it. Lifetime scoped to this view via
+                // .onDisappear so we don't intercept while in edit
+                // mode.
+                let coord = coordinator
                 monitor = CtrlKeyMonitor(
                     enabled: jkEnabled,
                     halfPage: { coord.scrollHalfPage(direction: CGFloat($0)) },
-                    fullPage: { coord.scrollFullPage(direction: CGFloat($0)) }
+                    fullPage: { coord.scrollFullPage(direction: CGFloat($0)) },
+                    scrollToEdge: { coord.scrollTo($0) }
                 )
             }
             .onDisappear { monitor = nil }
@@ -391,14 +398,14 @@ private struct ReadModeScroll<Content: View>: View {
                 guard jkEnabled else { return .ignored }
                 let lineStep: CGFloat = 22
                 switch press.characters {
-                case "j": host.coordinator.glide(by: lineStep); return .handled
-                case "k": host.coordinator.glide(by: -lineStep); return .handled
-                case "d": host.coordinator.scrollHalfPage(direction: 1); return .handled
-                case "u": host.coordinator.scrollHalfPage(direction: -1); return .handled
-                case "f": host.coordinator.scrollFullPage(direction: 1); return .handled
-                case "b": host.coordinator.scrollFullPage(direction: -1); return .handled
-                case "g": host.coordinator.scrollTo(.top); return .handled
-                case "G": host.coordinator.scrollTo(.bottom); return .handled
+                case "j": coordinator.glide(by: lineStep); return .handled
+                case "k": coordinator.glide(by: -lineStep); return .handled
+                case "d": coordinator.scrollHalfPage(direction: 1); return .handled
+                case "u": coordinator.scrollHalfPage(direction: -1); return .handled
+                case "f": coordinator.scrollFullPage(direction: 1); return .handled
+                case "b": coordinator.scrollFullPage(direction: -1); return .handled
+                case "g": coordinator.scrollTo(.top); return .handled
+                case "G": coordinator.scrollTo(.bottom); return .handled
                 default: return .ignored
                 }
             }
@@ -422,16 +429,19 @@ private final class CtrlKeyMonitor {
     var enabled: Bool
     private let halfPage: (Int) -> Void
     private let fullPage: (Int) -> Void
+    private let scrollToEdge: (ReadModeCoordinator.Edge) -> Void
     nonisolated(unsafe) private var token: Any?
 
     init(
         enabled: Bool,
         halfPage: @escaping @MainActor (Int) -> Void,
-        fullPage: @escaping @MainActor (Int) -> Void
+        fullPage: @escaping @MainActor (Int) -> Void,
+        scrollToEdge: @escaping @MainActor (ReadModeCoordinator.Edge) -> Void
     ) {
         self.enabled = enabled
         self.halfPage = halfPage
         self.fullPage = fullPage
+        self.scrollToEdge = scrollToEdge
         token = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.handle(event) ?? event
         }
@@ -442,8 +452,13 @@ private final class CtrlKeyMonitor {
     }
 
     private func handle(_ event: NSEvent) -> NSEvent? {
-        guard enabled,
-              event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .control,
+        guard enabled else { return event }
+        // Match Ctrl with optional shift (so ⇧⌃G can map to "go bottom"
+        // since G is canonically shift-g). Anything stricter would miss
+        // the shift case.
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let isCtrl = mods.contains(.control) && !mods.contains(.command) && !mods.contains(.option)
+        guard isCtrl,
               let chars = event.charactersIgnoringModifiers?.lowercased()
         else { return event }
         switch chars {
@@ -453,6 +468,14 @@ private final class CtrlKeyMonitor {
         case "b": fullPage(-1); return nil
         // Non-vim alias — symmetry with ⌃D for one-hand reach.
         case "t": halfPage(1); return nil
+        // ⌃G — bottom; allows top/bottom without leaving the home row.
+        case "g":
+            if mods.contains(.shift) {
+                scrollToEdge(.bottom)
+            } else {
+                scrollToEdge(.top)
+            }
+            return nil
         default: return event
         }
     }
@@ -476,14 +499,19 @@ import AppKit
 /// would never reach an `NSScrollView.keyDown` override because the hosted
 /// SwiftUI subtree always grabs first-responder for itself.
 private struct NativeScrollHost<Content: View>: NSViewRepresentable {
+    /// Injected from the wrapping view's @State. SwiftUI's
+    /// NSViewRepresentable lifecycle calls `makeCoordinator()` once at
+    /// the start of the view's life; if we created the Coordinator
+    /// inline (`let coordinator = Coordinator()`) every body call
+    /// would construct a fresh struct with a brand-new Coordinator,
+    /// while SwiftUI kept using the FIRST one — leaving external
+    /// callers wiring scroll commands to a dangling instance with no
+    /// scrollView reference. The wrapper now holds the coordinator in
+    /// @State and hands the same instance in on every body call.
+    let coordinator: ReadModeCoordinator
     @ViewBuilder var content: () -> Content
 
-    /// Built once on view init; the same instance is handed to
-    /// `makeCoordinator` so external callers (the SwiftUI wrapper) can
-    /// reach it via `host.coordinator.scroll(by:)`.
-    let coordinator = Coordinator()
-
-    func makeCoordinator() -> Coordinator { coordinator }
+    func makeCoordinator() -> ReadModeCoordinator { coordinator }
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
@@ -497,8 +525,8 @@ private struct NativeScrollHost<Content: View>: NSViewRepresentable {
 
         let host = NSHostingController(rootView: AnyView(content()))
         host.view.translatesAutoresizingMaskIntoConstraints = false
-        coordinator.host = host
-        coordinator.scrollView = scroll
+        context.coordinator.host = host
+        context.coordinator.scrollView = scroll
 
         scroll.documentView = host.view
 
@@ -514,30 +542,38 @@ private struct NativeScrollHost<Content: View>: NSViewRepresentable {
         // the view jitters. As soon as AppKit kicks off a live scroll
         // we stop ticking; the next j/k call rehydrates the target.
         let center = NotificationCenter.default
+        let coord = context.coordinator
         center.addObserver(
             forName: NSScrollView.willStartLiveScrollNotification,
             object: scroll,
             queue: .main
-        ) { [weak coordinator] _ in
-            Task { @MainActor in coordinator?.stopTickerForExternalScroll() }
+        ) { [weak coord] _ in
+            Task { @MainActor in coord?.stopTickerForExternalScroll() }
         }
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        // Mutate the existing host's root view — SwiftUI diffs the underlying
-        // tree, no AppKit subview thrashing.
-        coordinator.host?.rootView = AnyView(content())
+        // Mutate the existing host's root view via the
+        // SwiftUI-managed coordinator (context.coordinator) — same
+        // instance every render. The prior version touched
+        // `self.coordinator` directly which, when body re-runs, is a
+        // fresh unwired Coordinator that hasn't been bound to any
+        // hosting controller.
+        context.coordinator.host?.rootView = AnyView(content())
         // Document height may have changed (different note, font scale,
         // width). Re-anchor the velocity target on the current offset so
         // a stale target doesn't fling us past the new content bounds.
-        coordinator.syncTargetWithCurrent()
+        context.coordinator.syncTargetWithCurrent()
     }
+}
 
-    /// Exposed to the SwiftUI wrapper for keyboard-driven scrolling. Methods
-    /// here drive the underlying NSScrollView with native animation.
-    @MainActor
-    final class Coordinator {
+/// Read-mode scroll controller. Lives outside `NativeScrollHost` (so the
+/// wrapper can hold it in @State without inheriting the generic Content
+/// parameter) and outside `Coordinator` (so subscribers can hand a stable
+/// reference around without the NSViewRepresentable lifecycle gotchas).
+@MainActor
+final class ReadModeCoordinator {
         var host: NSHostingController<AnyView>?
         weak var scrollView: NSScrollView?
 
@@ -670,20 +706,19 @@ private struct NativeScrollHost<Content: View>: NSViewRepresentable {
             scroll(by: sign * page, animated: true)
         }
 
-        func scrollTo(_ edge: Edge) {
-            guard let view = scrollView,
-                  let doc = view.documentView
-            else { return }
-            let clip = view.contentView
-            let y: CGFloat
-            switch edge {
-            case .top: y = 0
-            case .bottom: y = max(0, doc.bounds.height - clip.bounds.height)
-            }
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.18
-                clip.animator().setBoundsOrigin(NSPoint(x: 0, y: y))
-            }
+    func scrollTo(_ edge: Edge) {
+        guard let view = scrollView,
+              let doc = view.documentView
+        else { return }
+        let clip = view.contentView
+        let y: CGFloat
+        switch edge {
+        case .top: y = 0
+        case .bottom: y = max(0, doc.bounds.height - clip.bounds.height)
+        }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.18
+            clip.animator().setBoundsOrigin(NSPoint(x: 0, y: y))
         }
     }
 }
