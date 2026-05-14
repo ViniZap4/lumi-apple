@@ -273,6 +273,37 @@ private struct ColumnContainer<Content: View>: View {
 
 // MARK: - Generic column list
 
+/// Per-row mount animation. Each row fades + slides into place when it
+/// first appears in the LazyVStack, with a small per-index delay so the
+/// column reads as cascading in from the top. The cascade caps at
+/// `delayCap` so very long columns don't take seconds to settle.
+/// Unmount (column swap on h / l navigation) is handled by SwiftUI's
+/// implicit removal of the parent column under `.animation`.
+private struct ColumnRowMount<Content: View>: View {
+    let index: Int
+    let animated: Bool
+    @ViewBuilder let content: () -> Content
+    @State private var visible = false
+
+    private static var stepDelay: Double { 0.012 }
+    private static var delayCap: Double { 0.22 }
+
+    var body: some View {
+        let delay = min(Double(index) * Self.stepDelay, Self.delayCap)
+        content()
+            .opacity(visible ? 1 : (animated ? 0 : 1))
+            .offset(x: visible ? 0 : (animated ? -6 : 0))
+            .onAppear {
+                guard animated else { visible = true; return }
+                Task { @MainActor in
+                    withAnimation(.easeOut(duration: 0.22).delay(delay)) {
+                        visible = true
+                    }
+                }
+            }
+    }
+}
+
 private struct ColumnList: View {
     let items: [FolderNode.Item]
     let highlightedID: String?
@@ -289,20 +320,23 @@ private struct ColumnList: View {
                 .foregroundStyle(theme.textDim)
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
+                .transition(.opacity)
         } else {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(items) { item in
-                            row(item: item, isHighlighted: item.id == highlightedID)
-                                .id(item.id)
-                                .onTapGesture(count: 2) {
-                                    onTap(item)
-                                    onActivate?(item)
-                                }
-                                .onTapGesture(count: 1) {
-                                    onTap(item)
-                                }
+                        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                            ColumnRowMount(index: index, animated: animateRows) {
+                                row(item: item, isHighlighted: item.id == highlightedID)
+                                    .onTapGesture(count: 2) {
+                                        onTap(item)
+                                        onActivate?(item)
+                                    }
+                                    .onTapGesture(count: 1) {
+                                        onTap(item)
+                                    }
+                            }
+                            .id(item.id)
                         }
                     }
                     .padding(.vertical, 4)
@@ -317,6 +351,12 @@ private struct ColumnList: View {
             }
         }
     }
+
+    @Environment(AppState.self) private var appState
+    /// Disable the cascade entirely when the user has turned content
+    /// animations off in Settings — keeps the navigation snappy for
+    /// users who prefer no motion.
+    private var animateRows: Bool { appState.preferences.contentAnimations }
 
     @ViewBuilder
     private func row(item: FolderNode.Item, isHighlighted: Bool) -> some View {

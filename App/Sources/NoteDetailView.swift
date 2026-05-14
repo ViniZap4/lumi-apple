@@ -359,6 +359,31 @@ private struct ReadModeScroll<Content: View>: View {
             .focused($focused)
             .focusEffectDisabled()
             .onAppear { focused = true }
+            // Ctrl+letter shortcuts go through SwiftUI's keyboardShortcut
+            // pipeline — `.onKeyPress` doesn't reliably surface
+            // Ctrl-letter on macOS (AppKit swallows them for legacy
+            // Emacs bindings). Hidden zero-size buttons attach the
+            // dispatch; same destinations as the j/k handlers below.
+            .background {
+                ZStack {
+                    Button("") { host.coordinator.scrollHalfPage(direction: 1) }
+                        .keyboardShortcut("d", modifiers: .control)
+                    Button("") { host.coordinator.scrollHalfPage(direction: -1) }
+                        .keyboardShortcut("u", modifiers: .control)
+                    Button("") { host.coordinator.scrollFullPage(direction: 1) }
+                        .keyboardShortcut("f", modifiers: .control)
+                    Button("") { host.coordinator.scrollFullPage(direction: -1) }
+                        .keyboardShortcut("b", modifiers: .control)
+                    // Ctrl-T is non-vim but the user binds it to half
+                    // page down for symmetry with Ctrl-D (one hand
+                    // reach).
+                    Button("") { host.coordinator.scrollHalfPage(direction: 1) }
+                        .keyboardShortcut("t", modifiers: .control)
+                }
+                .opacity(0)
+                .allowsHitTesting(false)
+                .disabled(!jkEnabled)
+            }
             // `.repeat` catches the auto-fired keydowns when the user
             // *holds* j or k, so scrolling continues smoothly rather than
             // stuttering one line per discrete press. We pass animated:
@@ -366,17 +391,11 @@ private struct ReadModeScroll<Content: View>: View {
             // 100ms animations from holding the key would stutter.
             .onKeyPress(phases: [.down, .repeat]) { press in
                 guard jkEnabled else { return .ignored }
-                // Holding j/k accumulates into a target offset; the
-                // display tick interpolates toward it so the motion stays
-                // smooth instead of stepping. Critical-damping in the
-                // coordinator drains the buffer once the key releases.
+                // Vim-style plain-key shortcuts. Ctrl variants are
+                // handled by the keyboardShortcut buttons above; this
+                // path catches the unmodified keys (and dead-simple
+                // single-key navigation).
                 let lineStep: CGFloat = 22
-                // SwiftUI hands us the unmodified character even when
-                // Ctrl is held — we need to consult `press.modifiers`
-                // explicitly to fire on ⌃d / ⌃u (vim's half-page
-                // motions) since plain d / u also map to the same thing
-                // for discoverability.
-                let ctrl = press.modifiers.contains(.control)
                 switch press.characters {
                 case "j": host.coordinator.glide(by: lineStep); return .handled
                 case "k": host.coordinator.glide(by: -lineStep); return .handled
@@ -386,18 +405,7 @@ private struct ReadModeScroll<Content: View>: View {
                 case "b": host.coordinator.scrollFullPage(direction: -1); return .handled
                 case "g": host.coordinator.scrollTo(.top); return .handled
                 case "G": host.coordinator.scrollTo(.bottom); return .handled
-                default:
-                    // Some key layouts deliver ⌃d as an ASCII control
-                    // character (EOT = 0x04). Handle that fallthrough
-                    // so the binding works regardless.
-                    guard ctrl, let c = press.characters.first else { return .ignored }
-                    switch c.asciiValue {
-                    case 0x04: host.coordinator.scrollHalfPage(direction: 1); return .handled
-                    case 0x15: host.coordinator.scrollHalfPage(direction: -1); return .handled
-                    case 0x06: host.coordinator.scrollFullPage(direction: 1); return .handled
-                    case 0x02: host.coordinator.scrollFullPage(direction: -1); return .handled
-                    default: return .ignored
-                    }
+                default: return .ignored
                 }
             }
         #else
