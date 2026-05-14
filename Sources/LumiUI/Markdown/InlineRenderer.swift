@@ -56,11 +56,46 @@ public enum InlineRenderer {
             attr.foregroundColor = theme.textDim
             return attr
 
+        case let .math(latex, _):
+            // Defensive fallback: a paragraph that *contains* `.math` is
+            // routed by the renderer to `KaTeXParagraphView`, which never
+            // calls this function. We still handle the case so the type
+            // is total, in case a future path drops down to the native
+            // Text renderer with math present. The output is the raw
+            // LaTeX in code styling — readable, even if unrendered.
+            var attr = AttributedString(latex)
+            attr.inlinePresentationIntent = .code
+            attr.foregroundColor = theme.accent
+            attr.backgroundColor = theme.overlayBackground
+            return attr
+
         case .lineBreak:
             return AttributedString("\n")
 
         case .softBreak:
             return AttributedString(" ")
         }
+    }
+
+    /// True iff the inline tree contains at least one `.math` node anywhere,
+    /// including inside `.strong` / `.emphasis` / `.link` children.
+    /// Drives the renderer's decision to swap the native Text path for the
+    /// KaTeX paragraph WebView so math expressions line up on the baseline
+    /// next to their prose.
+    public static func containsMath(_ nodes: [InlineNode]) -> Bool {
+        for node in nodes {
+            switch node {
+            case .math: return true
+            case let .strong(children),
+                 let .emphasis(children),
+                 let .strikethrough(children):
+                if containsMath(children) { return true }
+            case let .link(_, children):
+                if containsMath(children) { return true }
+            case .text, .code, .image, .lineBreak, .softBreak:
+                continue
+            }
+        }
+        return false
     }
 }

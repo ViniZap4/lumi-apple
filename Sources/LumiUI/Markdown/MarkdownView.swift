@@ -161,13 +161,23 @@ struct BlockView: View {
                 .textSelection(.enabled)
 
         case let .paragraph(inline):
-            Text(InlineRenderer.render(inline, theme: theme))
-                .font(markdownBodyFont(size: 15 * scale, weight: .regular, family: fontFamily))
-                .foregroundStyle(theme.text)
-                .textSelection(.enabled)
-                .lineSpacing(3 * scale)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            // Paragraphs that contain inline math route through the
+            // KaTeX-aware WebView so the math glyphs sit on the same
+            // baseline as the surrounding text. Pure-prose paragraphs
+            // stay on the native Text path so most of the document
+            // keeps its native selection / theme integration.
+            if InlineRenderer.containsMath(inline) {
+                KaTeXParagraphView(inline: inline)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Text(InlineRenderer.render(inline, theme: theme))
+                    .font(markdownBodyFont(size: 15 * scale, weight: .regular, family: fontFamily))
+                    .foregroundStyle(theme.text)
+                    .textSelection(.enabled)
+                    .lineSpacing(3 * scale)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
         case let .codeBlock(language, code):
             // Fenced code blocks whose language label is `mermaid` get
@@ -197,6 +207,9 @@ struct BlockView: View {
 
         case let .media(ref):
             MediaView(reference: ref)
+
+        case let .mathBlock(latex):
+            KaTeXBlockView(latex: latex)
         }
     }
 

@@ -12,6 +12,10 @@ public indirect enum MarkdownBlock: Sendable, Hashable {
     case orderedList(start: Int, items: [[MarkdownBlock]])
     case thematicBreak
     case media(MediaReference)
+    /// Display-style LaTeX: a paragraph whose entire content was a single
+    /// `$$ … $$` expression. Rendered as a centered KaTeX block by the
+    /// renderer; the host paragraph is dropped.
+    case mathBlock(latex: String)
 }
 
 /// Inline-level element. Strings carry through verbatim; styles and links wrap
@@ -24,8 +28,23 @@ public indirect enum InlineNode: Sendable, Hashable {
     case code(String)
     case link(destination: String, children: [InlineNode])
     case image(source: String, alt: String)
+    /// LaTeX math expression extracted from `$ … $` (inline) or `$$ … $$`
+    /// (display). The `display` flag tells the renderer whether to ask
+    /// KaTeX for inline or display-mode layout. A paragraph that is
+    /// nothing but a single `.math(display: .block)` gets lifted to
+    /// `MarkdownBlock.mathBlock` by the parser; everything else stays
+    /// inline and the surrounding paragraph renders via a single
+    /// paragraph-level KaTeX WebView so neighbouring text + math line
+    /// up on the same baseline.
+    case math(latex: String, display: MathDisplay)
     case lineBreak
     case softBreak
+}
+
+/// Inline vs. display math, mirroring KaTeX's `displayMode` flag.
+public enum MathDisplay: Sendable, Hashable {
+    case inline  // $ … $
+    case block   // $$ … $$
 }
 
 /// A media reference resolved to an absolute URL with detected kind. Block
