@@ -30,7 +30,12 @@ public struct LinkAwareTextView: View {
     @Environment(\.theme) private var theme
     @Environment(\.markdownLinkAction) private var linkAction
     @Environment(\.markdownVaultRoot) private var vaultRoot
-    @State private var measuredHeight: CGFloat = 22
+    /// Coarse initial height before the NSTextView reports its real
+    /// laid-out size. Set to a single body-line-ish value so the
+    /// first-frame paint reserves enough room to avoid a visible
+    /// 22pt → real-height pop on scroll-in. The Representable's
+    /// `onHeight` callback overrides this within one runloop tick.
+    @State private var measuredHeight: CGFloat
     /// Most recently computed per-line-fragment link rects, in local
     /// SwiftUI coordinates (which match the NSTextView's bounds since
     /// we frame them 1:1). Published from the Representable via the
@@ -41,7 +46,9 @@ public struct LinkAwareTextView: View {
     @State private var hover: LinkHover? = nil
     /// In-flight task that turns a hovered rect into a visible tooltip
     /// after the delay. Cancelled on every cursor move so flicks across
-    /// links don't queue a backlog of bubbles.
+    /// links don't queue a backlog of bubbles. Also cancelled on view
+    /// disappear (LazyVStack scroll-out) to avoid leaking pending
+    /// awaits on torn-down view state.
     @State private var pendingShow: Task<Void, Never>? = nil
 
     public init(
@@ -54,6 +61,11 @@ public struct LinkAwareTextView: View {
         self.fontSize = fontSize
         self.fontWeight = fontWeight
         self.lineSpacing = lineSpacing
+        // Single-line estimate: NSFont's line height ~ font size × 1.2.
+        // Multi-line paragraphs will reflow on the first real layout
+        // pass, but starting with a realistic single-line guess keeps
+        // initial scroll-in from showing a 22pt sliver.
+        self._measuredHeight = State(initialValue: ceil(fontSize * 1.35))
     }
 
     public var body: some View {
@@ -124,6 +136,16 @@ public struct LinkAwareTextView: View {
         // within the parent VStack.
         .zIndex(hover != nil ? 100 : 0)
         .animation(.easeOut(duration: 0.16), value: hover)
+        // LazyVStack scrolls views in and out as the user moves. Any
+        // tooltip-show Task that was mid-flight when the view leaves
+        // the viewport would still complete and try to mutate a
+        // dead-by-the-time-it-finishes @State. Cancel on disappear so
+        // we don't leak the awaits.
+        .onDisappear {
+            pendingShow?.cancel()
+            pendingShow = nil
+            hover = nil
+        }
     }
 
     /// Approximate position of the first-line baseline below the top
@@ -363,14 +385,24 @@ private struct LinkAwareNSTextViewRepresentable: NSViewRepresentable {
         }
 
         func publish(_ rects: [LinkRect]) {
-            // NSTextView layout always runs on the main thread, so the
-            // SwiftUI @State mutation that follows is safe — we just
-            // need to satisfy Swift 6 strict concurrency about where
-            // `onLinkRects` is invoked from. `MainActor.assumeIsolated`
-            // is the contract: "I promise we're already on the main
-            // actor", and AppKit guarantees that here.
-            MainActor.assumeIsolated {
-                onLinkRects(rects)
+            // Defer to the next runloop tick instead of mutating
+            // SwiftUI state synchronously from inside the AppKit
+            // layout pass. Two wins:
+            //   1. SwiftUI complains less when state changes coincide
+            //      with view body evaluation (we've seen "Modifying
+            //      state during view update" warnings in production
+            //      builds from synchronous publish paths).
+            //   2. If anyone ever calls refreshLinkRects from off-main
+            //      (a background diff, a custom test harness), we hop
+            //      cleanly to main rather than `assumeIsolated`-
+            //      crashing.
+            // The `MainActor.run` envelope captures `self` (which is
+            // @MainActor) along with the rect array (Sendable) into a
+            // main-actor closure, so Swift 6 strict concurrency is
+            // satisfied.
+            let captured = rects
+            Task { @MainActor in
+                onLinkRects(captured)
             }
         }
 
@@ -480,6 +512,12 @@ final class SelfSizingTextView: NSTextView {
     /// re-position when the cursor crosses from line one to line two
     /// of the same link.
     private var lastHoveredRect: CGRect? = nil
+    /// Last cursor position we hit-tested. Used to short-circuit
+    /// `mouseMoved` when the cursor drifts by a sub-pixel amount
+    /// without crossing a rect boundary — AppKit fires `mouseMoved`
+    /// at the full event rate (often 60+ Hz) and the rect search is
+    /// O(n) on the link count.
+    private var lastHitTestPoint: CGPoint?
 
     override func layout() {
         super.layout()
@@ -516,6 +554,18 @@ final class SelfSizingTextView: NSTextView {
 
     override func mouseMoved(with event: NSEvent) {
         let local = convert(event.locationInWindow, from: nil)
+        // Sub-pixel jitter short-circuit. mouseMoved fires at the
+        // event-feed rate (60+ Hz) and the linear scan below is O(n)
+        // on the link count; skipping micro-movements drops the
+        // steady-state CPU cost to near zero when the cursor sits
+        // idle inside a hovered rect.
+        if let last = lastHitTestPoint,
+           abs(last.x - local.x) < 1.5,
+           abs(last.y - local.y) < 1.5 {
+            super.mouseMoved(with: event)
+            return
+        }
+        lastHitTestPoint = local
         let hit = lastPublishedRects.first(where: { $0.rect.contains(local) })
         // Compare rect rather than link id — see `lastHoveredRect`.
         if hit?.rect != lastHoveredRect {
@@ -526,6 +576,7 @@ final class SelfSizingTextView: NSTextView {
     }
 
     override func mouseExited(with event: NSEvent) {
+        lastHitTestPoint = nil
         if lastHoveredRect != nil {
             lastHoveredRect = nil
             onHoverLink?(nil)
@@ -554,6 +605,20 @@ final class SelfSizingTextView: NSTextView {
               let layoutManager,
               let textContainer
         else { return }
+
+        // Fast path: empty storage or no link attribute anywhere →
+        // no work. Skips the layoutManager.ensureLayout cost too,
+        // which can be material on long math-heavy paragraphs that
+        // still happen to route through LinkAwareTextView (e.g. for
+        // an alignment-guide consumer). Detection is O(1) via a
+        // bounded enumeration that stops at the first .link hit.
+        if storage.length == 0 || !storage.hasAnyLinkAttribute() {
+            if !lastPublishedRects.isEmpty {
+                lastPublishedRects = []
+                coordinator.publish([])
+            }
+            return
+        }
 
         layoutManager.ensureLayout(for: textContainer)
         var rects: [LinkRect] = []
@@ -586,6 +651,24 @@ final class SelfSizingTextView: NSTextView {
                 onHoverLink?(nil)
             }
         }
+    }
+}
+
+private extension NSTextStorage {
+    /// True iff any character in the storage carries a `.link`
+    /// attribute. Bounded — stops at the first hit via the `stop`
+    /// pointer — so the cost is O(1) in the common case where a
+    /// LinkAwareTextView happens to be hosting a paragraph that
+    /// the parser flagged as containing a link.
+    func hasAnyLinkAttribute() -> Bool {
+        var found = false
+        enumerateAttribute(.link, in: NSRange(location: 0, length: length), options: []) { value, _, stop in
+            if value != nil {
+                found = true
+                stop.pointee = true
+            }
+        }
+        return found
     }
 }
 #endif
