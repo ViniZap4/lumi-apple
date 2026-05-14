@@ -82,8 +82,12 @@ public struct LinkAwareTextView: View {
                 LinkTooltipBubble(label: hover.label)
                     .fixedSize()
                     .position(
-                        x: max(60, min(measuredWidth - 60, hover.anchor.midX)),
-                        y: hover.anchor.maxY + 22
+                        x: max(80, min(measuredWidth - 80, hover.anchor.midX)),
+                        // Sit close to the link's underline so the
+                        // bubble doesn't drift down into the next
+                        // block's heading. Single-line truncation in
+                        // the bubble keeps the footprint shallow.
+                        y: hover.anchor.maxY + 16
                     )
                     .transition(
                         .opacity.combined(with: .scale(scale: 0.92, anchor: .top))
@@ -94,6 +98,20 @@ public struct LinkAwareTextView: View {
         .frame(height: measuredHeight)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(WidthReporter(width: $measuredWidth))
+        // Tell SwiftUI where our first text baseline sits so a parent
+        // `HStack(alignment: .firstTextBaseline)` — notably
+        // `ListBlockView`'s row layout — aligns its marker glyph with
+        // our first line. Without this guide the Representable
+        // reports no baseline, the HStack falls back to top-anchoring
+        // both children, and our text rendered below the marker for
+        // every list item containing a link.
+        //
+        // The baseline lives at `font.ascender` below the text's
+        // origin; we mirror that here so the alignment is exact for
+        // body, semibold heading, and any future weight.
+        .alignmentGuide(.firstTextBaseline) { _ in
+            firstLineBaselineFromTop
+        }
         .onContinuousHover(coordinateSpace: .local) { phase in
             switch phase {
             case let .active(point):
@@ -103,6 +121,14 @@ public struct LinkAwareTextView: View {
             }
         }
         .animation(.easeOut(duration: 0.16), value: hover)
+    }
+
+    /// Approximate position of the first-line baseline below the top
+    /// edge of the rendered text. NSFont reports `ascender` in points
+    /// for the current weight + size combination — that's the cap-to-
+    /// baseline distance SwiftUI's HStack expects.
+    private var firstLineBaselineFromTop: CGFloat {
+        NSFont.systemFont(ofSize: fontSize, weight: fontWeight).ascender
     }
 
     @State private var measuredWidth: CGFloat = 0
@@ -164,10 +190,16 @@ private struct LinkTooltipBubble: View {
         Text(label)
             .font(.system(.caption2, design: .monospaced))
             .foregroundStyle(theme.text)
-            .lineLimit(3)
-            .multilineTextAlignment(.leading)
+            // Single line with middle truncation keeps the bubble
+            // shallow enough that it doesn't blanket the heading
+            // sitting under the next block. Long paths still convey
+            // their meaning — the ./prefix and the tail leaf name
+            // stay visible; the middle of the path is collapsed
+            // into an ellipsis.
+            .lineLimit(1)
+            .truncationMode(.middle)
             .padding(.horizontal, 9)
-            .padding(.vertical, 6)
+            .padding(.vertical, 5)
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(theme.overlayBackground)
@@ -177,7 +209,7 @@ private struct LinkTooltipBubble: View {
                     .stroke(theme.border.opacity(0.7), lineWidth: 0.5)
             )
             .shadow(color: .black.opacity(0.32), radius: 8, x: 0, y: 3)
-            .frame(maxWidth: 360, alignment: .leading)
+            .frame(maxWidth: 480, alignment: .leading)
     }
 }
 
