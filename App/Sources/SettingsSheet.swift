@@ -47,7 +47,10 @@ struct SettingsSheet: View {
             Button(action: { dismiss() }) {
                 Image(systemName: "xmark.circle.fill")
                     .font(.title3)
-                    .foregroundStyle(theme.textDim)
+                    // textDim was nearly invisible on light themes;
+                    // dial up to 60 % text so the dismiss target is
+                    // findable everywhere without screaming.
+                    .foregroundStyle(theme.text.opacity(0.6))
             }
             .buttonStyle(.plain)
             .keyboardShortcut(.cancelAction)
@@ -72,23 +75,35 @@ struct SettingsSheet: View {
             .padding(.bottom, 14)
 
             ForEach(Section.allCases) { section in
+                let isSelected = selected == section
                 Button {
                     selected = section
                 } label: {
                     HStack(spacing: 10) {
                         Image(systemName: section.icon)
                             .frame(width: 18)
-                            .foregroundStyle(selected == section ? theme.background : theme.textDim)
+                            // Subtle accent treatment instead of fully-
+                            // filled accent + theme.background text. The
+                            // previous combo produced weak perceptual
+                            // contrast on saturated-accent themes like
+                            // tokyo-night (light-cyan accent + dark-navy
+                            // text reads as a low-vibration pair even
+                            // though the hex values pass a strict ratio).
+                            .foregroundStyle(isSelected ? theme.accent : theme.text.opacity(0.75))
                         Text(section.label)
-                            .font(.system(.body, design: .monospaced))
-                            .foregroundStyle(selected == section ? theme.background : theme.text)
+                            .font(.system(.body, design: .monospaced).weight(isSelected ? .semibold : .regular))
+                            .foregroundStyle(isSelected ? theme.accent : theme.text)
                         Spacer()
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .background(
                         RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .fill(selected == section ? theme.accent : Color.clear)
+                            .fill(isSelected ? theme.accent.opacity(0.18) : Color.clear)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .stroke(isSelected ? theme.accent.opacity(0.45) : Color.clear, lineWidth: 0.5)
                     )
                 }
                 .buttonStyle(.plain)
@@ -126,9 +141,11 @@ struct SettingsSheet: View {
             Text(selected.label.lowercased())
                 .font(.system(.title2, design: .monospaced).weight(.semibold))
                 .foregroundStyle(theme.text)
+            // Subtitle moved from `theme.textDim` to dimmed `theme.text`
+            // so the breadcrumb-style hint stays legible on light themes.
             Text(headerSubtitle)
                 .font(.caption)
-                .foregroundStyle(theme.textDim)
+                .foregroundStyle(theme.text.opacity(0.65))
         }
         .padding(.bottom, 8)
     }
@@ -360,13 +377,18 @@ struct SettingsSheet: View {
 
     @ViewBuilder
     private func settingLabel(title: String, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 4) {
             Text(title)
-                .font(.system(.body, design: .monospaced))
+                .font(.system(.body, design: .monospaced).weight(.semibold))
                 .foregroundStyle(theme.text)
+            // The description used to be `theme.textDim` which on every
+            // dark theme sat just above the row background's overlay
+            // tint — borderline unreadable in the screenshot the user
+            // flagged. Bump to a dimmed `theme.text` so the explanation
+            // text reads everywhere without competing with the title.
             Text(detail)
                 .font(.caption)
-                .foregroundStyle(theme.textDim)
+                .foregroundStyle(theme.text.opacity(0.7))
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
