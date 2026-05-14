@@ -361,9 +361,14 @@ private struct MarkdownReader: View {
         // layout passes (the F.54→F.56 zIndex hoist did, which is
         // what was nudging the link out from under the cursor on
         // hover).
-        .overlay(alignment: .topLeading) {
+        //
+        // `.overlayPreferenceValue` (not plain `.overlay`) so the
+        // builder closure receives the latest preference value that
+        // descendants of this view have published. Regular `.overlay`
+        // doesn't see preferences from siblings of itself.
+        .overlayPreferenceValue(LinkHoverAnchorPreferenceKey.self) { value in
             GeometryReader { proxy in
-                LinkTooltipOverlay(maxWidth: proxy.size.width)
+                LinkTooltipOverlay(hover: value, maxWidth: proxy.size.width)
             }
             .allowsHitTesting(false)
         }
@@ -1135,39 +1140,40 @@ struct NoteDetailEmpty: View {
 
 /// Renders the active link-hover tooltip as a global overlay above the
 /// reader's content. Reads the `LinkHoverAnchorPreferenceKey` value
-/// that `LinkAwareTextView` publishes, positions the bubble just below
-/// the hovered link, and animates the appearance with a small
-/// opacity+scale combo.
+/// that `LinkAwareTextView` publishes (forwarded into the `hover`
+/// prop from the MarkdownReader's `.overlayPreferenceValue` builder).
 ///
-/// Kept as a separate view so we can attach `.onPreferenceChange` here
-/// and drive an `@State` transition — the previous attempt put the
-/// preference read inside `.overlayPreferenceValue`'s builder closure
-/// directly, which renders the bubble immediately at every preference
-/// change without an opportunity for the appear/disappear transitions
-/// to run. With the @State indirection the bubble fades + scales in
-/// and out cleanly.
+/// We take the preference value as a prop rather than reading it via
+/// `.onPreferenceChange` here because the overlay is a sibling of the
+/// LinkAwareTextView's published preference — only the
+/// `.overlayPreferenceValue` builder on the underlying view can see
+/// it. Mirroring into `@State` via `.onChange` gives the SwiftUI
+/// `.transition` modifier identity changes to animate against, so the
+/// bubble fades + scales in / out cleanly when hover starts and ends.
 private struct LinkTooltipOverlay: View {
+    let hover: LinkHoverAnchor?
     let maxWidth: CGFloat
-    @State private var hover: LinkHoverAnchor?
+    @State private var displayed: LinkHoverAnchor?
 
     var body: some View {
         ZStack(alignment: .topLeading) {
             Color.clear
-            if let hover {
-                LinkTooltipBubble(label: hover.label)
+            if let displayed {
+                LinkTooltipBubble(label: displayed.label)
                     .fixedSize(horizontal: false, vertical: true)
                     .offset(
-                        x: max(0, min(max(0, maxWidth - linkTooltipMaxWidth), hover.linkRect.minX)),
-                        y: hover.linkRect.maxY + 8
+                        x: max(0, min(max(0, maxWidth - linkTooltipMaxWidth), displayed.linkRect.minX)),
+                        y: displayed.linkRect.maxY + 8
                     )
                     .transition(
                         .opacity.combined(with: .scale(scale: 0.94, anchor: .topLeading))
                     )
             }
         }
-        .onPreferenceChange(LinkHoverAnchorPreferenceKey.self) { value in
+        .onAppear { displayed = hover }
+        .onChange(of: hover) { _, new in
             withAnimation(.easeOut(duration: 0.16)) {
-                hover = value
+                displayed = new
             }
         }
     }
