@@ -31,6 +31,11 @@ struct TreeBrowserView: View {
     /// LumiPreferences in a follow-up.
     @State private var parentColumnWidth: CGFloat = 220
     @State private var previewColumnWidth: CGFloat = 420
+    /// Scroll coordinator for the preview column so uppercase J/K can
+    /// glide the preview without the cursor leaving the current
+    /// column. Same ReadModeCoordinator used by the note pane —
+    /// shared smooth-scroll behaviour.
+    @State private var previewCoord = ReadModeCoordinator()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -62,7 +67,10 @@ struct TreeBrowserView: View {
         .focusable()
         .focused($focused)
         .onAppear { focused = true }
-        .onKeyPress(phases: .down) { press in
+        // `.repeat` catches auto-fired keydowns when the user holds
+        // j / k — without it, navigation steps once per discrete press
+        // and the user has to mash the key to traverse a long folder.
+        .onKeyPress(phases: [.down, .repeat]) { press in
             handleKey(press)
         }
         #endif
@@ -123,7 +131,11 @@ struct TreeBrowserView: View {
     @ViewBuilder
     private var previewColumn: some View {
         ColumnContainer(width: nil) {
-            PreviewPane(item: state.selectedItem, baseURL: previewBaseURL)
+            PreviewPane(
+                item: state.selectedItem,
+                baseURL: previewBaseURL,
+                coordinator: previewCoord
+            )
         }
     }
 
@@ -220,6 +232,21 @@ struct TreeBrowserView: View {
     #if os(macOS)
     private func handleKey(_ press: KeyPress) -> KeyPress.Result {
         guard appState.preferences.vimNavigationInList else { return .ignored }
+        // Uppercase variants (Shift + J/K) glide the preview column
+        // without disturbing the cursor in the current column —
+        // mirrors yazi's behaviour where you can peek deeper into a
+        // long preview while still moving in the active list.
+        if press.modifiers.contains(.shift) {
+            switch press.characters {
+            case "J":
+                previewCoord.glide(by: 60); return .handled
+            case "K":
+                previewCoord.glide(by: -60); return .handled
+            case "G":
+                state.moveCursorToEnd(); return .handled
+            default: break
+            }
+        }
         switch press.characters {
         case "j":
             state.moveCursor(by: 1); return .handled
@@ -483,11 +510,18 @@ private struct ColumnList: View {
 private struct PreviewPane: View {
     let item: FolderNode.Item?
     let baseURL: URL?
+    /// Driven by uppercase J/K in the parent browser so the user can
+    /// glide the preview without leaving the active column.
+    let coordinator: ReadModeCoordinator
     @Environment(\.theme) private var theme
     @State private var noteExcerpt: NoteExcerpt?
 
     var body: some View {
-        ScrollView {
+        // Wrapped in NSScrollView via NativeScrollHost so the
+        // ReadModeCoordinator can call `glide` / `scrollTo` against
+        // it; SwiftUI's ScrollView has no equivalent programmatic
+        // scroll API on macOS 15.
+        NativeScrollHost(coordinator: coordinator) {
             VStack(alignment: .leading, spacing: 8) {
                 switch item {
                 case nil:

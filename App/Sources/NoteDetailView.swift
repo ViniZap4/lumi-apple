@@ -535,7 +535,7 @@ import AppKit
 /// handlers can call scroll methods directly. Without this, key events
 /// would never reach an `NSScrollView.keyDown` override because the hosted
 /// SwiftUI subtree always grabs first-responder for itself.
-private struct NativeScrollHost<Content: View>: NSViewRepresentable {
+struct NativeScrollHost<Content: View>: NSViewRepresentable {
     /// Injected from the wrapping view's @State. SwiftUI's
     /// NSViewRepresentable lifecycle calls `makeCoordinator()` once at
     /// the start of the view's life; if we created the Coordinator

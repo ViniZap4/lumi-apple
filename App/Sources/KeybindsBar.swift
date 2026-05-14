@@ -84,6 +84,9 @@ struct KeybindsBar: View {
                     .init(key: "gg", label: "top"),
                     .init(key: "G", label: "bottom"),
                 ],
+                [   // preview
+                    .init(key: "J/K", label: "preview ↑↓"),
+                ],
                 [   // app
                     .init(key: "⌘O", label: "switcher"),
                     .init(key: "⌘E", label: "edit"),
