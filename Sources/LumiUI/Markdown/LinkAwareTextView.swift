@@ -5,28 +5,23 @@ import LumiKit
 import AppKit
 
 /// NSTextView-backed renderer for markdown paragraphs and headings that
-/// contain at least one link. We use it instead of SwiftUI's `Text` for
-/// two reasons:
+/// contain at least one link. Same shape as before, with two refinements:
 ///
-/// 1. **Cursor precision.** SwiftUI's `Text(...).textSelection(.enabled)`
-///    forces the I-beam over the entire text glyph run on macOS, which
-///    fights any `.onHover` cursor swap a parent installs — the
-///    pointing-hand we tried to set in F.40 came and went as the system
-///    re-asserted I-beam. NSTextView handles this natively via
-///    `linkTextAttributes[.cursor]`: pointing-hand over link characters,
-///    I-beam over surrounding text.
+/// 1. **Cursor precision.** `linkTextAttributes[.cursor]` puts the
+///    pointing-hand under link glyphs and the I-beam everywhere else,
+///    which SwiftUI's Text path can't manage natively (the
+///    `.textSelection(.enabled)` I-beam fought the `.onHover` cursor
+///    swap and the two visually raced).
 ///
-/// 2. **Click latency.** Links inside a SwiftUI Text route through
-///    SwiftUI's `OpenURLAction` chain (async, env-walked). NSTextView's
-///    `textView(_:clickedOnLink:at:)` delegate callback is synchronous
-///    and lands in the same runloop pass as the click event itself, so
-///    in-app note navigation feels immediate.
-///
-/// Sizing follows the same self-measuring pattern `KaTeXParagraphView`
-/// uses: NSTextView lays out into its container, reports the used
-/// height back via a closure, the SwiftUI host snaps to it. The width
-/// is constrained by `.frame(maxWidth: .infinity)` and a per-update
-/// container resize.
+/// 2. **Themed hover tooltip.** AppKit's native tooltip is unstyled
+///    (light-yellow popover, system font, decoded `file://` path) and
+///    can't be themed. We disable it and ship a SwiftUI overlay that
+///    matches the lumi theme: `theme.overlayBackground` fill,
+///    `theme.border` outline, monospaced caption, drop shadow, and a
+///    fade-in / scale animation when it appears. Link rects come from
+///    the NSTextView's layout manager; SwiftUI's `.onContinuousHover`
+///    in local coords picks the rect under the cursor, and a 350 ms
+///    Task delay keeps micro-movements from popping the bubble.
 public struct LinkAwareTextView: View {
     public let attributed: AttributedString
     public let fontSize: CGFloat
@@ -36,6 +31,18 @@ public struct LinkAwareTextView: View {
     @Environment(\.markdownLinkAction) private var linkAction
     @Environment(\.markdownVaultRoot) private var vaultRoot
     @State private var measuredHeight: CGFloat = 22
+    /// Most recently computed per-line-fragment link rects, in local
+    /// SwiftUI coordinates (which match the NSTextView's bounds since
+    /// we frame them 1:1). Published from the Representable via the
+    /// `onLinkRects` callback below.
+    @State private var linkRects: [LinkRect] = []
+    /// Active hover, set when the cursor sits on a link rect for at
+    /// least `tooltipDelay`. Nil means no tooltip rendered.
+    @State private var hover: LinkHover? = nil
+    /// In-flight task that turns a hovered rect into a visible tooltip
+    /// after the delay. Cancelled on every cursor move so flicks across
+    /// links don't queue a backlog of bubbles.
+    @State private var pendingShow: Task<Void, Never>? = nil
 
     public init(
         attributed: AttributedString,
@@ -50,22 +57,148 @@ public struct LinkAwareTextView: View {
     }
 
     public var body: some View {
-        LinkAwareNSTextViewRepresentable(
-            attributed: attributed,
-            fontSize: fontSize,
-            fontWeight: fontWeight,
-            lineSpacing: lineSpacing,
-            theme: theme,
-            linkAction: linkAction,
-            vaultRoot: vaultRoot,
-            onHeight: { h in
-                if h > 1, abs(h - measuredHeight) > 0.5 {
-                    measuredHeight = h
+        ZStack(alignment: .topLeading) {
+            LinkAwareNSTextViewRepresentable(
+                attributed: attributed,
+                fontSize: fontSize,
+                fontWeight: fontWeight,
+                lineSpacing: lineSpacing,
+                theme: theme,
+                linkAction: linkAction,
+                vaultRoot: vaultRoot,
+                onHeight: { h in
+                    if h > 1, abs(h - measuredHeight) > 0.5 {
+                        measuredHeight = h
+                    }
+                },
+                onLinkRects: { rects in
+                    if rects != linkRects {
+                        linkRects = rects
+                    }
                 }
+            )
+
+            if let hover {
+                LinkTooltipBubble(label: hover.label)
+                    .fixedSize()
+                    .position(
+                        x: max(60, min(measuredWidth - 60, hover.anchor.midX)),
+                        y: hover.anchor.maxY + 22
+                    )
+                    .transition(
+                        .opacity.combined(with: .scale(scale: 0.92, anchor: .top))
+                    )
+                    .allowsHitTesting(false)
             }
-        )
+        }
         .frame(height: measuredHeight)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(WidthReporter(width: $measuredWidth))
+        .onContinuousHover(coordinateSpace: .local) { phase in
+            switch phase {
+            case let .active(point):
+                handleHover(at: point)
+            case .ended:
+                cancelHover()
+            }
+        }
+        .animation(.easeOut(duration: 0.16), value: hover)
+    }
+
+    @State private var measuredWidth: CGFloat = 0
+
+    /// Resolve hover phase into either a delayed-show task or a hide.
+    private func handleHover(at point: CGPoint) {
+        let match = linkRects.first { $0.rect.contains(point) }
+        if let match {
+            // Already showing this exact link's tooltip — nothing to do.
+            if hover?.id == match.id { return }
+            // Different link / brand new hover — restart the delay.
+            pendingShow?.cancel()
+            pendingShow = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 280_000_000) // ~280 ms
+                if Task.isCancelled { return }
+                withAnimation(.easeOut(duration: 0.16)) {
+                    hover = LinkHover(id: match.id, label: match.label, anchor: match.rect)
+                }
+            }
+        } else {
+            cancelHover()
+        }
+    }
+
+    private func cancelHover() {
+        pendingShow?.cancel()
+        pendingShow = nil
+        if hover != nil {
+            withAnimation(.easeOut(duration: 0.10)) { hover = nil }
+        }
+    }
+}
+
+/// One link's hit rect + display label, in SwiftUI local coordinates.
+/// `id` is the byte range start so quick wiggles within the same link
+/// don't restart the tooltip delay.
+public struct LinkRect: Hashable, Sendable {
+    public let id: Int
+    public let rect: CGRect
+    public let label: String
+}
+
+private struct LinkHover: Hashable {
+    let id: Int
+    let label: String
+    let anchor: CGRect
+}
+
+/// The styled bubble itself. Matches the rest of the app: themed
+/// background, monospaced caption text, thin border, soft drop
+/// shadow. `.fixedSize()` lets the bubble grow to its content's
+/// width up to a sane cap and wrap to multiple lines when the path
+/// is deep.
+private struct LinkTooltipBubble: View {
+    let label: String
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        Text(label)
+            .font(.system(.caption2, design: .monospaced))
+            .foregroundStyle(theme.text)
+            .lineLimit(3)
+            .multilineTextAlignment(.leading)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(theme.overlayBackground)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(theme.border.opacity(0.7), lineWidth: 0.5)
+            )
+            .shadow(color: .black.opacity(0.32), radius: 8, x: 0, y: 3)
+            .frame(maxWidth: 360, alignment: .leading)
+    }
+}
+
+/// Background reporter that publishes the host view's width through a
+/// PreferenceKey. We use it to clamp the tooltip's centre so a hover at
+/// the left or right edge of a paragraph doesn't shoot the bubble out
+/// of frame.
+private struct WidthReporter: View {
+    @Binding var width: CGFloat
+    var body: some View {
+        GeometryReader { proxy in
+            Color.clear.preference(key: WidthPreferenceKey.self, value: proxy.size.width)
+        }
+        .onPreferenceChange(WidthPreferenceKey.self) { width = $0 }
+    }
+}
+
+private struct WidthPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
@@ -78,6 +211,7 @@ private struct LinkAwareNSTextViewRepresentable: NSViewRepresentable {
     let linkAction: MarkdownLinkAction
     let vaultRoot: URL?
     let onHeight: (CGFloat) -> Void
+    let onLinkRects: ([LinkRect]) -> Void
 
     func makeNSView(context: Context) -> SelfSizingTextView {
         let textView = SelfSizingTextView()
@@ -91,7 +225,7 @@ private struct LinkAwareNSTextViewRepresentable: NSViewRepresentable {
         textView.isVerticallyResizable = true
         textView.autoresizingMask = [.width]
         textView.delegate = context.coordinator
-        textView.tooltipProvider = context.coordinator
+        textView.linkRectsProvider = context.coordinator
         textView.onHeightChange = { h in
             // Hop to main async so we don't mutate SwiftUI state from
             // inside the layout pass that triggered the height update.
@@ -104,11 +238,12 @@ private struct LinkAwareNSTextViewRepresentable: NSViewRepresentable {
     func updateNSView(_ nsView: SelfSizingTextView, context: Context) {
         context.coordinator.linkAction = linkAction
         context.coordinator.vaultRoot = vaultRoot
+        context.coordinator.onLinkRects = onLinkRects
         applyAttributes(to: nsView, context: context)
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(linkAction: linkAction, vaultRoot: vaultRoot)
+        Coordinator(linkAction: linkAction, vaultRoot: vaultRoot, onLinkRects: onLinkRects)
     }
 
     private func applyAttributes(to textView: SelfSizingTextView, context: Context) {
@@ -130,101 +265,150 @@ private struct LinkAwareNSTextViewRepresentable: NSViewRepresentable {
             .cursor: NSCursor.pointingHand
         ]
         textView.textStorage?.setAttributedString(ns)
-        textView.refreshLinkTooltips(coordinator: context.coordinator)
+        textView.refreshLinkRects(coordinator: context.coordinator)
         textView.scheduleHeightReport()
     }
 
-    final class Coordinator: NSObject, NSTextViewDelegate, LinkTooltipProvider {
+    @MainActor
+    final class Coordinator: NSObject, NSTextViewDelegate, LinkRectsProvider {
         var linkAction: MarkdownLinkAction
         var vaultRoot: URL?
-        /// Most-recently-computed per-link rect → tooltip string map.
-        /// Refreshed every time `refreshLinkTooltips` runs (after each
-        /// attribute pass). Used to answer `view(_:stringForToolTip:point:userData:)`.
-        var linkTooltipRects: [(rect: NSRect, label: String)] = []
+        var onLinkRects: ([LinkRect]) -> Void
 
-        init(linkAction: MarkdownLinkAction, vaultRoot: URL?) {
+        init(linkAction: MarkdownLinkAction, vaultRoot: URL?, onLinkRects: @escaping ([LinkRect]) -> Void) {
             self.linkAction = linkAction
             self.vaultRoot = vaultRoot
+            self.onLinkRects = onLinkRects
         }
 
         func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
-            let url: URL?
-            switch link {
-            case let direct as URL: url = direct
-            case let str as String: url = URL(string: str)
-            default: url = nil
-            }
+            let url = resolveURL(link)
             guard let url else { return false }
             return MainActor.assumeIsolated {
                 linkAction.handle(url)
             }
         }
 
-        // MARK: - Tooltip
+        // Suppress NSTextView's default link tooltip — we render our
+        // own SwiftUI overlay instead.
+        func textView(_ textView: NSTextView, willDisplayToolTip tooltip: String, forCharacterAt characterIndex: Int) -> String? {
+            nil
+        }
 
-        func tooltipString(for point: NSPoint) -> String? {
-            for entry in linkTooltipRects where entry.rect.contains(point) {
-                return entry.label
+        func publish(_ rects: [LinkRect]) {
+            // NSTextView layout always runs on the main thread, so the
+            // SwiftUI @State mutation that follows is safe — we just
+            // need to satisfy Swift 6 strict concurrency about where
+            // `onLinkRects` is invoked from. `MainActor.assumeIsolated`
+            // is the contract: "I promise we're already on the main
+            // actor", and AppKit guarantees that here.
+            MainActor.assumeIsolated {
+                onLinkRects(rects)
             }
-            return nil
         }
 
         /// Resolve a link URL into a display label for the hover
         /// tooltip. In-vault `file://*.md` URLs become vault-relative
-        /// paths (`./subfolder/note.md`); external URLs surface as
-        /// their `absoluteString`; everything else falls back to
-        /// `path`.
-        func tooltipLabel(for url: URL) -> String {
-            if url.isFileURL {
-                if let vaultRoot {
-                    let vaultPath = vaultRoot.standardizedFileURL.path
-                    let urlPath = url.standardizedFileURL.path
-                    let prefix = vaultPath.hasSuffix("/") ? vaultPath : vaultPath + "/"
-                    if urlPath == vaultPath {
-                        return "./"
-                    }
-                    if urlPath.hasPrefix(prefix) {
-                        return "./" + String(urlPath.dropFirst(prefix.count))
-                    }
+        /// paths (`./subfolder/note.md`); local files outside the
+        /// vault collapse to `~/`-prefixed paths; external URLs
+        /// surface as their `absoluteString`. We accept both `URL` and
+        /// `String` forms because `URL(string:)` of a path containing
+        /// unencoded chars returns nil in modern Foundation — in that
+        /// case we fall back to treating the string as a path.
+        func tooltipLabel(for raw: Any) -> String? {
+            if let url = raw as? URL {
+                return tooltipLabel(forURL: url, fallback: url.absoluteString)
+            }
+            if let str = raw as? String {
+                if let url = URL(string: str) {
+                    return tooltipLabel(forURL: url, fallback: str)
                 }
-                let home = NSHomeDirectory()
-                if url.path.hasPrefix(home + "/") {
-                    return "~/" + String(url.path.dropFirst(home.count + 1))
-                }
-                return url.path
+                return prettifyPath(str)
+            }
+            return nil
+        }
+
+        private func tooltipLabel(forURL url: URL, fallback: String) -> String {
+            let scheme = url.scheme?.lowercased() ?? ""
+            // Treat both `URL.isFileURL` and explicit `file://` strings
+            // as file URLs. The Foundation API drifts between them
+            // depending on how the URL was constructed (file:// strings
+            // parsed via `URL(string:)` may report isFileURL=false on
+            // some toolchains).
+            let isFile = url.isFileURL || scheme == "file"
+            if isFile {
+                return prettifyPath(url.path.isEmpty ? fallback : url.path)
+            }
+            if scheme.isEmpty {
+                return prettifyPath(fallback)
             }
             return url.absoluteString
+        }
+
+        /// Collapse vault root → `./`, home → `~/`. Idempotent on
+        /// already-prettified inputs.
+        private func prettifyPath(_ raw: String) -> String {
+            var path = raw
+            if path.hasPrefix("file://") {
+                path = String(path.dropFirst("file://".count))
+                if let decoded = path.removingPercentEncoding { path = decoded }
+            }
+            if let vaultRoot {
+                let vaultPath = vaultRoot.standardizedFileURL.path
+                let prefix = vaultPath.hasSuffix("/") ? vaultPath : vaultPath + "/"
+                if path == vaultPath {
+                    return "./"
+                }
+                if path.hasPrefix(prefix) {
+                    return "./" + String(path.dropFirst(prefix.count))
+                }
+            }
+            let home = NSHomeDirectory()
+            if path.hasPrefix(home + "/") {
+                return "~/" + String(path.dropFirst(home.count + 1))
+            }
+            return path
         }
     }
 }
 
-/// Protocol the NSTextView calls when AppKit asks for tooltip text.
-/// Decoupled so the text view's tooltip lookup doesn't need to know
-/// about SwiftUI types or the coordinator's storage shape.
-protocol LinkTooltipProvider: AnyObject {
-    func tooltipString(for point: NSPoint) -> String?
-    func tooltipLabel(for url: URL) -> String
+private func resolveURL(_ link: Any) -> URL? {
+    switch link {
+    case let direct as URL: return direct
+    case let str as String: return URL(string: str)
+    default: return nil
+    }
 }
 
-/// NSTextView subclass that reports its laid-out height back via a
-/// closure. The closure fires on every layout pass that produces a
-/// different used-rect height — the SwiftUI host uses that to size
-/// itself, so the text view never shows blank padding at the bottom
-/// or clips its last line.
+/// Protocol the NSTextView calls back to when it has freshly-laid-out
+/// link rects. Decoupled so the view doesn't need to know about
+/// SwiftUI state. Annotated `@MainActor` because AppKit views live on
+/// the main thread and the SwiftUI side that consumes the rects does
+/// too — keeping the protocol main-actor-isolated lets the Coordinator
+/// conform without Swift 6 sending-self diagnostics.
+@MainActor
+protocol LinkRectsProvider: AnyObject {
+    func publish(_ rects: [LinkRect])
+    func tooltipLabel(for raw: Any) -> String?
+}
+
+/// NSTextView subclass that:
+///   - reports its laid-out height back via a closure
+///   - publishes per-line-fragment link rects with display labels
 final class SelfSizingTextView: NSTextView {
     var onHeightChange: ((CGFloat) -> Void)?
-    weak var tooltipProvider: LinkTooltipProvider?
+    weak var linkRectsProvider: LinkRectsProvider?
     private var lastReported: CGFloat = -1
+    private var lastPublishedRects: [LinkRect] = []
 
     override func layout() {
         super.layout()
         scheduleHeightReport()
-        // Tooltip rects depend on layout geometry — re-register them
-        // every time AppKit re-runs the layout pass so window-resize
-        // and font-load reflows keep the hover targets aligned with
-        // the visible link glyphs.
-        if let provider = tooltipProvider as? AnyObject as? LinkAwareNSTextViewRepresentable.Coordinator {
-            refreshLinkTooltips(coordinator: provider)
+        // Layout geometry changed (window resize, font load reflow,
+        // wrap break) — re-emit the link rects so the SwiftUI tooltip
+        // tracks the new positions.
+        if let provider = linkRectsProvider {
+            refreshLinkRects(coordinator: provider)
         }
     }
 
@@ -240,58 +424,40 @@ final class SelfSizingTextView: NSTextView {
     }
 
     /// Walk the text storage, find every `.link` attribute run, compute
-    /// its bounding rect in view coordinates, and register an AppKit
-    /// tooltip rect for it. The tooltip body resolves at hover time via
-    /// the coordinator's `tooltipString(for:)` — that way the rect can
-    /// move (re-layout) without re-registering the strings.
-    fileprivate func refreshLinkTooltips(coordinator: LinkAwareNSTextViewRepresentable.Coordinator) {
-        removeAllToolTips()
-        coordinator.linkTooltipRects.removeAll(keepingCapacity: true)
+    /// its bounding rect in view coordinates, and hand the list to the
+    /// SwiftUI side via the coordinator. The SwiftUI host's
+    /// `.onContinuousHover` then knows which link the cursor is over
+    /// and renders the themed tooltip — no AppKit popover involved.
+    func refreshLinkRects(coordinator: LinkRectsProvider) {
         guard let storage = textStorage,
               let layoutManager,
               let textContainer
         else { return }
 
         layoutManager.ensureLayout(for: textContainer)
+        var rects: [LinkRect] = []
         let fullRange = NSRange(location: 0, length: storage.length)
         storage.enumerateAttribute(.link, in: fullRange, options: []) { value, range, _ in
-            let url: URL?
-            switch value {
-            case let direct as URL: url = direct
-            case let str as String: url = URL(string: str)
-            default: url = nil
-            }
-            guard let url else { return }
-            let label = coordinator.tooltipLabel(for: url)
-            // A single link can span multiple line fragments inside a
-            // wrapping paragraph; enumerate fragments so each visual
-            // chunk gets its own tooltip rect.
+            guard let value, let label = coordinator.tooltipLabel(for: value) else { return }
             let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
             layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) { _, _, _, lineGlyphRange, _ in
                 let used = lineGlyphRange.intersection(glyphRange) ?? lineGlyphRange
                 guard used.length > 0 else { return }
                 let rect = layoutManager.boundingRect(forGlyphRange: used, in: textContainer)
                 let inset = self.textContainerInset
-                let viewRect = NSRect(
+                let viewRect = CGRect(
                     x: rect.origin.x + inset.width,
                     y: rect.origin.y + inset.height,
                     width: rect.width,
                     height: rect.height
                 )
-                coordinator.linkTooltipRects.append((rect: viewRect, label: label))
-                self.addToolTip(viewRect, owner: self, userData: nil)
+                rects.append(LinkRect(id: range.location, rect: viewRect, label: label))
             }
         }
-    }
-
-    /// AppKit calls this whenever the cursor sits on a registered
-    /// tooltip rect for the system delay (~0.5 s). Returning a string
-    /// shows the native tooltip popover, which fades in/out via
-    /// AppKit's standard animation. The method comes from
-    /// `NSToolTipOwner` (a Foundation protocol), not from NSView's own
-    /// surface — so we implement it without `override`.
-    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData: UnsafeMutableRawPointer?) -> String {
-        tooltipProvider?.tooltipString(for: point) ?? ""
+        if rects != lastPublishedRects {
+            lastPublishedRects = rects
+            coordinator.publish(rects)
+        }
     }
 }
 #endif
