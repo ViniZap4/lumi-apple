@@ -58,12 +58,13 @@ struct RootView: View {
                 .disabled(appState.rootFolder == nil)
             }
             #endif
-            // Read / edit toggle for the active note. Lives in the global
-            // toolbar so all chrome is centralized at the top of the window;
-            // hidden when no note is open. Cmd+E flips it from anywhere.
+            // Note chrome — read/edit picker, vim mode pill, status, save.
+            // All collected in the .principal slot so the entire top bar
+            // is the home for note controls; the in-pane status row is
+            // gone.
             if appState.selectedEntry != nil {
                 ToolbarItem(placement: .principal) {
-                    HStack(spacing: 12) {
+                    HStack(spacing: 10) {
                         Picker("Mode", selection: $bound.editorMode) {
                             Image(systemName: "doc.text").tag(NoteDisplayMode.view)
                             Image(systemName: "square.and.pencil").tag(NoteDisplayMode.edit)
@@ -74,7 +75,24 @@ struct RootView: View {
                         if appState.editorMode == .edit {
                             ToolbarVimModeBadge(mode: appState.liveVimMode)
                         }
+                        ToolbarStatusLabel(editor: appState.editor)
+                        Button {
+                            appState.editor.save()
+                        } label: {
+                            Image(systemName: "checkmark.circle.fill")
+                        }
+                        .keyboardShortcut("s", modifiers: .command)
+                        .disabled(!appState.editor.isDirty)
+                        .help("Save (⌘S)")
                     }
+                }
+            }
+            // Reading layout (font scale + max width). Only meaningful when
+            // a note is open in read mode — hidden otherwise to keep the
+            // toolbar quiet.
+            if appState.selectedEntry != nil, appState.editorMode == .view {
+                ToolbarItem(placement: .primaryAction) {
+                    ReadingLayoutMenu(preferences: appState.preferences)
                 }
             }
             ToolbarItem(placement: .primaryAction) {
@@ -171,11 +189,14 @@ struct RootView: View {
         }
         appState.setSession(session)
         let root = session.rootFolder()
-        root.loadIfNeeded()
         appState.rootFolder = root
         appState.browserState = TreeBrowserState(root: root)
         appState.selectedVaultID = record.id
         record.lastOpenedAt = Date()
+        // Kick the directory walk off the main actor. The browser renders
+        // its loading state until `root.items` populates and `@Observable`
+        // republishes the view.
+        Task { await root.loadIfNeededAsync() }
     }
 
     /// Tell the bottom keybinds bar which set of hints to show based on
@@ -215,6 +236,7 @@ struct RootView: View {
 
 /// Compact vim mode label for the global toolbar — same color logic as the
 /// in-pane badge but smaller padding so it doesn't bloat the title bar.
+/// Fully rounded (Capsule) for a pill look.
 private struct ToolbarVimModeBadge: View {
     let mode: VimMode
     @Environment(\.theme) private var theme
@@ -223,12 +245,9 @@ private struct ToolbarVimModeBadge: View {
         let (label, color) = parts
         Text(label)
             .font(.system(.caption2, design: .monospaced).weight(.bold))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(
-                RoundedRectangle(cornerRadius: 3, style: .continuous)
-                    .fill(color)
-            )
+            .padding(.horizontal, 9)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(color))
             .foregroundStyle(theme.background)
             .help("Vim mode")
     }
@@ -239,6 +258,70 @@ private struct ToolbarVimModeBadge: View {
         case .insert: return ("INSERT", theme.primary)
         case .visual: return (mode.label, theme.warning)
         case let .commandLine(prefix, _): return (String(prefix), theme.accent)
+        }
+    }
+}
+
+/// Read-mode appearance controls: font scale and column width. Lives in
+/// the toolbar so users can tweak the layout without diving into Settings.
+/// Bindings flow through `LumiPreferences` so the values persist.
+private struct ReadingLayoutMenu: View {
+    @Bindable var preferences: LumiPreferences
+
+    var body: some View {
+        Menu {
+            Section("Text size") {
+                Button("Small")     { preferences.readingScale = 0.9 }
+                Button("Default")   { preferences.readingScale = 1.0 }
+                Button("Large")     { preferences.readingScale = 1.15 }
+                Button("Extra large") { preferences.readingScale = 1.3 }
+            }
+            Section("Width") {
+                Button("Narrow (640)") { preferences.readingWidth = 640 }
+                Button("Default (760)") { preferences.readingWidth = 760 }
+                Button("Wide (900)") { preferences.readingWidth = 900 }
+                Button("Full (1100)") { preferences.readingWidth = 1100 }
+            }
+        } label: {
+            Image(systemName: "textformat.size")
+        }
+        .help("Reading layout (text size & width)")
+    }
+}
+
+/// Inline editor-status indicator for the toolbar (modified / saved /
+/// conflict / error). Smaller than the in-pane version since space is
+/// tight up here; uses the same icon + color vocabulary.
+private struct ToolbarStatusLabel: View {
+    let editor: EditorState
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        let (icon, label, color) = parts
+        HStack(spacing: 4) {
+            if let icon {
+                Image(systemName: icon)
+                    .imageScale(.small)
+            }
+            Text(label)
+                .font(.system(.caption2, design: .monospaced))
+        }
+        .foregroundStyle(color)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(theme.overlayBackground))
+    }
+
+    private var parts: (icon: String?, label: String, color: Color) {
+        if editor.isDirty {
+            return ("circle.fill", "modified", theme.warning)
+        }
+        switch editor.status {
+        case .saved: return ("checkmark.circle", "saved", theme.info)
+        case .saving: return ("arrow.up.doc", "saving…", theme.textDim)
+        case .conflict: return ("exclamationmark.triangle", "conflict", theme.error)
+        case .error: return ("xmark.circle", "error", theme.error)
+        case .idle, .loaded: return (nil, "ready", theme.textDim)
         }
     }
 }

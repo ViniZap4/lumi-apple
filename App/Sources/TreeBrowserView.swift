@@ -207,8 +207,8 @@ struct TreeBrowserView: View {
     private func activate(_ item: FolderNode.Item) {
         switch item {
         case .folder(let f):
-            f.loadIfNeeded()
             state.pathStack.append(f)
+            Task { await f.loadIfNeededAsync() }
             // Resets the cursor for the new folder unless we remembered it.
             // State.cursor getter/setter handles the lookup.
         case .note(let n):
@@ -434,7 +434,7 @@ private struct PreviewPane: View {
     private func handleItemChange() {
         switch item {
         case .folder(let f):
-            f.loadIfNeeded()
+            Task { await f.loadIfNeededAsync() }
         case .note(let n):
             noteExcerpt = NoteExcerpt.load(from: n.url)
         case nil:

@@ -21,8 +21,11 @@ final class TreeBrowserState {
     private var cursorPerFolder: [String: Int] = [:]
 
     init(root: FolderNode) {
-        root.loadIfNeeded()
+        // Kick the directory walk off the main actor. `root.items` reads
+        // as `nil` (loading) until the off-main task completes; the
+        // browser shows its empty/loading state during that window.
         self.pathStack = [root]
+        Task { await root.loadIfNeededAsync() }
     }
 
     var currentFolder: FolderNode { pathStack.last ?? pathStack[0] }
@@ -74,8 +77,8 @@ final class TreeBrowserState {
         guard let item = selectedItem else { return nil }
         switch item {
         case .folder(let f):
-            f.loadIfNeeded()
             pathStack.append(f)
+            Task { await f.loadIfNeededAsync() }
             return nil
         case .note(let n):
             return n

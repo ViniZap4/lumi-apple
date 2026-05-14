@@ -55,17 +55,61 @@ public final class FolderNode: Identifiable {
     }
 
     /// Read the immediate children if not already loaded. Sorted with
-    /// folders before notes, both alphabetical case-insensitive.
+    /// folders before notes, both alphabetical case-insensitive. Synchronous
+    /// — only call from contexts where blocking the caller is acceptable
+    /// (small directories, tests). Prefer `loadIfNeededAsync` from UI code.
     public func loadIfNeeded() {
         guard items == nil, !isLoading else { return }
         reload()
     }
 
-    /// Re-enumerate from disk, replacing any cached items.
+    /// Like `loadIfNeeded` but performs the syscall + entry hydration off
+    /// the main thread. The UI can render an empty / loading state while
+    /// this runs; SwiftUI repaints automatically when `items` is set
+    /// because the type is `@Observable`.
+    public func loadIfNeededAsync() async {
+        guard items == nil, !isLoading else { return }
+        isLoading = true
+        let url = self.url
+        let relativePath = self.relativePath
+        let entries: [LoadedEntry] = await Task.detached(priority: .userInitiated) {
+            FolderNode.enumerateDisk(at: url, relativePath: relativePath)
+        }.value
+        applyEntries(entries)
+    }
+
+    /// Re-enumerate from disk synchronously, replacing any cached items.
     public func reload() {
         isLoading = true
-        defer { isLoading = false }
+        let url = self.url
+        let relativePath = self.relativePath
+        let entries = FolderNode.enumerateDisk(at: url, relativePath: relativePath)
+        applyEntries(entries)
+    }
 
+    /// Re-enumerate asynchronously, replacing cached items. Used by the
+    /// vault watcher / pull-to-refresh.
+    public func reloadAsync() async {
+        isLoading = true
+        let url = self.url
+        let relativePath = self.relativePath
+        let entries: [LoadedEntry] = await Task.detached(priority: .userInitiated) {
+            FolderNode.enumerateDisk(at: url, relativePath: relativePath)
+        }.value
+        applyEntries(entries)
+    }
+
+    /// Sendable snapshot of a single directory entry, produced off-main and
+    /// rehydrated into `Item`s once we're back on the main actor.
+    private struct LoadedEntry: Sendable {
+        let url: URL
+        let relativePath: String
+        let name: String
+        let isDirectory: Bool
+        let mtime: Date
+    }
+
+    nonisolated private static func enumerateDisk(at url: URL, relativePath: String) -> [LoadedEntry] {
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.contentModificationDateKey, .isDirectoryKey, .nameKey]
         guard let entries = try? fm.contentsOfDirectory(
@@ -73,30 +117,40 @@ public final class FolderNode: Identifiable {
             includingPropertiesForKeys: keys,
             options: [.skipsHiddenFiles]
         ) else {
-            items = []
-            return
+            return []
         }
-
-        var folders: [Item] = []
-        var notes: [Item] = []
+        var out: [LoadedEntry] = []
+        out.reserveCapacity(entries.count)
         for entry in entries {
             let resources = try? entry.resourceValues(forKeys: Set(keys))
             let isDir = resources?.isDirectory ?? false
             let mtime = resources?.contentModificationDate ?? Date()
-            let entryRel = relativePath.isEmpty
-                ? entry.lastPathComponent
-                : relativePath + "/" + entry.lastPathComponent
+            let last = entry.lastPathComponent
+            let rel = relativePath.isEmpty ? last : relativePath + "/" + last
             if isDir {
-                folders.append(.folder(FolderNode(
-                    url: entry,
-                    relativePath: entryRel,
-                    name: entry.lastPathComponent
-                )))
+                out.append(LoadedEntry(url: entry, relativePath: rel, name: last, isDirectory: true, mtime: mtime))
             } else if entry.pathExtension.lowercased() == "md" {
+                out.append(LoadedEntry(url: entry, relativePath: rel, name: last, isDirectory: false, mtime: mtime))
+            }
+        }
+        return out
+    }
+
+    private func applyEntries(_ entries: [LoadedEntry]) {
+        var folders: [Item] = []
+        var notes: [Item] = []
+        for entry in entries {
+            if entry.isDirectory {
+                folders.append(.folder(FolderNode(
+                    url: entry.url,
+                    relativePath: entry.relativePath,
+                    name: entry.name
+                )))
+            } else {
                 notes.append(.note(NoteEntry(
-                    url: entry,
-                    relativePath: entryRel,
-                    updatedAt: mtime
+                    url: entry.url,
+                    relativePath: entry.relativePath,
+                    updatedAt: entry.mtime
                 )))
             }
         }
@@ -109,6 +163,7 @@ public final class FolderNode: Identifiable {
             return ln.title.localizedCaseInsensitiveCompare(rn.title) == .orderedAscending
         }
         items = folders + notes
+        isLoading = false
     }
 
     /// Look up a note entry under this folder by relative path (depth-first

@@ -31,16 +31,20 @@ struct NoteDetailView: View {
     var body: some View {
         @Bindable var editor = appState.editor
         VStack(spacing: 0) {
-            // Slim status bar (no mode picker — that's hoisted to the
-            // RootView toolbar so it sits next to the theme/settings/etc.
-            // buttons). Keeps save/conflict status close to the content.
-            DetailStatusBar(
-                editor: editor,
-                onSave: { editor.save() },
-                onReload: { editor.reloadFromDisk(vaultRoot: vaultRoot) },
-                onForceSave: { editor.forceSave() },
-                onDiscard: { editor.discard() }
-            )
+            // All status chrome (modified, saved, conflict label, save
+            // button, vim mode badge, read/edit picker) lives in the
+            // RootView toolbar now. The in-pane DetailStatusBar only
+            // renders for full-width banners (conflict resolution prompt,
+            // error message) — nothing when the editor is happy.
+            if case .conflict = editor.status {
+                ConflictBanner(
+                    onReload: { editor.reloadFromDisk(vaultRoot: vaultRoot) },
+                    onForceSave: { editor.forceSave() },
+                    onDiscard: { editor.discard() }
+                )
+            } else if case let .error(message) = editor.status {
+                ErrorBanner(message: message)
+            }
             content(editor: editor)
         }
         .background(theme.background)
@@ -72,7 +76,9 @@ struct NoteDetailView: View {
                 onEffect: { effect in
                     handleVimEffect(effect, editor: editor)
                 },
-                jjEscapeEnabled: appState.preferences.jjEscapeMapping
+                jjEscapeEnabled: appState.preferences.jjEscapeMapping,
+                showLineNumbers: appState.preferences.showLineNumbers,
+                relativeLineNumbers: appState.preferences.relativeLineNumbers
             )
             .overlay(alignment: .top) {
                 editModeStripe
@@ -183,16 +189,19 @@ private struct MarkdownReader: View {
     let text: String
     let baseURL: URL?
     @Environment(\.theme) private var theme
+    @Environment(AppState.self) private var appState
     @State private var parsed: MarkdownDocument?
     @State private var parsedFor: String = ""
 
+    private var scale: Double { appState.preferences.readingScale }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
+        VStack(alignment: .leading, spacing: 22 * scale) {
             // Header: oversized title + thin tag row + subtle separator.
             // Tight stack so the body's whitespace stays consistent.
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 10 * scale) {
                 Text(title)
-                    .font(.system(size: 30, weight: .bold, design: .default))
+                    .font(.system(size: 34 * scale, weight: .bold, design: .default))
                     .foregroundStyle(theme.primary)
                     .lineSpacing(2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -213,6 +222,7 @@ private struct MarkdownReader: View {
 
             if let parsed {
                 MarkdownView(parsed)
+                    .environment(\.markdownScale, scale)
             } else {
                 Text("loading…")
                     .font(.system(.callout, design: .monospaced))
@@ -221,11 +231,10 @@ private struct MarkdownReader: View {
         }
         .padding(.horizontal, 48)
         .padding(.top, 32)
-        .padding(.bottom, 24)
-        // Narrower max width for comfortable measure — ~70–75 chars of body
-        // at our default size. Centered in the available pane via the
-        // outer infinity frame.
-        .frame(maxWidth: 760, alignment: .leading)
+        .padding(.bottom, 40)
+        // Comfortable measure. Width is user-tunable via the toolbar
+        // ("Reading width") and persists in preferences.
+        .frame(maxWidth: appState.preferences.readingWidth, alignment: .leading)
         .frame(maxWidth: .infinity, alignment: .center)
         .onAppear { reparseIfNeeded() }
         .onChange(of: text) { _, _ in reparseIfNeeded() }
@@ -267,11 +276,14 @@ private struct ReadModeScroll<Content: View>: View {
             // 100ms animations from holding the key would stutter.
             .onKeyPress(phases: [.down, .repeat]) { press in
                 guard jkEnabled else { return .ignored }
-                let lineStep: CGFloat = 24
-                let animated = press.phase == .down
+                // Holding j/k accumulates into a target offset; the
+                // display tick interpolates toward it so the motion stays
+                // smooth instead of stepping. Critical-damping in the
+                // coordinator drains the buffer once the key releases.
+                let lineStep: CGFloat = 22
                 switch press.characters {
-                case "j": host.coordinator.scroll(by: lineStep, animated: animated); return .handled
-                case "k": host.coordinator.scroll(by: -lineStep, animated: animated); return .handled
+                case "j": host.coordinator.glide(by: lineStep); return .handled
+                case "k": host.coordinator.glide(by: -lineStep); return .handled
                 case "d": host.coordinator.scrollHalfPage(direction: 1); return .handled
                 case "u": host.coordinator.scrollHalfPage(direction: -1); return .handled
                 case "g": host.coordinator.scrollTo(.top); return .handled
@@ -344,9 +356,15 @@ private struct NativeScrollHost<Content: View>: NSViewRepresentable {
 
     /// Exposed to the SwiftUI wrapper for keyboard-driven scrolling. Methods
     /// here drive the underlying NSScrollView with native animation.
+    @MainActor
     final class Coordinator {
         var host: NSHostingController<AnyView>?
         weak var scrollView: NSScrollView?
+
+        /// Where we want to be (vertical offset of the clip view's origin).
+        /// `glide` adds to this; `tick` slides the actual offset toward it.
+        private var targetY: CGFloat = 0
+        private var ticker: Timer?
 
         enum Edge { case top, bottom }
 
@@ -370,6 +388,66 @@ private struct NativeScrollHost<Content: View>: NSViewRepresentable {
                 clip.setBoundsOrigin(NSPoint(x: current.x, y: nextY))
                 view.reflectScrolledClipView(clip)
             }
+        }
+
+        /// Velocity-style smooth scroll. Each call bumps the target offset
+        /// and a 60-Hz timer eases the actual offset toward it with
+        /// critical damping. Holding a key keeps the target ahead of the
+        /// current position so motion stays continuous; releasing the key
+        /// stops adding to the target and the timer drains the gap to
+        /// zero — no abrupt stops.
+        func glide(by dy: CGFloat) {
+            guard let view = scrollView,
+                  let doc = view.documentView
+            else { return }
+            let clip = view.contentView
+            let maxY = max(0, doc.bounds.height - clip.bounds.height)
+            // If no tick is running we start from the current offset, not
+            // a stale target.
+            if ticker == nil {
+                targetY = clip.bounds.origin.y
+            }
+            targetY = max(0, min(maxY, targetY + dy))
+            startTickerIfNeeded()
+        }
+
+        private func startTickerIfNeeded() {
+            guard ticker == nil else { return }
+            // Timer callback is non-sendable; bounce onto the main actor
+            // before touching coordinator state. Capture `self` weakly so
+            // a dropped view tears the loop down.
+            let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { _ in
+                Task { @MainActor [weak self] in
+                    self?.tick()
+                }
+            }
+            RunLoop.main.add(t, forMode: .common)
+            ticker = t
+        }
+
+        private func tick() {
+            guard let view = scrollView else { stopTicker(); return }
+            let clip = view.contentView
+            let current = clip.bounds.origin.y
+            let delta = targetY - current
+            // Below half a pixel from target → snap and stop. Avoids the
+            // ticker idling forever on sub-pixel residuals.
+            if abs(delta) < 0.5 {
+                clip.setBoundsOrigin(NSPoint(x: 0, y: targetY))
+                view.reflectScrolledClipView(clip)
+                stopTicker()
+                return
+            }
+            // Critical-damping factor. Lower = smoother but laggier;
+            // higher = snappier. 0.30 feels close to a trackpad scroll.
+            let step = delta * 0.30
+            clip.setBoundsOrigin(NSPoint(x: 0, y: current + step))
+            view.reflectScrolledClipView(clip)
+        }
+
+        private func stopTicker() {
+            ticker?.invalidate()
+            ticker = nil
         }
 
         func scrollHalfPage(direction sign: CGFloat) {

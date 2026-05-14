@@ -94,6 +94,34 @@ public final class LumiPreferences {
         didSet { defaults.set(showKeybindsBar, forKey: Keys.showKeybindsBar) }
     }
 
+    /// Scale factor applied to read-mode typography. 1.0 = default; the UI
+    /// exposes presets via the toolbar (Small / Default / Large / X-Large).
+    /// Clamped to a sane range so it never breaks layout.
+    public var readingScale: Double {
+        didSet {
+            let clamped = max(0.85, min(1.6, readingScale))
+            if clamped != readingScale {
+                readingScale = clamped
+                return
+            }
+            defaults.set(readingScale, forKey: Keys.readingScale)
+        }
+    }
+
+    /// Maximum body width (in pt) for the read pane. Lets users pick a
+    /// narrow newspaper-column measure or a wider editor-style layout.
+    /// Clamped 520…1100.
+    public var readingWidth: Double {
+        didSet {
+            let clamped = max(520, min(1100, readingWidth))
+            if clamped != readingWidth {
+                readingWidth = clamped
+                return
+            }
+            defaults.set(readingWidth, forKey: Keys.readingWidth)
+        }
+    }
+
     /// How the active theme is chosen: explicit dark, explicit light, or
     /// auto-follow the system. Auto uses `defaultLight` for light system
     /// appearance and `defaultDark` otherwise.
@@ -128,6 +156,8 @@ public final class LumiPreferences {
         self.vimBlockCursor = defaults.object(forKey: Keys.vimBlockCursor) as? Bool ?? true
         self.editorSyntaxColor = defaults.object(forKey: Keys.editorSyntaxColor) as? Bool ?? true
         self.showKeybindsBar = defaults.object(forKey: Keys.showKeybindsBar) as? Bool ?? true
+        self.readingScale = defaults.object(forKey: Keys.readingScale) as? Double ?? 1.0
+        self.readingWidth = defaults.object(forKey: Keys.readingWidth) as? Double ?? 760
         let rawTheme = defaults.string(forKey: Keys.themeMode) ?? ThemeMode.auto.rawValue
         self.themeMode = ThemeMode(rawValue: rawTheme) ?? .auto
     }
@@ -145,5 +175,7 @@ public final class LumiPreferences {
         static let editorSyntaxColor = "lumi.pref.editorSyntaxColor.v1"
         static let showKeybindsBar = "lumi.pref.showKeybindsBar.v1"
         static let themeMode = "lumi.pref.themeMode.v1"
+        static let readingScale = "lumi.pref.readingScale.v1"
+        static let readingWidth = "lumi.pref.readingWidth.v1"
     }
 }

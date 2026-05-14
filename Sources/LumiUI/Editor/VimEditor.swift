@@ -10,6 +10,8 @@ public struct VimEditor: View {
     let onModeChange: ((VimMode) -> Void)?
     let onEffect: ((VimEffect) -> Void)?
     let jjEscapeEnabled: Bool
+    let showLineNumbers: Bool
+    let relativeLineNumbers: Bool
 
     @State private var controller: VimController
 
@@ -17,12 +19,16 @@ public struct VimEditor: View {
         text: Binding<String>,
         onModeChange: ((VimMode) -> Void)? = nil,
         onEffect: ((VimEffect) -> Void)? = nil,
-        jjEscapeEnabled: Bool = false
+        jjEscapeEnabled: Bool = false,
+        showLineNumbers: Bool = false,
+        relativeLineNumbers: Bool = false
     ) {
         self._text = text
         self.onModeChange = onModeChange
         self.onEffect = onEffect
         self.jjEscapeEnabled = jjEscapeEnabled
+        self.showLineNumbers = showLineNumbers
+        self.relativeLineNumbers = relativeLineNumbers
         self._controller = State(initialValue: VimController(initialText: text.wrappedValue))
     }
 
@@ -36,7 +42,9 @@ public struct VimEditor: View {
                 isInsertMode: controller.state.mode == .insert,
                 highlights: controller.searchHighlights,
                 controller: controller,
-                theme: theme
+                theme: theme,
+                showLineNumbers: showLineNumbers,
+                relativeLineNumbers: relativeLineNumbers
             )
             if case let .commandLine(prefix, buffer) = controller.state.mode {
                 VimCommandLineOverlay(prefix: prefix, buffer: buffer)

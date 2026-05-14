@@ -1,18 +1,33 @@
 import SwiftUI
 import LumiKit
 
+/// Scale factor applied to all markdown typography. The read pane injects
+/// this from `preferences.readingScale` so users can resize on the fly. The
+/// default 1.0 matches the prior hard-coded sizes.
+public struct MarkdownScaleKey: EnvironmentKey {
+    public static let defaultValue: Double = 1.0
+}
+
+public extension EnvironmentValues {
+    var markdownScale: Double {
+        get { self[MarkdownScaleKey.self] }
+        set { self[MarkdownScaleKey.self] = newValue }
+    }
+}
+
 /// Top-level markdown renderer. Consumes a `MarkdownDocument` and lays out
 /// blocks vertically. Links open via the system handler; media gets dispatched
 /// to dedicated views (video player, PDF viewer, embed).
 public struct MarkdownView: View {
     public let document: MarkdownDocument
+    @Environment(\.markdownScale) private var scale
 
     public init(_ document: MarkdownDocument) {
         self.document = document
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 14 * scale) {
             ForEach(Array(document.blocks.enumerated()), id: \.offset) { _, block in
                 BlockView(block: block)
             }
@@ -24,6 +39,7 @@ public struct MarkdownView: View {
 struct BlockView: View {
     let block: MarkdownBlock
     @Environment(\.theme) private var theme
+    @Environment(\.markdownScale) private var scale
 
     var body: some View {
         switch block {
@@ -31,13 +47,14 @@ struct BlockView: View {
             Text(InlineRenderer.render(inline, theme: theme))
                 .font(headingFont(level))
                 .foregroundStyle(theme.text)
-                .padding(.top, level <= 2 ? 8 : 4)
+                .padding(.top, (level <= 2 ? 8 : 4) * scale)
 
         case let .paragraph(inline):
             Text(InlineRenderer.render(inline, theme: theme))
-                .font(.body)
+                .font(.system(size: 15 * scale))
                 .foregroundStyle(theme.text)
                 .textSelection(.enabled)
+                .lineSpacing(3 * scale)
 
         case let .codeBlock(language, code):
             CodeBlockView(language: language, code: code)
@@ -63,13 +80,16 @@ struct BlockView: View {
     }
 
     private func headingFont(_ level: Int) -> Font {
+        let base: CGFloat
         switch level {
-        case 1: return .system(size: 28, weight: .semibold)
-        case 2: return .system(size: 22, weight: .semibold)
-        case 3: return .system(size: 18, weight: .semibold)
-        case 4: return .system(size: 16, weight: .semibold)
-        default: return .system(size: 14, weight: .semibold)
+        case 1: base = 30
+        case 2: base = 24
+        case 3: base = 19
+        case 4: base = 17
+        case 5: base = 15
+        default: base = 14
         }
+        return .system(size: base * scale, weight: .semibold)
     }
 }
 

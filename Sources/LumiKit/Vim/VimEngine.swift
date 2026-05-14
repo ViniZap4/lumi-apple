@@ -370,6 +370,19 @@ public enum VimEngine {
         if char == "n" || char == "N" {
             return resolveSearchRepeat(char: char, state: state, buffer: buffer)
         }
+        // Search word under cursor: `*` forward, `#` backward. Mirrors
+        // vim's behavior — wraps the word in `\b…\b` so partial matches
+        // (e.g. `foo` matching `foobar`) don't trigger.
+        if char == "*" || char == "#" {
+            let dir: SearchDirection = (char == "*") ? .forward : .backward
+            guard let word = wordUnderCursor(in: buffer) else {
+                state.pendingCount = nil
+                return Result(state: state, buffer: buffer)
+            }
+            let pattern = "\\b" + NSRegularExpression.escapedPattern(for: word) + "\\b"
+            state.pendingCount = nil
+            return resolveSearch(direction: dir, pattern: pattern, state: state, buffer: buffer)
+        }
 
         // Operators — set pending and wait for motion.
         switch char {
@@ -1752,5 +1765,31 @@ public enum VimEngine {
         case .change: return "c"
         case .yank: return "y"
         }
+    }
+
+    /// Identifier under the cursor (letters / digits / underscore), or nil
+    /// if the cursor isn't on a word character. Used by `*` / `#`. If the
+    /// cursor sits in whitespace, the next word to the right wins (matches
+    /// vim's behavior).
+    private static func wordUnderCursor(in buffer: TextBuffer) -> String? {
+        let chars = Array(buffer.text)
+        guard !chars.isEmpty else { return nil }
+        let isWord: (Character) -> Bool = { $0.isLetter || $0.isNumber || $0 == "_" }
+        var start = min(buffer.cursor, chars.count - 1)
+        if !isWord(chars[start]) {
+            // Scan forward for the next word boundary on this line.
+            var probe = start
+            while probe < chars.count, chars[probe] != "\n", !isWord(chars[probe]) {
+                probe += 1
+            }
+            if probe >= chars.count || chars[probe] == "\n" { return nil }
+            start = probe
+        }
+        var lo = start
+        while lo > 0, isWord(chars[lo - 1]) { lo -= 1 }
+        var hi = start
+        while hi < chars.count, isWord(chars[hi]) { hi += 1 }
+        guard lo < hi else { return nil }
+        return String(chars[lo..<hi])
     }
 }

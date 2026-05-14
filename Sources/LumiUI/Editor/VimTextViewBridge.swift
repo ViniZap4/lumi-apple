@@ -15,6 +15,19 @@ struct VimTextViewBridge: NSViewRepresentable {
     let highlights: [NSRange]
     let controller: VimController
     let theme: ThemeTokens
+    let showLineNumbers: Bool
+    let relativeLineNumbers: Bool
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    final class Coordinator {
+        /// Selection the bridge last applied to AppKit. Lets us tell
+        /// "vim moved the cursor" from "the user dragged a mouse
+        /// selection" — we only re-apply when the engine's intended
+        /// selection actually changed, so manual drag-to-copy persists
+        /// long enough for Cmd-C to run against it.
+        var lastAppliedSelection: NSRange?
+    }
 
     func makeNSView(context: Context) -> NSScrollView {
         let textView = VimAppKitTextView()
@@ -33,6 +46,15 @@ struct VimTextViewBridge: NSViewRepresentable {
         scrollView.hasVerticalScroller = true
         scrollView.documentView = textView
         scrollView.drawsBackground = false
+
+        // Attach the line-number gutter eagerly. It hides itself
+        // (rulersVisible = false) when the preference is off; keeping
+        // one instance around avoids tearing down rulers on every
+        // toggle.
+        let ruler = LineNumberRulerView(scrollView: scrollView, textView: textView)
+        scrollView.verticalRulerView = ruler
+        scrollView.hasVerticalRuler = true
+        scrollView.rulersVisible = false
         return scrollView
     }
 
@@ -48,11 +70,17 @@ struct VimTextViewBridge: NSViewRepresentable {
         textView.insertionPointColor = isInsertMode
             ? NSColor(theme.primary)
             : NSColor(theme.accent)
+        // Selection highlight — same vibrant accent across modes so
+        // user-driven drag selections (for Cmd-C copy) are clearly
+        // visible. Foreground is anchored on theme.background to keep
+        // contrast high on busy themes where text + accent would blur.
         textView.selectedTextAttributes = [
             .backgroundColor: isInsertMode
                 ? NSColor(theme.primary).withAlphaComponent(0.30)
                 : NSColor(theme.accent).withAlphaComponent(0.55),
-            .foregroundColor: NSColor(theme.text)
+            .foregroundColor: isInsertMode
+                ? NSColor(theme.text)
+                : NSColor(theme.background)
         ]
 
         if textView.string != text {
@@ -64,12 +92,29 @@ struct VimTextViewBridge: NSViewRepresentable {
         // syntax foreground colors and we'd never restore them.
         applySyntaxHighlighting(to: textView.textStorage, text: text)
         applyHighlights(to: textView.textStorage, color: NSColor(theme.warning).withAlphaComponent(0.35))
-        if textView.selectedRange() != selection {
+
+        // Line-number gutter — toggled with the preference. When relative
+        // numbering flips, the ruler re-draws via its `didSet`.
+        if let ruler = scrollView.verticalRulerView as? LineNumberRulerView {
+            ruler.theme = theme
+            ruler.showRelative = relativeLineNumbers
+            if scrollView.rulersVisible != showLineNumbers {
+                scrollView.rulersVisible = showLineNumbers
+            }
+            ruler.needsDisplay = true
+        }
+        // Only force the selection when the engine actually moved — a
+        // user mouse-drag updates `textView.selectedRange()` directly
+        // and we don't want SwiftUI's next `updateNSView` to immediately
+        // collapse that back onto the engine's cursor.
+        let coord = context.coordinator
+        if coord.lastAppliedSelection != selection {
             textView.setSelectedRange(selection)
             // Keep the cursor on-screen — without this the user can navigate
             // (j/k, gg/G, /search) and the cursor walks past the visible
             // region with the viewport stuck where it was.
             textView.scrollRangeToVisible(selection)
+            coord.lastAppliedSelection = selection
         }
     }
 
@@ -169,6 +214,10 @@ struct VimTextViewBridge: UIViewRepresentable {
     let highlights: [NSRange]
     let controller: VimController
     let theme: ThemeTokens
+    // Accepted on iOS for API parity with macOS; line-number gutter is
+    // mac-only for now since UIKit's UITextView has no equivalent ruler.
+    let showLineNumbers: Bool
+    let relativeLineNumbers: Bool
 
     func makeUIView(context: Context) -> UITextView {
         let textView = VimUIKitTextView()
