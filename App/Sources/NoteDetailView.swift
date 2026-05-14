@@ -236,6 +236,11 @@ private struct MarkdownReader: View {
     @Environment(AppState.self) private var appState
     @State private var parsed: MarkdownDocument?
     @State private var parsedFor: String = ""
+    /// Opacity of the yank-flash overlay. Bumped to 0.28 on each `y` /
+    /// ⌘C trigger (`appState.yankFlashAt`), then animated back to 0 over
+    /// 0.45 s. Sits above the content as a non-interactive overlay so
+    /// text selection isn't disrupted.
+    @State private var yankFlashOpacity: Double = 0
 
     private var scale: Double { appState.preferences.readingScale }
 
@@ -304,8 +309,29 @@ private struct MarkdownReader: View {
         // ("Reading width") and persists in preferences.
         .frame(maxWidth: appState.preferences.readingWidth, alignment: .leading)
         .frame(maxWidth: .infinity, alignment: .center)
+        // Flash overlay for vim-yank feedback. Non-interactive (allowsHitTesting
+        // false) so it doesn't swallow clicks / text-selection drags. Animates
+        // opacity → 0 on every yank event via .onChange below.
+        .overlay {
+            Rectangle()
+                .fill(theme.warning)
+                .opacity(yankFlashOpacity)
+                .allowsHitTesting(false)
+                .animation(.easeOut(duration: 0.45), value: yankFlashOpacity)
+        }
         .onAppear { reparseIfNeeded() }
         .onChange(of: text) { _, _ in reparseIfNeeded() }
+        .onChange(of: appState.yankFlashAt) { _, _ in
+            // Two-step: set to peak instantly (no animation transaction yet
+            // because we're outside `withAnimation`), then on the next tick
+            // let the modifier's animation curve drain to zero. Without the
+            // tick the SwiftUI runtime would coalesce the up + down into a
+            // single transition with no visible flash.
+            yankFlashOpacity = 0.28
+            Task { @MainActor in
+                yankFlashOpacity = 0
+            }
+        }
     }
 
     /// Custom OpenURLAction body. Inline-link taps from MarkdownView's
@@ -452,6 +478,7 @@ final class ReadKeyMonitor {
     private let fullPage: (Int) -> Void
     private let scrollToEdge: (ReadModeCoordinator.Edge) -> Void
     private let closeNote: () -> Void
+    private let yankSelected: () -> Void
     nonisolated(unsafe) private var token: Any?
 
     init(
@@ -460,7 +487,8 @@ final class ReadKeyMonitor {
         halfPage: @escaping @MainActor (Int) -> Void,
         fullPage: @escaping @MainActor (Int) -> Void,
         scrollToEdge: @escaping @MainActor (ReadModeCoordinator.Edge) -> Void,
-        closeNote: @escaping @MainActor () -> Void
+        closeNote: @escaping @MainActor () -> Void,
+        yankSelected: @escaping @MainActor () -> Void
     ) {
         self.isActive = isActive
         self.glide = glide
@@ -468,6 +496,7 @@ final class ReadKeyMonitor {
         self.fullPage = fullPage
         self.scrollToEdge = scrollToEdge
         self.closeNote = closeNote
+        self.yankSelected = yankSelected
         token = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.handle(event) ?? event
         }
@@ -490,6 +519,21 @@ final class ReadKeyMonitor {
         let hasOpt = mods.contains(.option)
         let hasCtrl = mods.contains(.control)
         let hasShift = mods.contains(.shift)
+
+        // Cmd-C in read mode: trigger the yank flash *alongside* the system
+        // copy. We let the event pass through so AppKit's responder-chain
+        // copy still runs — meaning we don't have to reach into the text
+        // host for the selection ourselves. Only fires when the read pane
+        // is active so we don't blink the flash on every Cmd-C in
+        // settings / sign-in / etc.
+        if hasCmd && !hasCtrl && !hasOpt {
+            let charsForKey = event.charactersIgnoringModifiers?.lowercased() ?? ""
+            if charsForKey == "c" && isActive() {
+                yankSelected()
+                return event
+            }
+        }
+
         if hasCmd || hasOpt { return event }
 
         // The scroll bindings get consumed *regardless* of whether
@@ -550,6 +594,17 @@ final class ReadKeyMonitor {
         // (a note is open in read mode). Outside read mode unknown
         // keys flow through so the rest of the app behaves normally.
         guard let letter else { return active ? nil : event }
+
+        // Plain `y` in read mode is the vim-style yank shortcut. Fires
+        // the same code path as ⌘C — sends `copy:` down the responder
+        // chain (picks up the active text selection) and bumps the
+        // yank-flash timestamp so the read pane animates a brief
+        // highlight to confirm. Only when active so the rest of the
+        // app keeps `y` as a normal letter key.
+        if active && !hasCtrl && !hasShift && letter == "y" {
+            yankSelected()
+            return nil
+        }
 
         // Scroll-key set the monitor "owns". Outside read mode we
         // still consume them — performing no scroll — so the sidebar
@@ -634,6 +689,16 @@ struct NativeScrollHost<Content: View>: NSViewRepresentable {
         scroll.borderType = .noBorder
         scroll.verticalScrollElasticity = .allowed
         scroll.scrollerStyle = .overlay
+        // AppKit's default for scroll views inside a window with a unified
+        // toolbar is to auto-inset the clip view so content can underflow
+        // the toolbar with transparency. That left the note's title hidden
+        // behind the toolbar on first mount — initial scroll position
+        // y=0 means "top of doc", and the doc's top was the title, which
+        // sat behind the toolbar's adjusted inset. Disabling the auto
+        // insets pins the scroll origin to the actual top of the content
+        // area, exposing the title.
+        scroll.automaticallyAdjustsContentInsets = false
+        scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
 
         let host = NSHostingController(rootView: AnyView(content()))
         host.view.translatesAutoresizingMaskIntoConstraints = false

@@ -6,9 +6,120 @@ import Markdown
 /// directly — this keeps the renderer tied to a stable internal shape.
 public enum MarkdownParser {
     public static func parse(_ source: String, baseURL: URL? = nil) -> MarkdownDocument {
-        let document = Document(parsing: source)
+        let transformed = preprocessWikilinks(source)
+        let document = Document(parsing: transformed)
         let blocks = document.children.compactMap { convertBlock($0, baseURL: baseURL) }
         return MarkdownDocument(blocks: blocks, baseURL: baseURL)
+    }
+
+    /// Rewrites Obsidian-style wikilinks into standard markdown so the
+    /// upstream parser handles them without any custom AST node. Two forms
+    /// are supported:
+    ///
+    ///   [[note-id]]            → [note-id](note-id.md)
+    ///   [[note-id|Display]]    → [Display](note-id.md)
+    ///   ![[note-id]]           → ![note-id](note-id.md)
+    ///   ![[note-id|alt]]       → ![alt](note-id.md)
+    ///
+    /// The output uses bare `.md` filenames so they resolve relative to the
+    /// active note's `baseURL` via `resolve(source:baseURL:)`. In-app
+    /// navigation for `.md` taps is wired in `NoteDetailView.openMarkdownLink`.
+    ///
+    /// Code spans and fenced code blocks are skipped so a literal `[[id]]`
+    /// inside backticks survives untouched.
+    public static func preprocessWikilinks(_ source: String) -> String {
+        var out = String()
+        out.reserveCapacity(source.count)
+        let chars = Array(source)
+        var i = 0
+        var inFence = false
+        var inBacktick = false
+        var atLineStart = true
+
+        while i < chars.count {
+            let c = chars[i]
+
+            // Fenced code blocks: ``` opens/closes at line start.
+            if atLineStart && i + 2 < chars.count && c == "`" && chars[i + 1] == "`" && chars[i + 2] == "`" {
+                inFence.toggle()
+                out.append("```")
+                i += 3
+                atLineStart = false
+                continue
+            }
+            if inFence {
+                out.append(c)
+                if c == "\n" { atLineStart = true } else { atLineStart = false }
+                i += 1
+                continue
+            }
+
+            // Inline code span: single backtick toggles.
+            if c == "`" {
+                inBacktick.toggle()
+                out.append(c)
+                i += 1
+                atLineStart = false
+                continue
+            }
+            if inBacktick {
+                out.append(c)
+                if c == "\n" { atLineStart = true } else { atLineStart = false }
+                i += 1
+                continue
+            }
+
+            // Embed form: `![[id]]` or `![[id|alt]]`.
+            if c == "!" && i + 1 < chars.count && chars[i + 1] == "[" && i + 2 < chars.count && chars[i + 2] == "[" {
+                if let end = findWikilinkClose(chars: chars, from: i + 3) {
+                    let inner = String(chars[(i + 3)..<end])
+                    let (target, label) = splitWikilink(inner)
+                    out.append("![\(label ?? target)](\(target).md)")
+                    i = end + 2
+                    atLineStart = false
+                    continue
+                }
+            }
+
+            // Link form: `[[id]]` or `[[id|display]]`.
+            if c == "[" && i + 1 < chars.count && chars[i + 1] == "[" {
+                if let end = findWikilinkClose(chars: chars, from: i + 2) {
+                    let inner = String(chars[(i + 2)..<end])
+                    let (target, label) = splitWikilink(inner)
+                    out.append("[\(label ?? target)](\(target).md)")
+                    i = end + 2
+                    atLineStart = false
+                    continue
+                }
+            }
+
+            out.append(c)
+            atLineStart = (c == "\n")
+            i += 1
+        }
+        return out
+    }
+
+    /// Find the closing `]]` for a wikilink that opens at `start`. Bails out
+    /// on the next newline so malformed `[[ ... ` never spans paragraphs.
+    private static func findWikilinkClose(chars: [Character], from start: Int) -> Int? {
+        var j = start
+        while j + 1 < chars.count {
+            if chars[j] == "\n" { return nil }
+            if chars[j] == "]" && chars[j + 1] == "]" { return j }
+            j += 1
+        }
+        return nil
+    }
+
+    /// Splits `target|display` form. Returns `(target, display?)`. Trimmed.
+    private static func splitWikilink(_ inner: String) -> (String, String?) {
+        if let pipe = inner.firstIndex(of: "|") {
+            let target = String(inner[..<pipe]).trimmingCharacters(in: .whitespaces)
+            let display = String(inner[inner.index(after: pipe)...]).trimmingCharacters(in: .whitespaces)
+            return (target, display.isEmpty ? nil : display)
+        }
+        return (inner.trimmingCharacters(in: .whitespaces), nil)
     }
 
     private static func convertBlock(_ markup: any Markup, baseURL: URL?) -> MarkdownBlock? {

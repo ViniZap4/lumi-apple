@@ -96,6 +96,14 @@ final class AppState {
     /// ⌥⌘S shortcut.
     var columnVisibility: NavigationSplitViewVisibility = .detailOnly
 
+    /// Bumped by `performYank()` whenever `y` or ⌘C fires in read mode.
+    /// The read pane observes this via `.onChange` and runs a brief
+    /// flash animation so the user gets visual confirmation of the copy
+    /// (mirrors Neovim's `vim.highlight.on_yank()`). `nil` means no yank
+    /// has fired yet — the read pane treats nil → non-nil as the first
+    /// flash trigger.
+    var yankFlashAt: Date?
+
     /// Shared scroll coordinator for the read pane. Living here (rather
     /// than only inside ReadModeScroll's @State) gives the App-init
     /// NSEvent monitor a stable target to call into, even when the
@@ -144,6 +152,9 @@ final class AppState {
                 if self.editor.isDirty { self.editor.save() }
                 self.selectedEntry = nil
                 self.selectedNoteID = nil
+            },
+            yankSelected: { [weak self] in
+                self?.performYank()
             }
         )
     }
@@ -153,5 +164,19 @@ final class AppState {
     func setSession(_ new: VaultSession?) {
         session?.close()
         session = new
+    }
+
+    /// Copy the current text selection to the pasteboard and trigger the
+    /// read-mode yank flash. Driven by the `y` and ⌘C bindings installed
+    /// by `ReadKeyMonitor` when read mode is active. Routes through
+    /// `NSApp.sendAction(copy:)` so the standard responder-chain copy
+    /// path runs (it picks up the active `.textSelection(.enabled)` Text
+    /// view's selection — same code path Cmd-C in any other AppKit text
+    /// view uses).
+    func performYank() {
+        #if canImport(AppKit)
+        NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil)
+        #endif
+        yankFlashAt = Date()
     }
 }

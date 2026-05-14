@@ -151,6 +151,14 @@ struct BlockView: View {
                 .font(headingFont(level))
                 .foregroundStyle(theme.text)
                 .padding(.top, (level <= 2 ? 8 : 4) * scale)
+                // Text inside an HStack (e.g. list items) negotiates its
+                // ideal one-line size with the parent, which truncates with
+                // ellipsis when the line overflows. fixedSize on the vertical
+                // axis forces wrapping; maxWidth makes the wrapped lines
+                // occupy the column instead of hugging their content.
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
 
         case let .paragraph(inline):
             Text(InlineRenderer.render(inline, theme: theme))
@@ -158,6 +166,8 @@ struct BlockView: View {
                 .foregroundStyle(theme.text)
                 .textSelection(.enabled)
                 .lineSpacing(3 * scale)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
         case let .codeBlock(language, code):
             CodeBlockView(language: language, code: code)
