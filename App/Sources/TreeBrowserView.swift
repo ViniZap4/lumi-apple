@@ -632,13 +632,18 @@ private struct PreviewPane: View {
     private func notePreview(_ n: NoteEntry) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
+                HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "doc.text.fill")
                         .font(.title3)
                         .foregroundStyle(theme.primary)
+                    // Allow the title to wrap to multiple lines so
+                    // long names aren't cut with ellipsis in the
+                    // narrow preview column.
                     Text(noteExcerpt?.title ?? n.title)
                         .font(.system(.title3, design: .default).weight(.semibold))
                         .foregroundStyle(theme.text)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 Text("/" + n.relativePath)
                     .font(.system(.caption2, design: .monospaced))
@@ -679,36 +684,34 @@ private struct PreviewPane: View {
     }
 }
 
-/// Cheap-to-load metadata + first-N-bytes body excerpt. Only reads the
-/// first ~8 KB of the file so preview is fast even on enormous notes.
+/// Metadata + body for the preview pane. Reads the file in full
+/// (bounded by `softLimit` so a stray 50 MB markdown file doesn't blow
+/// out memory) so the user can scroll through the entire note in the
+/// preview column with J/K instead of being truncated to an excerpt.
 private struct NoteExcerpt {
     let title: String?
     let tags: [String]
     let bodyExcerpt: String
 
     static func load(from url: URL) -> NoteExcerpt? {
+        // 1 MB cap — plenty for any normal markdown note. Files larger
+        // than this fall back to a leading slice + an ellipsis marker.
+        let softLimit = 1 * 1024 * 1024
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
-        let limit = 8 * 1024
-        guard let chunk = try? handle.read(upToCount: limit),
+        guard let chunk = try? handle.read(upToCount: softLimit),
               let text = String(data: chunk, encoding: .utf8)
         else { return nil }
         let (frontmatter, body) = FrontmatterParser.split(text)
-        // Trim trailing partial line if we cut mid-word.
-        var excerpt = body
-        if let lastNewline = excerpt.lastIndex(of: "\n") {
-            excerpt = String(excerpt[..<lastNewline])
-        }
-        // Cap displayed excerpt to a sensible chunk so the column doesn't
-        // overflow visually.
-        let maxChars = 1200
-        if excerpt.count > maxChars {
-            excerpt = String(excerpt.prefix(maxChars)) + "…"
-        }
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Append an ellipsis marker only if we hit the soft limit and
+        // truncated mid-file. Below that, show the full body.
+        let truncated = (chunk.count == softLimit)
+        let display = truncated ? trimmed + "\n\n…" : trimmed
         return NoteExcerpt(
             title: frontmatter.title,
             tags: frontmatter.tags,
-            bodyExcerpt: excerpt.isEmpty ? "(empty)" : excerpt
+            bodyExcerpt: display.isEmpty ? "(empty)" : display
         )
     }
 }
