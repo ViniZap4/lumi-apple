@@ -196,8 +196,44 @@ struct RootView: View {
         appState.rootFolder = root
         appState.browserState = TreeBrowserState(root: root)
         appState.selectedVaultID = record.id
-        record.lastOpenedAt = Date()
-        mirrorVaultToRegistry(record: record, rootURL: session.rootURL)
+
+        // Snapshot every property we need off the SwiftData model BEFORE
+        // touching `lastOpenedAt`. The setter fires SwiftData's
+        // willChangeValue → fault-in → didChangeValue cycle on the
+        // underlying NSManagedObject; any read of a sibling property on
+        // the same instance during that cycle can race with the fault
+        // handler and throw inside `_PFFaultHandlerLookupRow` (crash
+        // observed in production after F.41 — abort() via
+        // `developerSubmittedBlockToNSManagedObjectContextPerform`
+        // rethrowing the obj-c exception). Snapshotting up-front gives
+        // us a consistent view to hand to the registry without any
+        // further model access.
+        let recordID = record.id
+        let recordName = record.name
+        let recordServerEndpoint = record.serverEndpoint
+        let recordServerAccountID = record.serverAccountID
+        let recordAddedAt = record.addedAt
+        let rootPath = session.rootURL.path
+        let now = Date()
+
+        record.lastOpenedAt = now
+
+        // Defer the registry write to the next main-actor tick so
+        // SwiftData's notification cycle (and any dependent @Query
+        // re-renders in the sidebar) drains before we run I/O.
+        Task { @MainActor in
+            let entry = VaultRegistryEntry(
+                id: recordID,
+                name: recordName,
+                path: encodeHomeRelative(rootPath),
+                server: recordServerEndpoint,
+                account: recordServerAccountID,
+                addedAt: recordAddedAt,
+                lastOpenedAt: now
+            )
+            VaultRegistry.shared.upsert(entry)
+        }
+
         // Kick the directory walk off the main actor. The browser renders
         // its loading state until `root.items` populates and `@Observable`
         // republishes the view.
@@ -235,28 +271,31 @@ struct RootView: View {
         let record = VaultRecord(name: name, bookmarkData: bookmark)
         modelContext.insert(record)
         try? modelContext.save()
-        mirrorVaultToRegistry(record: record, rootURL: url)
-        selectVault(record)
-    }
 
-    /// Write a `VaultRegistryEntry` for `record` into `~/.config/lumi/vaults.yaml`
-    /// so the shared registry stays in sync with SwiftData. `rootURL` is the
-    /// resolved security-scoped URL — used so we don't have to re-resolve
-    /// the bookmark just to extract the on-disk path. For server-bound
-    /// vaults `rootURL` is nil and we record an empty path (the entry still
-    /// uniquely identifies the vault via its server + slug fields).
-    private func mirrorVaultToRegistry(record: VaultRecord, rootURL: URL?) {
-        let path = rootURL.map { encodeHomeRelative($0.path) } ?? ""
-        let entry = VaultRegistryEntry(
-            id: record.id,
-            name: record.name,
-            path: path,
-            server: record.serverEndpoint,
-            account: record.serverAccountID,
-            addedAt: record.addedAt,
-            lastOpenedAt: record.lastOpenedAt
-        )
-        VaultRegistry.shared.upsert(entry)
+        // Snapshot the values we need for the registry mirror *before*
+        // calling selectVault — selectVault writes `lastOpenedAt`, which
+        // enters SwiftData's notification cycle, and we don't want
+        // additional reads racing it (see selectVault for the full
+        // explanation of the crash this avoids).
+        let recordID = record.id
+        let recordName = record.name
+        let recordAddedAt = record.addedAt
+        let urlPath = url.path
+
+        Task { @MainActor in
+            let entry = VaultRegistryEntry(
+                id: recordID,
+                name: recordName,
+                path: encodeHomeRelative(urlPath),
+                server: nil,
+                account: nil,
+                addedAt: recordAddedAt,
+                lastOpenedAt: nil
+            )
+            VaultRegistry.shared.upsert(entry)
+        }
+
+        selectVault(record)
     }
 }
 
