@@ -131,6 +131,13 @@ final class AppState {
         BeepSilencer.install()
         installReadKeyMonitor()
         #endif
+        // Kick the math/diagram render service awake at launch so the
+        // hidden KaTeX/Mermaid WebView finishes loading scripts in
+        // the background while the user navigates. By the time the
+        // first math note opens, the service is ready to render
+        // immediately instead of paying ~150–300 ms of script-load
+        // latency on the first request.
+        MathRenderService.shared.prewarm()
     }
 
     #if canImport(AppKit)
