@@ -14,6 +14,10 @@ struct KeybindsBar: View {
     @Environment(\.theme) private var theme
 
     enum Context {
+        /// Landing pane (`EmptyVaultPanel`) — vault picker. Only j/k +
+        /// activate-row + app-level shortcuts apply; no tree / file-op
+        /// bindings.
+        case home
         case tree
         case noteView
         case noteEdit
@@ -73,6 +77,17 @@ struct KeybindsBar: View {
     /// scan by topic.
     private var groups: [[KeyHint]] {
         switch context {
+        case .home:
+            return [
+                [   // vault picker nav
+                    .init(key: "j/k", label: "move"),
+                    .init(key: "gg/G", label: "top/bottom"),
+                    .init(key: "l ↩", label: "open"),
+                ],
+                [   // app
+                    .init(key: "⌘,", label: "settings"),
+                ],
+            ]
         case .tree:
             return [
                 [   // navigation

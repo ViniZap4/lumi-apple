@@ -45,7 +45,12 @@ struct EmptyVaultPanel: View {
             }
             .frame(maxWidth: 520)
             Spacer(minLength: 0)
-            footer
+            // No local key-hint footer here — the global `KeybindsBar`
+            // pinned to the bottom of `RootView` is the single
+            // consistent surface for keybinding hints across the app.
+            // It picks up the `.home` context (see
+            // `RootView.keybindsContext`) so the bindings shown match
+            // what this pane actually responds to.
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.background)
@@ -219,54 +224,6 @@ struct EmptyVaultPanel: View {
         .buttonStyle(.plain)
     }
 
-    @ViewBuilder
-    private var footer: some View {
-        HStack(spacing: 18) {
-            if !vaults.isEmpty {
-                hint(key: "j/k", label: "move")
-                hint(key: "↩", label: "open")
-            }
-            hint(key: "⌘O", label: "switcher")
-            hint(key: "⌘,", label: "settings")
-        }
-        .padding(.vertical, 14)
-        .frame(maxWidth: .infinity)
-        .background(theme.overlayBackground.opacity(0.4))
-        .overlay(alignment: .top) {
-            Rectangle().fill(theme.border).frame(height: 0.5)
-        }
-    }
-
-    @ViewBuilder
-    private func hint(key: String, label: String) -> some View {
-        HStack(spacing: 5) {
-            Text(key)
-                .font(.system(.caption2, design: .monospaced).weight(.semibold))
-                .padding(.horizontal, 6).padding(.vertical, 2)
-                .background(
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        // Was `theme.background`; that's the same color
-                        // as the home-pane base behind the footer, so on
-                        // any theme where `overlayBackground.opacity(0.4)`
-                        // doesn't differ enough from base (e.g. obsidian),
-                        // the pill became invisible. `selectedBackground`
-                        // is a guaranteed-distinct slot in all 12 themes.
-                        .fill(theme.selectedBackground)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .stroke(theme.border.opacity(0.5), lineWidth: 0.5)
-                )
-                .foregroundStyle(theme.accent)
-            Text(label)
-                // Bumped from `theme.textDim` to `theme.text` so the
-                // descriptive label reads on light themes too (textDim
-                // hits AA-fail territory against the footer's tinted
-                // overlay on tokyo-day / catppuccin-latte).
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(theme.text)
-        }
-    }
 }
 
 /// ASCII art LUMI wordmark, matching the TUI / web clients exactly.

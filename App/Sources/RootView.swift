@@ -241,10 +241,17 @@ struct RootView: View {
     }
 
     /// Tell the bottom keybinds bar which set of hints to show based on
-    /// what's currently in the content area.
+    /// what's currently in the content area. The four contexts mirror
+    /// the four content branches in `mainContent`:
+    ///   - note open → `.noteView` / `.noteEdit`
+    ///   - vault picked + browsing tree → `.tree`
+    ///   - landing pane (no vault selected) → `.home`
     private var keybindsContext: KeybindsBar.Context {
         if appState.selectedEntry != nil {
             return appState.editorMode == .edit ? .noteEdit : .noteView
+        }
+        if appState.selectedVaultID == nil && appState.selectedRemoteVaultID == nil {
+            return .home
         }
         return .tree
     }
