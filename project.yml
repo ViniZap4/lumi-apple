@@ -33,6 +33,17 @@ targets:
         buildPhase: resources
         excludes:
           - "*.entitlements"
+          - "Web"
+          - "Web/**"
+      # Bundle KaTeX + Mermaid (and KaTeX's woff2 fonts) as a folder
+      # reference so the directory layout — `Web/katex.min.css`,
+      # `Web/fonts/*.woff2`, etc. — survives into the .app's
+      # Resources/Web/ tree. KaTeX's CSS references its fonts via
+      # `url(fonts/KaTeX_Main-Regular.woff2)`; that relative URL must
+      # resolve against the CSS file's location at runtime.
+      - path: App/Resources/Web
+        type: folder
+        buildPhase: resources
     dependencies:
       - package: LumiPackages
         product: LumiKit

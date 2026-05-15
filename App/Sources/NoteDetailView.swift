@@ -83,6 +83,7 @@ struct NoteDetailView: View {
                     title: displayTitle,
                     tags: displayTags,
                     text: editor.currentText,
+                    noteURL: entry.url,
                     baseURL: baseURL,
                     vaultRoot: vaultRoot
                 )
@@ -232,6 +233,12 @@ private struct MarkdownReader: View {
     let title: String
     let tags: [String]
     let text: String
+    /// The note's own file URL. Used as the `MarkdownDocumentCache` key.
+    /// Previously the cache was keyed on `baseURL` (the parent directory),
+    /// which meant every note in the same folder collided on the same
+    /// cache entry and any sibling-file mutation invalidated it via the
+    /// directory mtime. Keying on the note's URL fixes that.
+    let noteURL: URL
     let baseURL: URL?
     /// Active vault root. Threaded into the markdown env so leaf views
     /// (`LinkAwareTextView`) can render in-vault file:// URLs as
@@ -426,15 +433,21 @@ private struct MarkdownReader: View {
         guard text != parsedFor else { return }
         parsedFor = text
 
-        // Cache check: same file + same mtime → reuse the prior parse.
-        // The lookup runs on the main actor (so does the surrounding
-        // SwiftUI body), so we don't have to hop. When a link tap
-        // navigates back to a recently-viewed note, this skips the
-        // parse entirely — biggest single win on math-heavy notes
-        // where parse + KaTeX-WebView spawn latencies stack.
-        if let baseURL,
-           let mtime = mtime(for: baseURL),
-           let cached = MarkdownDocumentCache.shared.document(for: baseURL, mtime: mtime) {
+        // Cache check: same note URL + same mtime → reuse the prior
+        // parse. When a link tap navigates back to a recently-viewed
+        // note (or when the preview pane just parsed this note a
+        // moment ago), this skips the parse entirely — biggest single
+        // win on math-heavy notes where parse + KaTeX-WebView spawn
+        // latencies stack.
+        //
+        // **Skipped when the buffer is dirty.** In-memory edits don't
+        // bump disk mtime, so a cache hit on a dirty buffer would
+        // return the pre-edit parse and the user would see stale
+        // content after a quick edit→view toggle.
+        if !appState.editor.isDirty,
+           noteURL.isFileURL,
+           let mtime = mtime(for: noteURL),
+           let cached = MarkdownDocumentCache.shared.document(for: noteURL, mtime: mtime) {
             parsed = cached
             return
         }
@@ -454,6 +467,8 @@ private struct MarkdownReader: View {
         // visible is better than UI hanging.
         let snapshot = text
         let url = baseURL
+        let cacheURL = noteURL
+        let canCache = !appState.editor.isDirty
         Task.detached(priority: .userInitiated) {
             let document = MarkdownParser.parse(snapshot, baseURL: url)
             await MainActor.run {
@@ -463,8 +478,10 @@ private struct MarkdownReader: View {
                 // race a stale parse home.
                 if parsedFor == snapshot {
                     parsed = document
-                    if let url, let mtime = self.mtime(for: url) {
-                        MarkdownDocumentCache.shared.store(document, for: url, mtime: mtime)
+                    if canCache,
+                       cacheURL.isFileURL,
+                       let mtime = self.mtime(for: cacheURL) {
+                        MarkdownDocumentCache.shared.store(document, for: cacheURL, mtime: mtime)
                     }
                 }
             }

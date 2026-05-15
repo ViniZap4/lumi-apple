@@ -105,7 +105,7 @@ private func mermaidHTML(code: String, isDark: Bool, backgroundHex: String) -> S
       pre.mermaid { margin: 0; background: transparent; }
       svg { max-width: 100%; height: auto; }
     </style>
-    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script src="mermaid.min.js"></script>
     </head>
     <body>
     <pre class="mermaid">\(escaped)</pre>
@@ -176,8 +176,16 @@ private struct MermaidWebRepresentable: UIViewRepresentable {
     private var renderKey: String { "\(isDark ? "d" : "l")|\(code.hashValue)" }
 
     private func loadHTML(into view: WKWebView) {
+        // See `KaTeXView.load(into:)` for the loadFileURL rationale —
+        // same sandbox dance to grant the WebView read access to the
+        // bundled `mermaid.min.js` (and the inline HTML's parent dir).
         let html = mermaidHTML(code: code, isDark: isDark, backgroundHex: "transparent")
-        view.loadHTMLString(html, baseURL: nil)
+        if let webDir = BundledWebAssets.writableWebDir,
+           let renderFile = BundledWebAssets.writeRenderHTML(html) {
+            view.loadFileURL(renderFile, allowingReadAccessTo: webDir)
+        } else {
+            view.loadHTMLString(html, baseURL: nil)
+        }
     }
 
     final class Coordinator: NSObject, WKScriptMessageHandler {
@@ -225,8 +233,16 @@ private struct MermaidWebRepresentable: NSViewRepresentable {
     private var renderKey: String { "\(isDark ? "d" : "l")|\(code.hashValue)" }
 
     private func loadHTML(into view: WKWebView) {
+        // See `KaTeXView.load(into:)` for the loadFileURL rationale —
+        // same sandbox dance to grant the WebView read access to the
+        // bundled `mermaid.min.js` (and the inline HTML's parent dir).
         let html = mermaidHTML(code: code, isDark: isDark, backgroundHex: "transparent")
-        view.loadHTMLString(html, baseURL: nil)
+        if let webDir = BundledWebAssets.writableWebDir,
+           let renderFile = BundledWebAssets.writeRenderHTML(html) {
+            view.loadFileURL(renderFile, allowingReadAccessTo: webDir)
+        } else {
+            view.loadHTMLString(html, baseURL: nil)
+        }
     }
 
     final class Coordinator: NSObject, WKScriptMessageHandler {

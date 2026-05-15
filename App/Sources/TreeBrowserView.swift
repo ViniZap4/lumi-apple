@@ -837,6 +837,12 @@ private struct PreviewPane: View {
             //   2. Read + parse on a detached task so the main actor
             //      isn't held for the (up to) 1 MB file plus the
             //      markdown walk. Token-check again before publishing.
+            //   3. When the file fit fully into the soft limit and the
+            //      body wasn't empty-substituted, store the parse into
+            //      `MarkdownDocumentCache.shared`. The read pane's
+            //      MarkdownReader looks up the same `(url, mtime)`
+            //      key, so opening a previewed note skips the parse
+            //      entirely.
             let url = n.url
             let baseURL = self.baseURL
             Task.detached(priority: .userInitiated) {
@@ -845,7 +851,7 @@ private struct PreviewPane: View {
                 guard stillCurrent else { return }
                 let excerpt = NoteExcerpt.load(from: url)
                 let document: MarkdownDocument?
-                if let body = excerpt?.bodyExcerpt {
+                if let body = excerpt?.body {
                     document = MarkdownParser.parse(body, baseURL: baseURL)
                 } else {
                     document = nil
@@ -854,6 +860,23 @@ private struct PreviewPane: View {
                     guard previewToken == token else { return }
                     noteExcerpt = excerpt
                     previewDocument = document
+                    // Share the parse with the read pane when the body
+                    // we parsed is what the read pane would parse —
+                    // i.e. fully loaded (not truncated). The body field
+                    // carries the raw content verbatim, so the cached
+                    // parse is byte-identical to what NoteFile.load +
+                    // MarkdownParser.parse would produce in the read
+                    // pane.
+                    if let document,
+                       let excerpt,
+                       !excerpt.truncated,
+                       let mtime = excerpt.mtime {
+                        MarkdownDocumentCache.shared.store(
+                            document,
+                            for: url,
+                            mtime: mtime
+                        )
+                    }
                 }
             }
         case nil:
@@ -986,6 +1009,26 @@ private struct PreviewPane: View {
                 // user-visible perf regression we're solving.
                 MarkdownView(document)
                     .environment(\.markdownLite, true)
+                // Empty/truncated indicators sit outside the parsed
+                // document so they don't contaminate the AST — which
+                // matters because the parse is also stored in
+                // `MarkdownDocumentCache.shared` for the read pane to
+                // reuse on open.
+                if noteExcerpt?.isEffectivelyEmpty == true {
+                    Text("(empty)")
+                        .font(.system(.callout, design: .monospaced))
+                        .foregroundStyle(theme.textDim)
+                }
+                if noteExcerpt?.truncated == true {
+                    HStack(spacing: 4) {
+                        Image(systemName: "ellipsis")
+                            .imageScale(.small)
+                        Text("preview truncated · open to read in full")
+                    }
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(theme.textDim)
+                    .padding(.top, 4)
+                }
             } else {
                 ProgressView().controlSize(.small)
             }
@@ -997,14 +1040,43 @@ private struct PreviewPane: View {
 /// (bounded by `softLimit` so a stray 50 MB markdown file doesn't blow
 /// out memory) so the user can scroll through the entire note in the
 /// preview column with J/K instead of being truncated to an excerpt.
+///
+/// The body is carried **verbatim** — no trim, no `"(empty)"`
+/// substitution, no `"\n\n…"` marker. This is what `NoteFile.load`
+/// returns as `note.content`, which is what the read pane's
+/// `MarkdownReader` parses. Carrying the same string here is what makes
+/// the preview's parse safe to share with the read pane's
+/// `MarkdownDocumentCache` — any decoration would skew the AST and
+/// cache hits would silently render altered content.
+///
+/// Emptiness and truncation are surfaced as separate flags so the
+/// preview UI can stack a "(empty)" / "truncated" indicator below the
+/// parsed body without contaminating the parsed content itself.
 private struct NoteExcerpt {
     let title: String?
     let tags: [String]
-    let bodyExcerpt: String
+    /// Raw body — matches `NoteFile.load(...).note.content` byte-for-byte
+    /// when `truncated == false`. Empty string for an empty body.
+    let body: String
+    /// True iff the load hit the soft limit and truncated mid-file. The
+    /// preview's parse is then NOT shareable with the read pane (which
+    /// would parse the full body) — `PreviewPane.handleItemChange`
+    /// uses this to decide whether to populate `MarkdownDocumentCache`.
+    let truncated: Bool
+    /// Disk mtime captured at load time. Used as the cache key so the
+    /// preview's parse can be reused by the read pane without
+    /// re-reading the file. Nil if the file's mtime couldn't be read.
+    let mtime: Date?
+
+    /// True when the body has no visible content. The preview renders
+    /// an "(empty)" indicator on top of the (empty) MarkdownView.
+    var isEffectivelyEmpty: Bool {
+        body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     static func load(from url: URL) -> NoteExcerpt? {
         // 1 MB cap — plenty for any normal markdown note. Files larger
-        // than this fall back to a leading slice + an ellipsis marker.
+        // than this fall back to a leading slice + a truncation flag.
         let softLimit = 1 * 1024 * 1024
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
@@ -1012,15 +1084,15 @@ private struct NoteExcerpt {
               let text = String(data: chunk, encoding: .utf8)
         else { return nil }
         let (frontmatter, body) = FrontmatterParser.split(text)
-        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Append an ellipsis marker only if we hit the soft limit and
-        // truncated mid-file. Below that, show the full body.
         let truncated = (chunk.count == softLimit)
-        let display = truncated ? trimmed + "\n\n…" : trimmed
+        let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+            .contentModificationDate
         return NoteExcerpt(
             title: frontmatter.title,
             tags: frontmatter.tags,
-            bodyExcerpt: display.isEmpty ? "(empty)" : display
+            body: body,
+            truncated: truncated,
+            mtime: mtime
         )
     }
 }

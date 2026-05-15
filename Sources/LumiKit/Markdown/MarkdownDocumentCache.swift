@@ -12,7 +12,7 @@ import Foundation
 /// memory on a long-running app.
 @MainActor
 public final class MarkdownDocumentCache {
-    public static let shared = MarkdownDocumentCache(capacity: 24)
+    public static let shared = MarkdownDocumentCache(capacity: 64)
 
     private struct Entry {
         var key: String

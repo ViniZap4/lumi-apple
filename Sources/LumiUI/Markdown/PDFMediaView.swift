@@ -45,7 +45,13 @@ private struct PDFRepresentable: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: PDFView, context: Context) {
-        uiView.document = PDFDocument(url: url)
+        // Rebuilding a multi-MB PDFDocument on every parent re-render
+        // (theme change, scroll, sibling state) was the dominant cost
+        // in PDF-heavy notes. Guard on documentURL so we only re-parse
+        // when the host actually swaps the source URL.
+        if uiView.document?.documentURL != url {
+            uiView.document = PDFDocument(url: url)
+        }
     }
 }
 #elseif canImport(AppKit)
@@ -64,7 +70,13 @@ private struct PDFRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: PDFView, context: Context) {
-        nsView.document = PDFDocument(url: url)
+        // Rebuilding a multi-MB PDFDocument on every parent re-render
+        // (theme change, scroll, sibling state) was the dominant cost
+        // in PDF-heavy notes. Guard on documentURL so we only re-parse
+        // when the host actually swaps the source URL.
+        if nsView.document?.documentURL != url {
+            nsView.document = PDFDocument(url: url)
+        }
     }
 }
 #endif

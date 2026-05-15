@@ -321,10 +321,14 @@ fileprivate func katexHTML(
       .katex-display { margin: 0; }
       """
 
+    // Bundled assets: resolve against `BundledWebAssets.baseURL` passed
+    // as `loadHTMLString(_:baseURL:)`'s baseURL. KaTeX's CSS in turn
+    // references its `fonts/KaTeX_*.woff2` via relative `url(...)`, so
+    // colocating CSS + fonts in the same bundle dir is essential.
     let scripts = """
-      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css">
-      <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js"></script>
-      <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/contrib/auto-render.min.js"></script>
+      <link rel="stylesheet" href="katex.min.css">
+      <script defer src="katex.min.js"></script>
+      <script defer src="auto-render.min.js"></script>
       """
 
     let body: String
@@ -456,7 +460,21 @@ extension KaTeXWebRepresentable: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(onHeight: onHeight) }
 
     private func load(into view: WKWebView) {
-        view.loadHTMLString(makeHTML(), baseURL: nil)
+        // WKWebView on macOS is sandboxed: `loadHTMLString` with a
+        // file:// baseURL cannot read sibling files from disk. Bundled
+        // KaTeX assets only load when we go through `loadFileURL` with
+        // an explicit `allowingReadAccessTo:` ACL — see
+        // `BundledWebAssets` for the writable-mirror plumbing.
+        let html = makeHTML()
+        if let webDir = BundledWebAssets.writableWebDir,
+           let renderFile = BundledWebAssets.writeRenderHTML(html) {
+            view.loadFileURL(renderFile, allowingReadAccessTo: webDir)
+        } else {
+            // Bundle layout drifted or temp dir unwritable — fall back
+            // to in-memory load. Math will fail to render but the page
+            // won't crash; we'd rather degrade than abort.
+            view.loadHTMLString(html, baseURL: nil)
+        }
     }
 
     final class Coordinator: NSObject, WKScriptMessageHandler {
@@ -495,7 +513,21 @@ extension KaTeXWebRepresentable: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(onHeight: onHeight) }
 
     private func load(into view: WKWebView) {
-        view.loadHTMLString(makeHTML(), baseURL: nil)
+        // WKWebView on macOS is sandboxed: `loadHTMLString` with a
+        // file:// baseURL cannot read sibling files from disk. Bundled
+        // KaTeX assets only load when we go through `loadFileURL` with
+        // an explicit `allowingReadAccessTo:` ACL — see
+        // `BundledWebAssets` for the writable-mirror plumbing.
+        let html = makeHTML()
+        if let webDir = BundledWebAssets.writableWebDir,
+           let renderFile = BundledWebAssets.writeRenderHTML(html) {
+            view.loadFileURL(renderFile, allowingReadAccessTo: webDir)
+        } else {
+            // Bundle layout drifted or temp dir unwritable — fall back
+            // to in-memory load. Math will fail to render but the page
+            // won't crash; we'd rather degrade than abort.
+            view.loadHTMLString(html, baseURL: nil)
+        }
     }
 
     final class Coordinator: NSObject, WKScriptMessageHandler {
