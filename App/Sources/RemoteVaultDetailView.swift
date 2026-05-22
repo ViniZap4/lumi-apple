@@ -2,9 +2,10 @@ import SwiftUI
 import LumiKit
 
 /// Read-only overview of a server-hosted vault: name + slug, member list with
-/// roles, role list with capabilities, plus invite management for users with
-/// the `members.invite` capability. Note CRUD lives in a future phase (E.1.2)
-/// — that's why we don't surface a "notes" tab here yet.
+/// roles, role list with capabilities, invite management for users with
+/// `members.invite`, audit log for users with `audit.read`, and a read-only
+/// note list for users with `note.read`. Note open / create / edit lands in
+/// a subsequent E.1.2 slice.
 struct RemoteVaultDetailView: View {
     let vault: RemoteVault
     @Environment(AppState.self) private var appState
@@ -23,7 +24,7 @@ struct RemoteVaultDetailView: View {
                 roleSection
                 inviteSection
                 auditSection
-                placeholder
+                noteSection
             }
             .padding(.horizontal, 32)
             .padding(.vertical, 24)
@@ -519,13 +520,80 @@ struct RemoteVaultDetailView: View {
     }
 
     @ViewBuilder
-    private var placeholder: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            sectionTitle("Notes")
-            Text("server-side note sync is coming in a later phase.")
-                .font(.system(.callout, design: .monospaced))
-                .foregroundStyle(theme.textDim)
+    private var noteSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                sectionTitle("Notes")
+                Spacer()
+                Text("read-only — open/edit coming next")
+                    .font(.caption2)
+                    .foregroundStyle(theme.textDim)
+            }
+            if !canReadNotes && appState.remoteVaultsStore.notes.isEmpty {
+                Text("not visible (note.read required)")
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundStyle(theme.textDim)
+            } else if appState.remoteVaultsStore.notes.isEmpty {
+                Text(appState.remoteVaultsStore.isLoading ? "loading…" : "no notes yet")
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundStyle(theme.textDim)
+            } else {
+                ForEach(appState.remoteVaultsStore.notes) { note in
+                    noteRow(note)
+                }
+                if appState.remoteVaultsStore.notesHasMore {
+                    Button {
+                        Task { await appState.remoteVaultsStore.loadMoreNotes() }
+                    } label: {
+                        Label("Load more", systemImage: "arrow.down.circle")
+                            .font(.system(.callout, design: .monospaced))
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(theme.primary)
+                }
+            }
         }
+    }
+
+    /// `note.read` capability check against the current session's member row.
+    private var canReadNotes: Bool {
+        guard let session = appState.authService.currentSession else { return false }
+        let me = appState.remoteVaultsStore.members.first { $0.username == session.user.username }
+        guard let caps = me?.capabilities else { return false }
+        return caps.contains { $0 == "*" || $0 == "note.*" || $0 == "note.read" || $0 == "vault.*" }
+    }
+
+    @ViewBuilder
+    private func noteRow(_ note: RemoteNote) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Image(systemName: "doc.text")
+                    .foregroundStyle(theme.accent)
+                Text(note.title.isEmpty ? note.id : note.title)
+                    .font(.system(.body, design: .monospaced).weight(.semibold))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer()
+                if let updated = note.updatedAt {
+                    Text(updated.formatted(.relative(presentation: .named)))
+                        .font(.caption2)
+                        .foregroundStyle(theme.textDim)
+                }
+            }
+            Text(note.path)
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(theme.textDim)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(theme.overlayBackground)
+        )
     }
 
     private func sectionTitle(_ text: String) -> some View {

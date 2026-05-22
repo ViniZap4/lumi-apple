@@ -754,5 +754,163 @@ struct LumiAPIClientVaultTests {
         #expect(store.lastError == .unauthorized)
         #expect(store.vaults.isEmpty)
     }
+
+    // MARK: - Notes (E.1.2 first slice — read-only list)
+
+    @Test("listNotes decodes envelope + paginates")
+    func listNotesEnvelope() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/vaults/3f2504e0-4f89-11d3-9a0c-0305e82c3301/notes")
+            #expect(request.url?.query == "limit=50&offset=10")
+            #expect(request.value(forHTTPHeaderField: "X-Lumi-Token") == "tok-123")
+            let body = """
+            {"notes":[
+              {"id":"hello-world","vault_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301","path":"hello-world.md","title":"Hello World","created_at":"2026-05-19T10:00:00Z","updated_at":"2026-05-20T12:30:00Z"},
+              {"id":"untitled","vault_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301","path":"drafts/untitled.md","title":"","created_at":"2026-05-19T10:00:00Z","updated_at":"2026-05-19T10:00:00Z"}
+            ],"limit":50,"offset":10}
+            """.data(using: .utf8)!
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let resp = try await client.listNotes(vaultID: vaultID, limit: 50, offset: 10)
+        #expect(resp.notes.count == 2)
+        #expect(resp.notes[0].id == "hello-world")
+        #expect(resp.notes[0].title == "Hello World")
+        #expect(resp.notes[0].vaultID == vaultID)
+        #expect(resp.notes[0].path == "hello-world.md")
+        #expect(resp.notes[1].title == "")
+        #expect(resp.limit == 50)
+        #expect(resp.offset == 10)
+    }
+
+    @Test("listNotes default pagination omits query params")
+    func listNotesDefaultPagination() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            // offset defaults to 0, so it's stripped; limit=50 stays.
+            #expect(request.url?.query == "limit=50")
+            let body = #"{"notes":[],"limit":50,"offset":0}"#.data(using: .utf8)!
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let resp = try await client.listNotes(vaultID: vaultID)
+        #expect(resp.notes.isEmpty)
+    }
+
+    @Test("listNotes without note.read surfaces .server forbidden")
+    func listNotesForbidden() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!
+            let data = #"{"error":"forbidden","detail":"note.read required"}"#.data(using: .utf8)!
+            return (response, data)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let captured = await catchAPIError {
+            _ = try await client.listNotes(vaultID: vaultID)
+        }
+        if case let .server(status, code, _) = captured {
+            #expect(status == 403)
+            #expect(code == "forbidden")
+        } else {
+            Issue.record("expected .server forbidden, got \(String(describing: captured))")
+        }
+    }
+
+    @Test("RemoteVaultsStore.selectVault loads notes alongside members/roles/invites/audit")
+    @MainActor
+    func storeSelectVaultLoadsNotes() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        let userID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3302")!
+        let roleID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3303")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let path = request.url?.path ?? ""
+            let body: String
+            if path.hasSuffix("/members") {
+                body = """
+                {"members":[{"vault_id":"\(vaultID.uuidString)","user_id":"\(userID.uuidString)","username":"alice","display_name":"Alice","role_id":"\(roleID.uuidString)","role_name":"Admin","capabilities":["*"],"is_seed_role":true,"joined_at":"2026-05-13T10:00:00Z"}]}
+                """
+            } else if path.hasSuffix("/roles") {
+                body = """
+                {"roles":[{"id":"\(roleID.uuidString)","vault_id":"\(vaultID.uuidString)","name":"Admin","capabilities":["*"],"is_seed":true}]}
+                """
+            } else if path.hasSuffix("/invites") {
+                body = #"{"invites":[]}"#
+            } else if path.hasSuffix("/audit") {
+                body = #"{"entries":[],"limit":50,"offset":0}"#
+            } else if path.hasSuffix("/notes") {
+                body = """
+                {"notes":[{"id":"hello","vault_id":"\(vaultID.uuidString)","path":"hello.md","title":"Hello","created_at":"2026-05-19T10:00:00Z","updated_at":"2026-05-20T12:30:00Z"}],"limit":100,"offset":0}
+                """
+            } else {
+                body = "{}"
+            }
+            return (response, body.data(using: .utf8)!)
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = LumiAPIClient(session: URLSession(configuration: config))
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let store = RemoteVaultsStore(client: client)
+        await store.selectVault(vaultID)
+        #expect(store.notes.count == 1)
+        #expect(store.notes.first?.id == "hello")
+        #expect(store.notesHasMore == false)
+        #expect(store.lastError == nil)
+    }
+
+    @Test("RemoteVaultsStore.selectVault swallows 403 on notes endpoint")
+    @MainActor
+    func storeSelectVaultSwallowsNotesForbidden() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        let userID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3302")!
+        let roleID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3303")!
+        MockURLProtocol.setHandler { request in
+            let path = request.url?.path ?? ""
+            if path.hasSuffix("/notes") {
+                let response = HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!
+                let data = #"{"error":"forbidden","detail":"note.read required"}"#.data(using: .utf8)!
+                return (response, data)
+            }
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body: String
+            if path.hasSuffix("/members") {
+                body = """
+                {"members":[{"vault_id":"\(vaultID.uuidString)","user_id":"\(userID.uuidString)","username":"bob","display_name":"Bob","role_id":"\(roleID.uuidString)","role_name":"Viewer","capabilities":[],"is_seed_role":true,"joined_at":"2026-05-13T10:00:00Z"}]}
+                """
+            } else if path.hasSuffix("/roles") {
+                body = #"{"roles":[]}"#
+            } else if path.hasSuffix("/invites") {
+                body = #"{"invites":[]}"#
+            } else if path.hasSuffix("/audit") {
+                body = #"{"entries":[],"limit":50,"offset":0}"#
+            } else {
+                body = "{}"
+            }
+            return (response, body.data(using: .utf8)!)
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = LumiAPIClient(session: URLSession(configuration: config))
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let store = RemoteVaultsStore(client: client)
+        await store.selectVault(vaultID)
+        #expect(store.notes.isEmpty)
+        #expect(store.notesHasMore == false)
+        // Forbidden on a single section must not poison lastError.
+        #expect(store.lastError == nil)
+    }
 }
 

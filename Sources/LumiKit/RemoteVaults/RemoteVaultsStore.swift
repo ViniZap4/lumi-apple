@@ -22,10 +22,13 @@ public final class RemoteVaultsStore {
     /// True once we've loaded *less* than a full page — paginated views use
     /// this to decide whether to render a "Load more" button.
     public private(set) var auditHasMore: Bool = false
+    public private(set) var notes: [RemoteNote] = []
+    public private(set) var notesHasMore: Bool = false
     public private(set) var isLoading: Bool = false
     public private(set) var lastError: LumiAPIError?
 
     private let auditPageSize: Int = 50
+    private let notesPageSize: Int = 100
 
     private let client: LumiAPIClient
 
@@ -56,6 +59,8 @@ public final class RemoteVaultsStore {
             invites = []
             auditEntries = []
             auditHasMore = false
+            notes = []
+            notesHasMore = false
             return
         }
         selectedVaultID = id
@@ -66,6 +71,8 @@ public final class RemoteVaultsStore {
         invites = []
         auditEntries = []
         auditHasMore = false
+        notes = []
+        notesHasMore = false
         // Sequential rather than `async let` — Swift 6 typed throws don't
         // propagate through `async let` bindings, and serializing a few short
         // requests is fine for the UI flow.
@@ -91,10 +98,39 @@ public final class RemoteVaultsStore {
                 auditHasMore = false
                 _ = error
             }
+            do {
+                let resp = try await client.listNotes(vaultID: id, limit: notesPageSize, offset: 0)
+                notes = resp.notes
+                notesHasMore = resp.notes.count >= notesPageSize
+            } catch let error where isForbidden(error) {
+                notes = []
+                notesHasMore = false
+                _ = error
+            }
         } catch {
             lastError = error
         }
         isLoading = false
+    }
+
+    /// Append the next page of notes. Caller-driven via a "Load more" button
+    /// on long vaults.
+    public func loadMoreNotes() async {
+        guard let id = selectedVaultID, notesHasMore else { return }
+        do {
+            let resp = try await client.listNotes(
+                vaultID: id,
+                limit: notesPageSize,
+                offset: notes.count
+            )
+            notes.append(contentsOf: resp.notes)
+            notesHasMore = resp.notes.count >= notesPageSize
+        } catch let error where isForbidden(error) {
+            notesHasMore = false
+        } catch {
+            lastError = error
+            notesHasMore = false
+        }
     }
 
     /// Append the next page of audit entries. Caller-driven — typically a
@@ -203,6 +239,8 @@ public final class RemoteVaultsStore {
             invites = []
             auditEntries = []
             auditHasMore = false
+            notes = []
+            notesHasMore = false
         }
     }
 
@@ -215,6 +253,8 @@ public final class RemoteVaultsStore {
         invites = []
         auditEntries = []
         auditHasMore = false
+        notes = []
+        notesHasMore = false
         lastError = nil
         isLoading = false
     }
