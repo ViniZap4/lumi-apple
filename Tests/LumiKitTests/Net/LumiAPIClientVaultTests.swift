@@ -1159,6 +1159,268 @@ struct LumiAPIClientVaultTests {
         #expect(store.openNoteIsLoading == false)
     }
 
+    @Test("createNote POSTs the body envelope and decodes the new row")
+    func createNoteRoundtrip() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/vaults/3f2504e0-4f89-11d3-9a0c-0305e82c3301/notes")
+            #expect(request.httpMethod == "POST")
+            #expect(request.value(forHTTPHeaderField: "X-Lumi-Token") == "tok-123")
+            // Body assertion via httpBodyStream (URLProtocol doesn't expose
+            // POST/PATCH bodies via .httpBody).
+            var sentBody = Data()
+            if let stream = request.httpBodyStream {
+                stream.open()
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                while stream.hasBytesAvailable {
+                    let n = stream.read(&buffer, maxLength: buffer.count)
+                    if n <= 0 { break }
+                    sentBody.append(buffer, count: n)
+                }
+                stream.close()
+            }
+            let json = String(data: sentBody, encoding: .utf8) ?? ""
+            #expect(json.contains("\"title\""))
+            #expect(json.contains("My Note"))
+            #expect(json.contains("\"body\""))
+
+            let response = HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil)!
+            let data = """
+            {"id":"my-note","vault_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301","path":"my-note.md","title":"My Note","created_at":"2026-05-22T15:00:00Z","updated_at":"2026-05-22T15:00:00Z"}
+            """.data(using: .utf8)!
+            return (response, data)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let created = try await client.createNote(vaultID: vaultID, title: "My Note", body: "hello")
+        #expect(created.id == "my-note")
+        #expect(created.title == "My Note")
+        #expect(created.path == "my-note.md")
+    }
+
+    @Test("createNote omits tags array when empty; includes when non-empty")
+    func createNoteTagsSerialization() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        actor BodyCapture {
+            var jsons: [String] = []
+            func append(_ s: String) { jsons.append(s) }
+        }
+        let capture = BodyCapture()
+
+        MockURLProtocol.setHandler { request in
+            var sent = Data()
+            if let stream = request.httpBodyStream {
+                stream.open()
+                var buf = [UInt8](repeating: 0, count: 4096)
+                while stream.hasBytesAvailable {
+                    let n = stream.read(&buf, maxLength: buf.count)
+                    if n <= 0 { break }
+                    sent.append(buf, count: n)
+                }
+                stream.close()
+            }
+            let s = String(data: sent, encoding: .utf8) ?? ""
+            Task { await capture.append(s) }
+
+            let response = HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil)!
+            let data = """
+            {"id":"x","vault_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301","path":"x.md","title":"x","created_at":"2026-05-22T15:00:00Z","updated_at":"2026-05-22T15:00:00Z"}
+            """.data(using: .utf8)!
+            return (response, data)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        _ = try await client.createNote(vaultID: vaultID, title: "x", body: "", tags: [])
+        _ = try await client.createNote(vaultID: vaultID, title: "x", body: "", tags: ["alpha", "beta"])
+
+        // Tiny breath so the Task above completes before we read.
+        try await Task.sleep(nanoseconds: 10_000_000)
+        let jsons = await capture.jsons
+        #expect(jsons.count == 2)
+        if jsons.count == 2 {
+            #expect(!jsons[0].contains("\"tags\""))  // empty → omitted
+            #expect(jsons[1].contains("\"tags\""))   // populated → present
+            #expect(jsons[1].contains("alpha"))
+        }
+    }
+
+    @Test("createNote without note.create surfaces .server forbidden")
+    func createNoteForbidden() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!
+            let data = #"{"error":"forbidden","detail":"note.create required"}"#.data(using: .utf8)!
+            return (response, data)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let captured = await catchAPIError {
+            _ = try await client.createNote(vaultID: vaultID, title: "x", body: "")
+        }
+        if case let .server(status, code, _) = captured {
+            #expect(status == 403)
+            #expect(code == "forbidden")
+        } else {
+            Issue.record("expected .server forbidden, got \(String(describing: captured))")
+        }
+    }
+
+    @Test("deleteNote DELETEs and returns void on 204")
+    func deleteNoteRoundtrip() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/vaults/3f2504e0-4f89-11d3-9a0c-0305e82c3301/notes/hello")
+            #expect(request.httpMethod == "DELETE")
+            #expect(request.value(forHTTPHeaderField: "X-Lumi-Token") == "tok-123")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 204, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        try await client.deleteNote(vaultID: vaultID, noteID: "hello")
+    }
+
+    @Test("deleteNote forbidden surfaces .server")
+    func deleteNoteForbidden() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!
+            let data = #"{"error":"forbidden","detail":"note.delete required"}"#.data(using: .utf8)!
+            return (response, data)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let captured = await catchAPIError {
+            try await client.deleteNote(vaultID: vaultID, noteID: "x")
+        }
+        if case let .server(status, code, _) = captured {
+            #expect(status == 403)
+            #expect(code == "forbidden")
+        } else {
+            Issue.record("expected .server forbidden, got \(String(describing: captured))")
+        }
+    }
+
+    @Test("RemoteVaultsStore.createNote prepends to cache and respects no-dupe rule")
+    @MainActor
+    func storeCreateNote() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let path = request.url?.path ?? ""
+            let response = HTTPURLResponse(url: request.url!, statusCode: path.hasSuffix("/notes") && request.httpMethod == "POST" ? 201 : 200, httpVersion: nil, headerFields: nil)!
+            let body: String
+            if path.hasSuffix("/notes") && request.httpMethod == "POST" {
+                body = """
+                {"id":"new","vault_id":"\(vaultID.uuidString)","path":"new.md","title":"New","created_at":"2026-05-22T15:00:00Z","updated_at":"2026-05-22T15:00:00Z"}
+                """
+            } else if path.hasSuffix("/notes") {
+                body = """
+                {"notes":[
+                  {"id":"existing","vault_id":"\(vaultID.uuidString)","path":"existing.md","title":"E","created_at":"2026-05-19T10:00:00Z","updated_at":"2026-05-19T10:00:00Z"}
+                ],"limit":100,"offset":0}
+                """
+            } else if path.hasSuffix("/members") {
+                body = #"{"members":[]}"#
+            } else if path.hasSuffix("/roles") {
+                body = #"{"roles":[]}"#
+            } else if path.hasSuffix("/invites") {
+                body = #"{"invites":[]}"#
+            } else if path.hasSuffix("/audit") {
+                body = #"{"entries":[],"limit":50,"offset":0}"#
+            } else {
+                body = "{}"
+            }
+            return (response, body.data(using: .utf8)!)
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = LumiAPIClient(session: URLSession(configuration: config))
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let store = RemoteVaultsStore(client: client)
+        await store.selectVault(vaultID)
+        #expect(store.notes.count == 1)
+        let created = try await store.createNote(title: "New")
+        #expect(created.id == "new")
+        #expect(store.notes.count == 2)
+        #expect(store.notes[0].id == "new")   // prepended
+        #expect(store.notes[1].id == "existing")
+
+        // Calling again with the same id (server idempotency / re-create)
+        // must not insert a dupe.
+        _ = try await store.createNote(title: "New")
+        #expect(store.notes.count == 2)
+    }
+
+    @Test("RemoteVaultsStore.deleteNote drops row and clears openNoteContent if it was open")
+    @MainActor
+    func storeDeleteNote() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let path = request.url?.path ?? ""
+            let method = request.httpMethod ?? "GET"
+            if method == "DELETE" {
+                let response = HTTPURLResponse(url: request.url!, statusCode: 204, httpVersion: nil, headerFields: nil)!
+                return (response, Data())
+            }
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body: String
+            if path.hasSuffix("/content") {
+                body = """
+                {"id":"target","vault_id":"\(vaultID.uuidString)","path":"target.md","body":"open body"}
+                """
+            } else if path.hasSuffix("/notes") {
+                body = """
+                {"notes":[
+                  {"id":"target","vault_id":"\(vaultID.uuidString)","path":"target.md","title":"T","created_at":"2026-05-19T10:00:00Z","updated_at":"2026-05-19T10:00:00Z"},
+                  {"id":"other","vault_id":"\(vaultID.uuidString)","path":"other.md","title":"O","created_at":"2026-05-19T10:00:00Z","updated_at":"2026-05-19T10:00:00Z"}
+                ],"limit":100,"offset":0}
+                """
+            } else if path.hasSuffix("/members") {
+                body = #"{"members":[]}"#
+            } else if path.hasSuffix("/roles") {
+                body = #"{"roles":[]}"#
+            } else if path.hasSuffix("/invites") {
+                body = #"{"invites":[]}"#
+            } else if path.hasSuffix("/audit") {
+                body = #"{"entries":[],"limit":50,"offset":0}"#
+            } else {
+                body = "{}"
+            }
+            return (response, body.data(using: .utf8)!)
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = LumiAPIClient(session: URLSession(configuration: config))
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let store = RemoteVaultsStore(client: client)
+        await store.selectVault(vaultID)
+        await store.loadOpenNote(vaultID: vaultID, noteID: "target")
+        #expect(store.openNoteContent?.id == "target")
+
+        try await store.deleteNote(noteID: "target")
+        #expect(store.notes.count == 1)
+        #expect(store.notes[0].id == "other")
+        // Deleted the open note → store must drop openNoteContent so the
+        // UI's "open" route doesn't render a dangling reference.
+        #expect(store.openNoteContent == nil)
+
+        // Deleting a row that ISN'T the open note must NOT touch open state.
+        // Re-prime openNoteContent (mock still serves /target/content).
+        await store.loadOpenNote(vaultID: vaultID, noteID: "target")
+        #expect(store.openNoteContent?.id == "target")
+        try await store.deleteNote(noteID: "other")
+        #expect(!store.notes.contains(where: { $0.id == "other" }))
+        // Open content survives an unrelated delete.
+        #expect(store.openNoteContent?.id == "target")
+    }
+
     @Test("RemoteVaultsStore.selectVault swallows 403 on notes endpoint")
     @MainActor
     func storeSelectVaultSwallowsNotesForbidden() async throws {

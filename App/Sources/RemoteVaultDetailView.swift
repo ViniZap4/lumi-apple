@@ -11,10 +11,14 @@ struct RemoteVaultDetailView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
     @State private var showCreateInvite: Bool = false
+    @State private var showCreateNote: Bool = false
     @State private var isEditingName: Bool = false
     @State private var editedName: String = ""
     @State private var showDeleteConfirm: Bool = false
     @State private var manageError: String?
+    /// `RemoteNote` queued for deletion, if any. Drives the confirmation
+    /// dialog. `nil` when no delete is pending.
+    @State private var noteToDelete: RemoteNote?
 
     var body: some View {
         ScrollView {
@@ -36,6 +40,24 @@ struct RemoteVaultDetailView: View {
             CreateInviteSheet(vault: vault, roles: appState.remoteVaultsStore.roles)
                 .environment(appState)
                 .environment(\.theme, theme)
+        }
+        .sheet(isPresented: $showCreateNote) {
+            CreateRemoteNoteSheet(vault: vault)
+                .environment(appState)
+                .environment(\.theme, theme)
+        }
+        .confirmationDialog(
+            noteToDelete.map { "Delete \"\($0.title.isEmpty ? $0.id : $0.title)\"?" } ?? "Delete note?",
+            isPresented: Binding(get: { noteToDelete != nil }, set: { if !$0 { noteToDelete = nil } }),
+            titleVisibility: .visible,
+            presenting: noteToDelete
+        ) { row in
+            Button("Delete note", role: .destructive) {
+                Task { await commitDelete(row) }
+            }
+            Button("Cancel", role: .cancel) { noteToDelete = nil }
+        } message: { _ in
+            Text("Permanently removes the note from the server. This action cannot be undone.")
         }
         .confirmationDialog(
             "Delete vault \"\(vault.name)\"?",
@@ -525,9 +547,15 @@ struct RemoteVaultDetailView: View {
             HStack {
                 sectionTitle("Notes")
                 Spacer()
-                Text("read-only — open/edit coming next")
-                    .font(.caption2)
-                    .foregroundStyle(theme.textDim)
+                if canCreateNotes {
+                    Button {
+                        showCreateNote = true
+                    } label: {
+                        Label("New note", systemImage: "plus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(theme.primary)
+                }
             }
             if !canReadNotes && appState.remoteVaultsStore.notes.isEmpty {
                 Text("not visible (note.read required)")
@@ -545,6 +573,15 @@ struct RemoteVaultDetailView: View {
                         noteRow(note)
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("Open") { openServerNote(note) }
+                        if canDeleteNotes {
+                            Divider()
+                            Button("Delete…", role: .destructive) {
+                                noteToDelete = note
+                            }
+                        }
+                    }
                 }
                 if appState.remoteVaultsStore.notesHasMore {
                     Button {
@@ -576,6 +613,46 @@ struct RemoteVaultDetailView: View {
         let me = appState.remoteVaultsStore.members.first { $0.username == session.user.username }
         guard let caps = me?.capabilities else { return false }
         return caps.contains { $0 == "*" || $0 == "note.*" || $0 == "note.read" || $0 == "vault.*" }
+    }
+
+    /// `note.create` capability check (slice 4b). Mirrors the note.read /
+    /// note.write checks elsewhere.
+    private var canCreateNotes: Bool {
+        guard let session = appState.authService.currentSession else { return false }
+        let me = appState.remoteVaultsStore.members.first { $0.username == session.user.username }
+        guard let caps = me?.capabilities else { return false }
+        return caps.contains { $0 == "*" || $0 == "note.*" || $0 == "note.create" || $0 == "vault.*" }
+    }
+
+    /// `note.delete` capability check (slice 4b).
+    private var canDeleteNotes: Bool {
+        guard let session = appState.authService.currentSession else { return false }
+        let me = appState.remoteVaultsStore.members.first { $0.username == session.user.username }
+        guard let caps = me?.capabilities else { return false }
+        return caps.contains { $0 == "*" || $0 == "note.*" || $0 == "note.delete" || $0 == "vault.*" }
+    }
+
+    private func commitDelete(_ row: RemoteNote) async {
+        manageError = nil
+        do {
+            try await appState.remoteVaultsStore.deleteNote(noteID: row.id)
+            // If the deleted note was open, drop it from the route. The
+            // store has already cleared `openNoteContent` for us — we just
+            // need to mirror that into `selectedRemoteNoteID` so RootView
+            // routes back to the vault-detail view.
+            if appState.selectedRemoteNoteID == row.id {
+                appState.selectedRemoteNoteID = nil
+                appState.remoteEditor.reset()
+                appState.remoteEditorMode = .view
+            }
+            noteToDelete = nil
+        } catch let error as LumiAPIError {
+            manageError = describe(error)
+            noteToDelete = nil
+        } catch {
+            manageError = error.localizedDescription
+            noteToDelete = nil
+        }
     }
 
     @ViewBuilder

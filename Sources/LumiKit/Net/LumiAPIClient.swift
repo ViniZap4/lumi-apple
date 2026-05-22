@@ -241,6 +241,29 @@ public actor LumiAPIClient {
         return try await request(method: "GET", path: path, body: nil as EmptyBody?, requireToken: true)
     }
 
+    /// `POST /api/vaults/:vault/notes` — capability `note.create` required.
+    /// Returns the new note's metadata row (matching the list endpoint
+    /// shape). Server derives the slug id from `title`; tags default to an
+    /// empty list when omitted.
+    public func createNote(
+        vaultID: UUID,
+        title: String,
+        body: String = "",
+        tags: [String] = []
+    ) async throws(LumiAPIError) -> RemoteNote {
+        let path = "/api/vaults/\(vaultID.uuidString.lowercased())/notes"
+        let req = CreateNoteRequest(title: title, body: body, tags: tags)
+        return try await request(method: "POST", path: path, body: req, requireToken: true)
+    }
+
+    /// `DELETE /api/vaults/:vault/notes/:id` — capability `note.delete`
+    /// required. Server responds 204 No Content.
+    public func deleteNote(vaultID: UUID, noteID: String) async throws(LumiAPIError) {
+        let escaped = noteID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? noteID
+        let path = "/api/vaults/\(vaultID.uuidString.lowercased())/notes/\(escaped)"
+        let _: EmptyResponse = try await request(method: "DELETE", path: path, body: EmptyBody(), requireToken: true)
+    }
+
     /// `PATCH /api/vaults/:vault/notes/:id` — capability `note.write` required
     /// (plus `note.move` if `path` is provided). Each field is optional; nil
     /// means "leave alone". Returns the updated note metadata DTO (matching
@@ -460,6 +483,30 @@ struct MemberListResponse: Decodable, Sendable {
 
 struct RoleListResponse: Decodable, Sendable {
     let roles: [RemoteRole]
+}
+
+/// Body for `POST /api/vaults/:vault/notes`. Tags default to an empty
+/// list (and are omitted from the wire when empty so the server's
+/// `omitempty` JSON tag round-trips cleanly).
+struct CreateNoteRequest: Encodable, Sendable {
+    let title: String
+    let body: String
+    let tags: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case title, body, tags
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(title, forKey: .title)
+        try c.encode(body, forKey: .body)
+        // Omit when empty so the JSON matches the server's `tags,omitempty`
+        // tag — symmetric with how we'd receive it back.
+        if !tags.isEmpty {
+            try c.encode(tags, forKey: .tags)
+        }
+    }
 }
 
 /// Body for `PATCH /api/vaults/:vault/notes/:id`. All fields optional — the

@@ -160,6 +160,42 @@ public final class RemoteVaultsStore {
         }
     }
 
+    /// Create a new note in the currently-selected vault and prepend it to
+    /// the cached `notes` list. Returns the new row on success so the host
+    /// can navigate to it (e.g. auto-open in edit mode).
+    @discardableResult
+    public func createNote(title: String, body: String = "", tags: [String] = []) async throws(LumiAPIError) -> RemoteNote {
+        guard let id = selectedVaultID else {
+            throw LumiAPIError.network(message: "no vault selected")
+        }
+        let created = try await client.createNote(
+            vaultID: id,
+            title: title,
+            body: body,
+            tags: tags
+        )
+        if !notes.contains(where: { $0.id == created.id }) {
+            notes.insert(created, at: 0)
+        }
+        return created
+    }
+
+    /// Delete a note in the currently-selected vault and drop it from the
+    /// cache. If the deleted note was the currently-open one, clear the
+    /// open-note state too so the caller's UI doesn't get stranded.
+    public func deleteNote(noteID: String) async throws(LumiAPIError) {
+        guard let vaultID = selectedVaultID else {
+            throw LumiAPIError.network(message: "no vault selected")
+        }
+        try await client.deleteNote(vaultID: vaultID, noteID: noteID)
+        notes.removeAll { $0.id == noteID }
+        if openNoteContent?.id == noteID {
+            openNoteContent = nil
+            openNoteError = nil
+            openNoteIsLoading = false
+        }
+    }
+
     /// Append the next page of notes. Caller-driven via a "Load more" button
     /// on long vaults.
     public func loadMoreNotes() async {
