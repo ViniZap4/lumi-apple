@@ -24,6 +24,14 @@ public final class RemoteVaultsStore {
     public private(set) var auditHasMore: Bool = false
     public private(set) var notes: [RemoteNote] = []
     public private(set) var notesHasMore: Bool = false
+    /// The currently-open server note's full content (body, etc.). Set by
+    /// `loadOpenNote`; cleared by `closeOpenNote`. Slice 2 read-only — the
+    /// editor wiring lands in slice 3.
+    public private(set) var openNoteContent: RemoteNoteContent?
+    public private(set) var openNoteIsLoading: Bool = false
+    /// Non-nil when the most recent `loadOpenNote` failed. Cleared on a
+    /// successful subsequent load or on `closeOpenNote`.
+    public private(set) var openNoteError: LumiAPIError?
     public private(set) var isLoading: Bool = false
     public private(set) var lastError: LumiAPIError?
 
@@ -61,6 +69,8 @@ public final class RemoteVaultsStore {
             auditHasMore = false
             notes = []
             notesHasMore = false
+            openNoteContent = nil
+            openNoteError = nil
             return
         }
         selectedVaultID = id
@@ -73,6 +83,8 @@ public final class RemoteVaultsStore {
         auditHasMore = false
         notes = []
         notesHasMore = false
+        openNoteContent = nil
+        openNoteError = nil
         // Sequential rather than `async let` — Swift 6 typed throws don't
         // propagate through `async let` bindings, and serializing a few short
         // requests is fine for the UI flow.
@@ -111,6 +123,30 @@ public final class RemoteVaultsStore {
             lastError = error
         }
         isLoading = false
+    }
+
+    /// Load the full content for a server note. Sets `openNoteContent` on
+    /// success; surfaces failures via `openNoteError`. Idempotent — calling
+    /// twice with the same arguments simply re-fetches.
+    public func loadOpenNote(vaultID: UUID, noteID: String) async {
+        openNoteIsLoading = true
+        openNoteError = nil
+        do {
+            let content = try await client.getNoteContent(vaultID: vaultID, noteID: noteID)
+            openNoteContent = content
+        } catch {
+            openNoteContent = nil
+            openNoteError = error
+        }
+        openNoteIsLoading = false
+    }
+
+    /// Clear the currently-open server note. UI calls this when the user
+    /// navigates back to the vault detail view.
+    public func closeOpenNote() {
+        openNoteContent = nil
+        openNoteError = nil
+        openNoteIsLoading = false
     }
 
     /// Append the next page of notes. Caller-driven via a "Load more" button
@@ -255,6 +291,9 @@ public final class RemoteVaultsStore {
         auditHasMore = false
         notes = []
         notesHasMore = false
+        openNoteContent = nil
+        openNoteError = nil
+        openNoteIsLoading = false
         lastError = nil
         isLoading = false
     }

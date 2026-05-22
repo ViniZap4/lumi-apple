@@ -131,6 +131,7 @@ struct RootView: View {
                 Task { await appState.remoteVaultsStore.refresh() }
             } else {
                 appState.selectedRemoteVaultID = nil
+                appState.selectedRemoteNoteID = nil
                 appState.remoteVaultsStore.clear()
             }
         }
@@ -154,7 +155,15 @@ struct RootView: View {
             )
         } else if let remoteID = appState.selectedRemoteVaultID,
                   let remote = appState.remoteVaultsStore.vaults.first(where: { $0.id == remoteID }) {
-            RemoteVaultDetailView(vault: remote)
+            // Server-vault selected. If a note is also selected (via row
+            // tap in the detail view), route to the read-only note viewer;
+            // otherwise show the vault-management dashboard.
+            if let remoteNoteID = appState.selectedRemoteNoteID,
+               let row = appState.remoteVaultsStore.notes.first(where: { $0.id == remoteNoteID }) {
+                RemoteNoteDetailView(vault: remote, listRow: row)
+            } else {
+                RemoteVaultDetailView(vault: remote)
+            }
         } else {
             EmptyVaultPanel(
                 vaults: vaults,

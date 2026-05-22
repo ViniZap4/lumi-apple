@@ -870,6 +870,154 @@ struct LumiAPIClientVaultTests {
         #expect(store.lastError == nil)
     }
 
+    @Test("getNoteContent decodes body + ignores frontmatter field")
+    func getNoteContent() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/vaults/3f2504e0-4f89-11d3-9a0c-0305e82c3301/notes/hello-world/content")
+            #expect(request.value(forHTTPHeaderField: "X-Lumi-Token") == "tok-123")
+            // Server-side: includes a parsed frontmatter map alongside the
+            // body. We decode body + id/path/vault_id; frontmatter ignored.
+            let body = """
+            {
+              "id": "hello-world",
+              "vault_id": "3F2504E0-4F89-11D3-9A0C-0305E82C3301",
+              "path": "hello-world.md",
+              "frontmatter": {"id":"hello-world","title":"Hello World","tags":["greeting"]},
+              "body": "# Hello\\n\\nWorld."
+            }
+            """.data(using: .utf8)!
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let content = try await client.getNoteContent(vaultID: vaultID, noteID: "hello-world")
+        #expect(content.id == "hello-world")
+        #expect(content.vaultID == vaultID)
+        #expect(content.path == "hello-world.md")
+        #expect(content.body == "# Hello\n\nWorld.")
+    }
+
+    @Test("getNoteContent percent-encodes slugs with reserved characters")
+    func getNoteContentEncodesSlug() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            // The slug contains a space (illegal in URL paths) — the client
+            // must percent-encode before joining onto the URL. URL.path is
+            // documented as returning the *decoded* path, so we assert via
+            // .absoluteString which preserves the on-the-wire encoding.
+            let absolute = request.url?.absoluteString ?? ""
+            #expect(absolute.contains("/notes/with%20space/content"))
+            let body = #"{"id":"with space","vault_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301","path":"with space.md","body":"x"}"#.data(using: .utf8)!
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let content = try await client.getNoteContent(vaultID: vaultID, noteID: "with space")
+        #expect(content.id == "with space")
+    }
+
+    @Test("getNoteContent not_found surfaces .server")
+    func getNoteContentNotFound() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!
+            let data = #"{"error":"not_found","detail":"note no longer exists"}"#.data(using: .utf8)!
+            return (response, data)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let captured = await catchAPIError {
+            _ = try await client.getNoteContent(vaultID: vaultID, noteID: "gone")
+        }
+        if case let .server(status, code, _) = captured {
+            #expect(status == 404)
+            #expect(code == "not_found")
+        } else {
+            Issue.record("expected .server not_found, got \(String(describing: captured))")
+        }
+    }
+
+    @Test("RemoteVaultsStore.loadOpenNote populates openNoteContent on success")
+    @MainActor
+    func storeLoadOpenNote() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = """
+            {"id":"hello","vault_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301","path":"hello.md","body":"hi there"}
+            """.data(using: .utf8)!
+            return (response, body)
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = LumiAPIClient(session: URLSession(configuration: config))
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let store = RemoteVaultsStore(client: client)
+        await store.loadOpenNote(vaultID: vaultID, noteID: "hello")
+        #expect(store.openNoteContent?.id == "hello")
+        #expect(store.openNoteContent?.body == "hi there")
+        #expect(store.openNoteError == nil)
+        #expect(store.openNoteIsLoading == false)
+    }
+
+    @Test("RemoteVaultsStore.loadOpenNote surfaces server errors via openNoteError")
+    @MainActor
+    func storeLoadOpenNoteError() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!
+            let data = #"{"error":"not_found"}"#.data(using: .utf8)!
+            return (response, data)
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = LumiAPIClient(session: URLSession(configuration: config))
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let store = RemoteVaultsStore(client: client)
+        await store.loadOpenNote(vaultID: vaultID, noteID: "missing")
+        #expect(store.openNoteContent == nil)
+        if case let .server(status, code, _) = store.openNoteError {
+            #expect(status == 404)
+            #expect(code == "not_found")
+        } else {
+            Issue.record("expected .server not_found on openNoteError, got \(String(describing: store.openNoteError))")
+        }
+        // loadOpenNote must NOT poison the umbrella `lastError` — that's
+        // for vault-level refresh failures only.
+        #expect(store.lastError == nil)
+    }
+
+    @Test("RemoteVaultsStore.closeOpenNote clears all open-note state")
+    @MainActor
+    func storeCloseOpenNote() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"id":"x","vault_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301","path":"x.md","body":"x"}"#.data(using: .utf8)!
+            return (response, body)
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = LumiAPIClient(session: URLSession(configuration: config))
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let store = RemoteVaultsStore(client: client)
+        await store.loadOpenNote(vaultID: vaultID, noteID: "x")
+        #expect(store.openNoteContent != nil)
+        store.closeOpenNote()
+        #expect(store.openNoteContent == nil)
+        #expect(store.openNoteError == nil)
+        #expect(store.openNoteIsLoading == false)
+    }
+
     @Test("RemoteVaultsStore.selectVault swallows 403 on notes endpoint")
     @MainActor
     func storeSelectVaultSwallowsNotesForbidden() async throws {

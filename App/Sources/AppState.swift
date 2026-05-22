@@ -76,6 +76,13 @@ final class AppState {
     /// detail panel doesn't conflict.
     var selectedRemoteVaultID: UUID?
 
+    /// Slug id of the currently-open server-vault note. Set by tapping a
+    /// row in `RemoteVaultDetailView.noteSection`; the content is fetched
+    /// lazily into `remoteVaultsStore.openNoteContent`. Mirrors the local
+    /// `selectedNoteID` for server notes. Independent of `selectedEntry`
+    /// (which is local-vault only).
+    var selectedRemoteNoteID: String?
+
     /// Persisted user preferences (vim nav, jj/jk mappings, etc.). Read by
     /// views that gate features on user opt-in.
     let preferences = LumiPreferences()

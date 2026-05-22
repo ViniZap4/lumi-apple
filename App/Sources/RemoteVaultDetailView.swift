@@ -539,7 +539,12 @@ struct RemoteVaultDetailView: View {
                     .foregroundStyle(theme.textDim)
             } else {
                 ForEach(appState.remoteVaultsStore.notes) { note in
-                    noteRow(note)
+                    Button {
+                        openServerNote(note)
+                    } label: {
+                        noteRow(note)
+                    }
+                    .buttonStyle(.plain)
                 }
                 if appState.remoteVaultsStore.notesHasMore {
                     Button {
@@ -553,6 +558,16 @@ struct RemoteVaultDetailView: View {
                 }
             }
         }
+    }
+
+    /// Trigger a read-only open of the given server note. Sets the
+    /// app-level selection synchronously (so the route flips immediately)
+    /// and kicks off the content fetch — `RemoteNoteDetailView` renders
+    /// the loading state while the request is in flight.
+    private func openServerNote(_ note: RemoteNote) {
+        appState.selectedRemoteNoteID = note.id
+        let store = appState.remoteVaultsStore
+        Task { await store.loadOpenNote(vaultID: note.vaultID, noteID: note.id) }
     }
 
     /// `note.read` capability check against the current session's member row.

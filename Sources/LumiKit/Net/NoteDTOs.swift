@@ -84,3 +84,27 @@ public struct RemoteNoteListResponse: Decodable, Sendable, Equatable {
         self.offset = offset
     }
 }
+
+/// Full note payload returned by `GET /api/vaults/:vault/notes/:id/content`.
+/// The wire JSON also carries a parsed `frontmatter` map, but slice 2 only
+/// renders the body (title + tags come from the row in the list endpoint).
+/// JSONDecoder ignores unknown keys, so the `frontmatter` field decodes as
+/// a no-op — slice 3 (edit) re-enables it.
+public struct RemoteNoteContent: Decodable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let vaultID: UUID
+    public let path: String
+    public let body: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, path, body
+        case vaultID = "vault_id"
+    }
+
+    public init(id: String, vaultID: UUID, path: String, body: String) {
+        self.id = id
+        self.vaultID = vaultID
+        self.path = path
+        self.body = body
+    }
+}

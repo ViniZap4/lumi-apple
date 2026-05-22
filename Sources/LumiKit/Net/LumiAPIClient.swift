@@ -230,6 +230,17 @@ public actor LumiAPIClient {
         return try await request(method: "GET", path: path, body: nil as EmptyBody?, requireToken: true)
     }
 
+    /// `GET /api/vaults/:vault/notes/:id/content` — capability `note.read`
+    /// required. Returns the full note payload: metadata + parsed
+    /// frontmatter + raw body. The `frontmatter` JSON field is currently
+    /// dropped by the client (E.1.2 slice 2 renders body only); slice 3 will
+    /// surface it for the editor.
+    public func getNoteContent(vaultID: UUID, noteID: String) async throws(LumiAPIError) -> RemoteNoteContent {
+        let escaped = noteID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? noteID
+        let path = "/api/vaults/\(vaultID.uuidString.lowercased())/notes/\(escaped)/content"
+        return try await request(method: "GET", path: path, body: nil as EmptyBody?, requireToken: true)
+    }
+
     private func request<Body: Encodable & Sendable, Response: Decodable & Sendable>(
         method: String,
         path: String,
