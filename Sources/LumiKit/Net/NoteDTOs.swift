@@ -108,3 +108,34 @@ public struct RemoteNoteContent: Decodable, Sendable, Equatable, Identifiable {
         self.body = body
     }
 }
+
+/// CRDT-aware payload returned by `GET /api/vaults/:vault/notes/:id/snapshot`
+/// and `POST /api/vaults/:vault/notes/:id/diff`. The `vectorClock` is the
+/// base64-encoded lib0-v1 state vector; clients send it back as
+/// `base_clock` on the next diff so the server can place the patch
+/// correctly against the CRDT's history (advisory in server slice 2.2,
+/// load-bearing once 4e's WS sync lands).
+///
+/// Unlike `RemoteNoteContent`, the snapshot does NOT carry frontmatter or
+/// `vault_id` — it's the body + clock pair. The slice 4d load path uses
+/// snapshot because the same round-trip seeds the editor *and* arms the
+/// clock for the eventual `applyDiff` save.
+public struct RemoteNoteSnapshot: Decodable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let path: String
+    public let text: String
+    /// Base64-encoded lib0-v1 state vector.
+    public let vectorClock: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, path, text
+        case vectorClock = "vector_clock"
+    }
+
+    public init(id: String, path: String, text: String, vectorClock: String) {
+        self.id = id
+        self.path = path
+        self.text = text
+        self.vectorClock = vectorClock
+    }
+}

@@ -35,8 +35,8 @@ struct RemoteNoteDetailView: View {
         }
         .background(theme.background)
         .onAppear(perform: ensureLoaded)
-        .onChange(of: appState.remoteVaultsStore.openNoteContent) { _, newContent in
-            handleContentChange(newContent)
+        .onChange(of: appState.remoteVaultsStore.openNoteSnapshot) { _, newSnapshot in
+            handleSnapshotChange(newSnapshot)
         }
     }
 
@@ -297,31 +297,33 @@ struct RemoteNoteDetailView: View {
     private func ensureLoaded() {
         appState.remoteEditorMode = .view
         let store = appState.remoteVaultsStore
-        if let current = store.openNoteContent, current.id == listRow.id {
+        if let current = store.openNoteSnapshot, current.id == listRow.id {
             seedEditorIfNeeded(from: current)
             return
         }
         Task { await store.loadOpenNote(vaultID: vault.id, noteID: listRow.id) }
     }
 
-    private func handleContentChange(_ newContent: RemoteNoteContent?) {
-        guard let newContent else { return }
-        seedEditorIfNeeded(from: newContent)
+    private func handleSnapshotChange(_ newSnapshot: RemoteNoteSnapshot?) {
+        guard let newSnapshot else { return }
+        seedEditorIfNeeded(from: newSnapshot)
     }
 
     /// Seed the editor state from a fetched payload — but only when this
-    /// content is for the currently-displayed note, and only if the editor
-    /// isn't already holding dirty edits for this exact note. Avoids
-    /// clobbering in-flight edits on an idempotent re-fetch.
-    private func seedEditorIfNeeded(from content: RemoteNoteContent) {
-        guard content.id == listRow.id else { return }
+    /// snapshot is for the currently-displayed note, and only if the
+    /// editor isn't already holding dirty edits for this exact note.
+    /// Avoids clobbering in-flight edits on an idempotent re-fetch (and
+    /// also avoids overwriting a freshly-saved-merged baseline when the
+    /// snapshot change fired from our own `applyDiff` response).
+    private func seedEditorIfNeeded(from snapshot: RemoteNoteSnapshot) {
+        guard snapshot.id == listRow.id else { return }
         let editor = appState.remoteEditor
-        if !editor.isBound(toVaultID: vault.id, noteID: content.id) {
+        if !editor.isBound(toVaultID: vault.id, noteID: snapshot.id) {
             // Different note bound previously — replace state.
-            editor.load(content)
+            editor.load(snapshot, vaultID: vault.id)
         } else if !editor.isDirty {
             // Same note, no in-progress edits — refresh from server.
-            editor.load(content)
+            editor.load(snapshot, vaultID: vault.id)
         }
         // Else: same note, user has dirty edits — leave them be.
     }
@@ -337,9 +339,14 @@ struct RemoteNoteDetailView: View {
         let store = appState.remoteVaultsStore
         let client = appState.authService.apiClient
         Task {
-            if let updated = await editor.save(via: client) {
-                // Reflect new updated_at + title into the cached list row.
-                store.updateNoteRowFromPATCH(updated)
+            if let snapshot = await editor.saveViaDiff(via: client) {
+                // Mirror the post-merge snapshot into the store so future
+                // re-opens of this view don't refetch.
+                store.setOpenNoteSnapshot(snapshot)
+                // The list row's `updated_at` reflects the body change.
+                // The snapshot doesn't carry created_at / title, so we
+                // splice them onto the existing row in place.
+                store.bumpNoteUpdatedAt(noteID: snapshot.id, path: snapshot.path)
             }
         }
     }

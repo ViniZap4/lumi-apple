@@ -189,8 +189,9 @@ final class AppState {
                         let store = self.remoteVaultsStore
                         let editor = self.remoteEditor
                         Task {
-                            if let updated = await editor.save(via: client) {
-                                store.updateNoteRowFromPATCH(updated)
+                            if let snapshot = await editor.saveViaDiff(via: client) {
+                                store.setOpenNoteSnapshot(snapshot)
+                                store.bumpNoteUpdatedAt(noteID: snapshot.id, path: snapshot.path)
                             }
                         }
                     }

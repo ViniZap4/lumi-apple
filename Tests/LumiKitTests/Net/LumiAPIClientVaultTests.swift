@@ -943,14 +943,16 @@ struct LumiAPIClientVaultTests {
         }
     }
 
-    @Test("RemoteVaultsStore.loadOpenNote populates openNoteContent on success")
+    @Test("RemoteVaultsStore.loadOpenNote populates openNoteSnapshot on success")
     @MainActor
     func storeLoadOpenNote() async throws {
         let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
         MockURLProtocol.setHandler { request in
+            // Slice 4d switched the load path from /content to /snapshot.
+            #expect(request.url?.path.hasSuffix("/snapshot") == true)
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
             let body = """
-            {"id":"hello","vault_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301","path":"hello.md","body":"hi there"}
+            {"id":"hello","path":"hello.md","text":"hi there","vector_clock":"YWFhYQ=="}
             """.data(using: .utf8)!
             return (response, body)
         }
@@ -961,8 +963,9 @@ struct LumiAPIClientVaultTests {
         await client.setToken("tok")
         let store = RemoteVaultsStore(client: client)
         await store.loadOpenNote(vaultID: vaultID, noteID: "hello")
-        #expect(store.openNoteContent?.id == "hello")
-        #expect(store.openNoteContent?.body == "hi there")
+        #expect(store.openNoteSnapshot?.id == "hello")
+        #expect(store.openNoteSnapshot?.text == "hi there")
+        #expect(store.openNoteSnapshot?.vectorClock == "YWFhYQ==")
         #expect(store.openNoteError == nil)
         #expect(store.openNoteIsLoading == false)
     }
@@ -983,7 +986,7 @@ struct LumiAPIClientVaultTests {
         await client.setToken("tok")
         let store = RemoteVaultsStore(client: client)
         await store.loadOpenNote(vaultID: vaultID, noteID: "missing")
-        #expect(store.openNoteContent == nil)
+        #expect(store.openNoteSnapshot == nil)
         if case let .server(status, code, _) = store.openNoteError {
             #expect(status == 404)
             #expect(code == "not_found")
@@ -1142,7 +1145,7 @@ struct LumiAPIClientVaultTests {
         let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
         MockURLProtocol.setHandler { request in
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            let body = #"{"id":"x","vault_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301","path":"x.md","body":"x"}"#.data(using: .utf8)!
+            let body = #"{"id":"x","path":"x.md","text":"x","vector_clock":"YWFhYQ=="}"#.data(using: .utf8)!
             return (response, body)
         }
         let config = URLSessionConfiguration.ephemeral
@@ -1152,9 +1155,9 @@ struct LumiAPIClientVaultTests {
         await client.setToken("tok")
         let store = RemoteVaultsStore(client: client)
         await store.loadOpenNote(vaultID: vaultID, noteID: "x")
-        #expect(store.openNoteContent != nil)
+        #expect(store.openNoteSnapshot != nil)
         store.closeOpenNote()
-        #expect(store.openNoteContent == nil)
+        #expect(store.openNoteSnapshot == nil)
         #expect(store.openNoteError == nil)
         #expect(store.openNoteIsLoading == false)
     }
@@ -1357,7 +1360,210 @@ struct LumiAPIClientVaultTests {
         #expect(store.notes.count == 2)
     }
 
-    @Test("RemoteVaultsStore.deleteNote drops row and clears openNoteContent if it was open")
+    // MARK: - Snapshot + diff (slice 4d — CRDT-aware sync protocol)
+
+    @Test("getNoteSnapshot decodes text + vector_clock")
+    func getNoteSnapshotDecode() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/vaults/3f2504e0-4f89-11d3-9a0c-0305e82c3301/notes/hello/snapshot")
+            #expect(request.httpMethod == "GET")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = """
+            {"id":"hello","path":"hello.md","text":"# Hello\\n\\nWorld.","vector_clock":"YWJjZA=="}
+            """.data(using: .utf8)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let snapshot = try await client.getNoteSnapshot(vaultID: vaultID, noteID: "hello")
+        #expect(snapshot.id == "hello")
+        #expect(snapshot.path == "hello.md")
+        #expect(snapshot.text == "# Hello\n\nWorld.")
+        #expect(snapshot.vectorClock == "YWJjZA==")
+    }
+
+    @Test("getNoteSnapshot 503 surfaces .server crdt_unavailable")
+    func getNoteSnapshotCRDTUnavailable() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!
+            let data = #"{"error":"crdt_unavailable"}"#.data(using: .utf8)!
+            return (response, data)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let captured = await catchAPIError {
+            _ = try await client.getNoteSnapshot(vaultID: vaultID, noteID: "x")
+        }
+        if case let .server(status, code, _) = captured {
+            #expect(status == 503)
+            #expect(code == "crdt_unavailable")
+        } else {
+            Issue.record("expected .server crdt_unavailable, got \(String(describing: captured))")
+        }
+    }
+
+    @Test("applyNoteDiff sends base_clock + text + origin")
+    func applyNoteDiffWireShape() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/vaults/3f2504e0-4f89-11d3-9a0c-0305e82c3301/notes/hello/diff")
+            #expect(request.httpMethod == "POST")
+            var sentBody = Data()
+            if let stream = request.httpBodyStream {
+                stream.open()
+                var buf = [UInt8](repeating: 0, count: 4096)
+                while stream.hasBytesAvailable {
+                    let n = stream.read(&buf, maxLength: buf.count)
+                    if n <= 0 { break }
+                    sentBody.append(buf, count: n)
+                }
+                stream.close()
+            }
+            let json = String(data: sentBody, encoding: .utf8) ?? ""
+            #expect(json.contains("\"base_clock\""))
+            #expect(json.contains("YWJjZA=="))
+            #expect(json.contains("\"text\""))
+            #expect(json.contains("new body"))
+            #expect(json.contains("\"origin\""))
+            #expect(json.contains("apple-diff"))
+
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let data = """
+            {"id":"hello","path":"hello.md","text":"new body","vector_clock":"eHl6"}
+            """.data(using: .utf8)!
+            return (response, data)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let merged = try await client.applyNoteDiff(
+            vaultID: vaultID,
+            noteID: "hello",
+            baseClock: "YWJjZA==",
+            text: "new body"
+        )
+        #expect(merged.text == "new body")
+        #expect(merged.vectorClock == "eHl6")
+    }
+
+    @Test("applyNoteDiff omits base_clock when nil or empty (create-then-first-save case)")
+    func applyNoteDiffOmitsEmptyBaseClock() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            var sentBody = Data()
+            if let stream = request.httpBodyStream {
+                stream.open()
+                var buf = [UInt8](repeating: 0, count: 4096)
+                while stream.hasBytesAvailable {
+                    let n = stream.read(&buf, maxLength: buf.count)
+                    if n <= 0 { break }
+                    sentBody.append(buf, count: n)
+                }
+                stream.close()
+            }
+            let json = String(data: sentBody, encoding: .utf8) ?? ""
+            // Server's `omitempty` semantics — wire body must NOT carry
+            // `base_clock` at all when caller passed nil/empty.
+            #expect(!json.contains("\"base_clock\""))
+            #expect(json.contains("\"text\""))
+
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let data = """
+            {"id":"fresh","path":"fresh.md","text":"first body","vector_clock":"AAAA"}
+            """.data(using: .utf8)!
+            return (response, data)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let merged = try await client.applyNoteDiff(
+            vaultID: vaultID,
+            noteID: "fresh",
+            baseClock: nil,
+            text: "first body"
+        )
+        #expect(merged.vectorClock == "AAAA")
+    }
+
+    @Test("applyNoteDiff 403 surfaces .server forbidden")
+    func applyNoteDiffForbidden() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!
+            let data = #"{"error":"forbidden","detail":"note.write required"}"#.data(using: .utf8)!
+            return (response, data)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let captured = await catchAPIError {
+            _ = try await client.applyNoteDiff(vaultID: vaultID, noteID: "x", baseClock: "Y", text: "z")
+        }
+        if case let .server(status, code, _) = captured {
+            #expect(status == 403)
+            #expect(code == "forbidden")
+        } else {
+            Issue.record("expected .server forbidden, got \(String(describing: captured))")
+        }
+    }
+
+    @Test("RemoteVaultsStore.bumpNoteUpdatedAt mutates updated_at on the cached row")
+    @MainActor
+    func storeBumpUpdatedAt() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body: String
+            let path = request.url?.path ?? ""
+            if path.hasSuffix("/notes") {
+                body = """
+                {"notes":[
+                  {"id":"x","vault_id":"\(vaultID.uuidString)","path":"x.md","title":"X","created_at":"2026-05-01T10:00:00Z","updated_at":"2026-05-01T10:00:00Z"}
+                ],"limit":100,"offset":0}
+                """
+            } else if path.hasSuffix("/members") {
+                body = #"{"members":[]}"#
+            } else if path.hasSuffix("/roles") {
+                body = #"{"roles":[]}"#
+            } else if path.hasSuffix("/invites") {
+                body = #"{"invites":[]}"#
+            } else if path.hasSuffix("/audit") {
+                body = #"{"entries":[],"limit":50,"offset":0}"#
+            } else {
+                body = "{}"
+            }
+            return (response, body.data(using: .utf8)!)
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = LumiAPIClient(session: URLSession(configuration: config))
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let store = RemoteVaultsStore(client: client)
+        await store.selectVault(vaultID)
+        let originalUpdated = store.notes[0].updatedAt
+        // Sleep enough that Date() > originalUpdated is observable.
+        try await Task.sleep(nanoseconds: 5_000_000)
+        store.bumpNoteUpdatedAt(noteID: "x", path: "x.md")
+        guard let bumped = store.notes.first?.updatedAt,
+              let original = originalUpdated else {
+            Issue.record("expected updated_at to exist before and after bump")
+            return
+        }
+        #expect(bumped > original)
+        // Other fields preserved.
+        #expect(store.notes[0].title == "X")
+        #expect(store.notes[0].path == "x.md")
+        // Bumping a missing id is a no-op.
+        store.bumpNoteUpdatedAt(noteID: "nope", path: "n/a")
+        #expect(store.notes.count == 1)
+    }
+
+    @Test("RemoteVaultsStore.deleteNote drops row and clears openNoteSnapshot if it was open")
     @MainActor
     func storeDeleteNote() async throws {
         let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
@@ -1370,9 +1576,9 @@ struct LumiAPIClientVaultTests {
             }
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
             let body: String
-            if path.hasSuffix("/content") {
+            if path.hasSuffix("/snapshot") {
                 body = """
-                {"id":"target","vault_id":"\(vaultID.uuidString)","path":"target.md","body":"open body"}
+                {"id":"target","path":"target.md","text":"open body","vector_clock":"YWFhYQ=="}
                 """
             } else if path.hasSuffix("/notes") {
                 body = """
@@ -1402,23 +1608,23 @@ struct LumiAPIClientVaultTests {
         let store = RemoteVaultsStore(client: client)
         await store.selectVault(vaultID)
         await store.loadOpenNote(vaultID: vaultID, noteID: "target")
-        #expect(store.openNoteContent?.id == "target")
+        #expect(store.openNoteSnapshot?.id == "target")
 
         try await store.deleteNote(noteID: "target")
         #expect(store.notes.count == 1)
         #expect(store.notes[0].id == "other")
-        // Deleted the open note → store must drop openNoteContent so the
+        // Deleted the open note → store must drop openNoteSnapshot so the
         // UI's "open" route doesn't render a dangling reference.
-        #expect(store.openNoteContent == nil)
+        #expect(store.openNoteSnapshot == nil)
 
         // Deleting a row that ISN'T the open note must NOT touch open state.
-        // Re-prime openNoteContent (mock still serves /target/content).
+        // Re-prime openNoteSnapshot (mock still serves /target/snapshot).
         await store.loadOpenNote(vaultID: vaultID, noteID: "target")
-        #expect(store.openNoteContent?.id == "target")
+        #expect(store.openNoteSnapshot?.id == "target")
         try await store.deleteNote(noteID: "other")
         #expect(!store.notes.contains(where: { $0.id == "other" }))
-        // Open content survives an unrelated delete.
-        #expect(store.openNoteContent?.id == "target")
+        // Open snapshot survives an unrelated delete.
+        #expect(store.openNoteSnapshot?.id == "target")
     }
 
     @Test("RemoteVaultsStore.selectVault swallows 403 on notes endpoint")

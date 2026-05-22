@@ -79,16 +79,15 @@ struct CreateRemoteNoteSheet: View {
         do {
             let created = try await appState.remoteVaultsStore.createNote(title: trimmed)
             // Land the user inside the new note in edit mode so they can
-            // start typing immediately. `remoteEditor.load(_:)` is fed
-            // synthetic content (empty body); slice 3's editor handles
-            // the rest.
-            let seed = RemoteNoteContent(
-                id: created.id,
+            // start typing immediately. `loadFresh` seeds with empty
+            // body + nil clock — the first save sends `base_clock: nil`
+            // (advisory in server slice 2.2), the response populates the
+            // clock for subsequent diffs.
+            appState.remoteEditor.loadFresh(
                 vaultID: vault.id,
-                path: created.path,
-                body: ""
+                noteID: created.id,
+                path: created.path
             )
-            appState.remoteEditor.load(seed)
             appState.selectedRemoteNoteID = created.id
             appState.remoteEditorMode = .edit
             dismiss()

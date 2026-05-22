@@ -241,6 +241,37 @@ public actor LumiAPIClient {
         return try await request(method: "GET", path: path, body: nil as EmptyBody?, requireToken: true)
     }
 
+    /// `GET /api/vaults/:vault/notes/:id/snapshot` — capability `note.read`
+    /// required. Returns body text + base64 state vector. Slice 4d's
+    /// canonical load path for server notes (replaces `getNoteContent`
+    /// for editor-bound flows because the snapshot bundles the clock the
+    /// next `applyDiff` save needs).
+    public func getNoteSnapshot(vaultID: UUID, noteID: String) async throws(LumiAPIError) -> RemoteNoteSnapshot {
+        let escaped = noteID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? noteID
+        let path = "/api/vaults/\(vaultID.uuidString.lowercased())/notes/\(escaped)/snapshot"
+        return try await request(method: "GET", path: path, body: nil as EmptyBody?, requireToken: true)
+    }
+
+    /// `POST /api/vaults/:vault/notes/:id/diff` — capability `note.write`
+    /// required. Sends the full new body; the server CRDT computes the
+    /// minimal (remove, insert) op against the current state, preserves
+    /// concurrent edits, and returns the post-merge snapshot. Pass the
+    /// `baseClock` you last observed (from snapshot or a prior diff) so
+    /// the server can place the patch correctly; nil is acceptable for
+    /// first-write-after-create when no prior clock was captured.
+    public func applyNoteDiff(
+        vaultID: UUID,
+        noteID: String,
+        baseClock: String?,
+        text: String,
+        origin: String = "apple-diff"
+    ) async throws(LumiAPIError) -> RemoteNoteSnapshot {
+        let escaped = noteID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? noteID
+        let path = "/api/vaults/\(vaultID.uuidString.lowercased())/notes/\(escaped)/diff"
+        let body = ApplyDiffRequest(baseClock: baseClock, text: text, origin: origin)
+        return try await request(method: "POST", path: path, body: body, requireToken: true)
+    }
+
     /// `POST /api/vaults/:vault/notes` — capability `note.create` required.
     /// Returns the new note's metadata row (matching the list endpoint
     /// shape). Server derives the slug id from `title`; tags default to an
@@ -483,6 +514,35 @@ struct MemberListResponse: Decodable, Sendable {
 
 struct RoleListResponse: Decodable, Sendable {
     let roles: [RemoteRole]
+}
+
+/// Body for `POST /api/vaults/:vault/notes/:id/diff`. The server treats
+/// `base_clock` as advisory in 2.2 (a hint about which CRDT history
+/// position the diff is anchored to); we send it anyway so the wire
+/// stays forward-compatible with the strict-conflict mode 4c will add.
+/// `origin` labels the diff source for audit + WS broadcast filtering;
+/// "apple-diff" is the canonical case for this client.
+struct ApplyDiffRequest: Encodable, Sendable {
+    let baseClock: String?
+    let text: String
+    let origin: String
+
+    enum CodingKeys: String, CodingKey {
+        case baseClock = "base_clock"
+        case text, origin
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        // Omit when empty/nil so the server's `omitempty` JSON tag is
+        // mirrored — keeps `base_clock` absent in the create-then-first-
+        // save case where no prior clock has been observed.
+        if let baseClock, !baseClock.isEmpty {
+            try c.encode(baseClock, forKey: .baseClock)
+        }
+        try c.encode(text, forKey: .text)
+        try c.encode(origin, forKey: .origin)
+    }
 }
 
 /// Body for `POST /api/vaults/:vault/notes`. Tags default to an empty

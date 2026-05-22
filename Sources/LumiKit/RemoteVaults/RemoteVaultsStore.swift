@@ -24,10 +24,12 @@ public final class RemoteVaultsStore {
     public private(set) var auditHasMore: Bool = false
     public private(set) var notes: [RemoteNote] = []
     public private(set) var notesHasMore: Bool = false
-    /// The currently-open server note's full content (body, etc.). Set by
-    /// `loadOpenNote`; cleared by `closeOpenNote`. Slice 2 read-only — the
-    /// editor wiring lands in slice 3.
-    public private(set) var openNoteContent: RemoteNoteContent?
+    /// The currently-open server note's CRDT snapshot (body text + base64
+    /// state vector). Set by `loadOpenNote`; cleared by `closeOpenNote`.
+    /// Slice 4d migrated the underlying transport from `GET .../content`
+    /// to `GET .../snapshot` so the same round-trip seeds the editor *and*
+    /// arms the clock for the eventual `applyDiff` save.
+    public private(set) var openNoteSnapshot: RemoteNoteSnapshot?
     public private(set) var openNoteIsLoading: Bool = false
     /// Non-nil when the most recent `loadOpenNote` failed. Cleared on a
     /// successful subsequent load or on `closeOpenNote`.
@@ -69,7 +71,7 @@ public final class RemoteVaultsStore {
             auditHasMore = false
             notes = []
             notesHasMore = false
-            openNoteContent = nil
+            openNoteSnapshot = nil
             openNoteError = nil
             return
         }
@@ -83,7 +85,7 @@ public final class RemoteVaultsStore {
         auditHasMore = false
         notes = []
         notesHasMore = false
-        openNoteContent = nil
+        openNoteSnapshot = nil
         openNoteError = nil
         // Sequential rather than `async let` — Swift 6 typed throws don't
         // propagate through `async let` bindings, and serializing a few short
@@ -125,28 +127,56 @@ public final class RemoteVaultsStore {
         isLoading = false
     }
 
-    /// Load the full content for a server note. Sets `openNoteContent` on
+    /// Load the CRDT snapshot for a server note. Sets `openNoteSnapshot` on
     /// success; surfaces failures via `openNoteError`. Idempotent — calling
-    /// twice with the same arguments simply re-fetches.
+    /// twice with the same arguments simply re-fetches and re-arms the
+    /// clock.
     public func loadOpenNote(vaultID: UUID, noteID: String) async {
         openNoteIsLoading = true
         openNoteError = nil
         do {
-            let content = try await client.getNoteContent(vaultID: vaultID, noteID: noteID)
-            openNoteContent = content
+            let snapshot = try await client.getNoteSnapshot(vaultID: vaultID, noteID: noteID)
+            openNoteSnapshot = snapshot
         } catch {
-            openNoteContent = nil
+            openNoteSnapshot = nil
             openNoteError = error
         }
         openNoteIsLoading = false
     }
 
+    /// Replace the cached snapshot in place — used after a successful
+    /// `applyDiff` returns the post-merge text + new clock so the next
+    /// save anchors against the right CRDT position. Caller is expected
+    /// to have updated its own editor baseline already.
+    public func setOpenNoteSnapshot(_ snapshot: RemoteNoteSnapshot) {
+        openNoteSnapshot = snapshot
+    }
+
     /// Clear the currently-open server note. UI calls this when the user
     /// navigates back to the vault detail view.
     public func closeOpenNote() {
-        openNoteContent = nil
+        openNoteSnapshot = nil
         openNoteError = nil
         openNoteIsLoading = false
+    }
+
+    /// Bump the `updatedAt` of a cached note row to now. Used after a
+    /// successful `applyDiff` — the server's response doesn't carry a
+    /// full noteDTO (only the snapshot shape), so we synthesize the bump
+    /// locally. Path is also accepted in case it ever changes (it
+    /// shouldn't for body-only diffs, but the snapshot includes it for
+    /// completeness). No-op when no row matches.
+    public func bumpNoteUpdatedAt(noteID: String, path: String) {
+        guard let idx = notes.firstIndex(where: { $0.id == noteID }) else { return }
+        let existing = notes[idx]
+        notes[idx] = RemoteNote(
+            id: existing.id,
+            vaultID: existing.vaultID,
+            path: path,
+            title: existing.title,
+            createdAt: existing.createdAt,
+            updatedAt: Date()
+        )
     }
 
     /// Merge an updated note row (e.g. the response of a successful PATCH)
@@ -189,8 +219,8 @@ public final class RemoteVaultsStore {
         }
         try await client.deleteNote(vaultID: vaultID, noteID: noteID)
         notes.removeAll { $0.id == noteID }
-        if openNoteContent?.id == noteID {
-            openNoteContent = nil
+        if openNoteSnapshot?.id == noteID {
+            openNoteSnapshot = nil
             openNoteError = nil
             openNoteIsLoading = false
         }
@@ -324,6 +354,7 @@ public final class RemoteVaultsStore {
             auditHasMore = false
             notes = []
             notesHasMore = false
+            openNoteSnapshot = nil
         }
     }
 
@@ -338,7 +369,7 @@ public final class RemoteVaultsStore {
         auditHasMore = false
         notes = []
         notesHasMore = false
-        openNoteContent = nil
+        openNoteSnapshot = nil
         openNoteError = nil
         openNoteIsLoading = false
         lastError = nil
