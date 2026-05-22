@@ -149,6 +149,17 @@ public final class RemoteVaultsStore {
         openNoteIsLoading = false
     }
 
+    /// Merge an updated note row (e.g. the response of a successful PATCH)
+    /// into the cached `notes` list. Replaces the existing row by id if
+    /// present; no-op otherwise (the row may have been paginated off).
+    /// Used by the editor flow after `LumiAPIClient.updateNote` returns so
+    /// the list reflects the new `updated_at` / title without a full refetch.
+    public func updateNoteRowFromPATCH(_ updated: RemoteNote) {
+        if let idx = notes.firstIndex(where: { $0.id == updated.id }) {
+            notes[idx] = updated
+        }
+    }
+
     /// Append the next page of notes. Caller-driven via a "Load more" button
     /// on long vaults.
     public func loadMoreNotes() async {

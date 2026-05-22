@@ -83,6 +83,18 @@ final class AppState {
     /// (which is local-vault only).
     var selectedRemoteNoteID: String?
 
+    /// Editor state for the currently-open server note. Reused across
+    /// notes — switching notes calls `load(_:)` to repopulate. Saves are
+    /// PATCH calls (`LumiAPIClient.updateNote`) instead of atomic disk
+    /// writes. Sibling of the local `editor`; the two are independent so
+    /// dirty state can persist across local↔server vault switches.
+    let remoteEditor = RemoteEditorState()
+
+    /// View / edit toggle for the currently-open server note. Mirrors the
+    /// local `editorMode` for server notes. Reset to `.view` on every
+    /// note open so users land in preview first.
+    var remoteEditorMode: NoteDisplayMode = .view
+
     /// Persisted user preferences (vim nav, jj/jk mappings, etc.). Read by
     /// views that gate features on user opt-in.
     let preferences = LumiPreferences()

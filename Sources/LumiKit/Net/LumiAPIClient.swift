@@ -241,6 +241,26 @@ public actor LumiAPIClient {
         return try await request(method: "GET", path: path, body: nil as EmptyBody?, requireToken: true)
     }
 
+    /// `PATCH /api/vaults/:vault/notes/:id` — capability `note.write` required
+    /// (plus `note.move` if `path` is provided). Each field is optional; nil
+    /// means "leave alone". Returns the updated note metadata DTO (matching
+    /// the list endpoint's row shape) so the caller can refresh its cache.
+    ///
+    /// Slice 3 only wires `body`; title/path/tags surfaces land later.
+    public func updateNote(
+        vaultID: UUID,
+        noteID: String,
+        title: String? = nil,
+        body: String? = nil,
+        path: String? = nil,
+        tags: [String]? = nil
+    ) async throws(LumiAPIError) -> RemoteNote {
+        let escaped = noteID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? noteID
+        let urlPath = "/api/vaults/\(vaultID.uuidString.lowercased())/notes/\(escaped)"
+        let body = UpdateNoteRequest(title: title, body: body, path: path, tags: tags)
+        return try await request(method: "PATCH", path: urlPath, body: body, requireToken: true)
+    }
+
     private func request<Body: Encodable & Sendable, Response: Decodable & Sendable>(
         method: String,
         path: String,
@@ -440,6 +460,30 @@ struct MemberListResponse: Decodable, Sendable {
 
 struct RoleListResponse: Decodable, Sendable {
     let roles: [RemoteRole]
+}
+
+/// Body for `PATCH /api/vaults/:vault/notes/:id`. All fields optional — the
+/// server treats nil as "leave alone".
+struct UpdateNoteRequest: Encodable, Sendable {
+    let title: String?
+    let body: String?
+    let path: String?
+    let tags: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case title, body, path, tags
+    }
+
+    func encode(to encoder: Encoder) throws {
+        // Explicit encoder so nil fields are *omitted* rather than emitted
+        // as `null` (the server treats nil and null differently — null
+        // would mean "clear the field", we mean "don't touch it").
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        if let title { try c.encode(title, forKey: .title) }
+        if let body { try c.encode(body, forKey: .body) }
+        if let path { try c.encode(path, forKey: .path) }
+        if let tags { try c.encode(tags, forKey: .tags) }
+    }
 }
 
 struct EmptyBody: Codable, Sendable {}

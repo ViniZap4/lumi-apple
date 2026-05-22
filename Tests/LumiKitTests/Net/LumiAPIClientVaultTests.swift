@@ -995,6 +995,147 @@ struct LumiAPIClientVaultTests {
         #expect(store.lastError == nil)
     }
 
+    @Test("updateNote sends PATCH with only the non-nil fields")
+    func updateNoteOmitsNilFields() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/vaults/3f2504e0-4f89-11d3-9a0c-0305e82c3301/notes/hello")
+            #expect(request.httpMethod == "PATCH")
+            #expect(request.value(forHTTPHeaderField: "X-Lumi-Token") == "tok-123")
+            // URLProtocol doesn't expose POST/PATCH bodies via .httpBody —
+            // they arrive on .httpBodyStream. Read the stream so we can
+            // assert on the encoded JSON shape.
+            var sentBody = Data()
+            if let stream = request.httpBodyStream {
+                stream.open()
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                while stream.hasBytesAvailable {
+                    let n = stream.read(&buffer, maxLength: buffer.count)
+                    if n <= 0 { break }
+                    sentBody.append(buffer, count: n)
+                }
+                stream.close()
+            }
+            let json = String(data: sentBody, encoding: .utf8) ?? ""
+            #expect(json.contains("\"body\""))
+            // nil fields must be omitted (not encoded as `null` — server
+            // treats `null` as "clear the field").
+            #expect(!json.contains("\"title\""))
+            #expect(!json.contains("\"path\""))
+            #expect(!json.contains("\"tags\""))
+
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let data = """
+            {"id":"hello","vault_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301","path":"hello.md","title":"Hello","created_at":"2026-05-19T10:00:00Z","updated_at":"2026-05-22T14:00:00Z"}
+            """.data(using: .utf8)!
+            return (response, data)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let updated = try await client.updateNote(vaultID: vaultID, noteID: "hello", body: "new body")
+        #expect(updated.id == "hello")
+        #expect(updated.title == "Hello")
+    }
+
+    @Test("updateNote without note.write surfaces .server forbidden")
+    func updateNoteForbidden() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!
+            let data = #"{"error":"forbidden","detail":"note.write required"}"#.data(using: .utf8)!
+            return (response, data)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let captured = await catchAPIError {
+            _ = try await client.updateNote(vaultID: vaultID, noteID: "hello", body: "x")
+        }
+        if case let .server(status, code, _) = captured {
+            #expect(status == 403)
+            #expect(code == "forbidden")
+        } else {
+            Issue.record("expected .server forbidden, got \(String(describing: captured))")
+        }
+    }
+
+    @Test("updateNote percent-encodes the slug")
+    func updateNoteEncodesSlug() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let absolute = request.url?.absoluteString ?? ""
+            #expect(absolute.contains("/notes/with%20space"))
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let data = """
+            {"id":"with space","vault_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301","path":"with space.md","title":"WS","created_at":"2026-05-19T10:00:00Z","updated_at":"2026-05-22T14:00:00Z"}
+            """.data(using: .utf8)!
+            return (response, data)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let updated = try await client.updateNote(vaultID: vaultID, noteID: "with space", body: "x")
+        #expect(updated.id == "with space")
+    }
+
+    @Test("RemoteVaultsStore.updateNoteRowFromPATCH replaces the cached row in place")
+    @MainActor
+    func storeUpdateRowFromPATCH() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        // Bootstrap the store with two cached rows.
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body: String
+            let path = request.url?.path ?? ""
+            if path.hasSuffix("/notes") {
+                body = """
+                {"notes":[
+                  {"id":"alpha","vault_id":"\(vaultID.uuidString)","path":"alpha.md","title":"Alpha","created_at":"2026-05-19T10:00:00Z","updated_at":"2026-05-19T10:00:00Z"},
+                  {"id":"beta","vault_id":"\(vaultID.uuidString)","path":"beta.md","title":"Beta","created_at":"2026-05-19T10:00:00Z","updated_at":"2026-05-19T10:00:00Z"}
+                ],"limit":100,"offset":0}
+                """
+            } else if path.hasSuffix("/members") {
+                body = #"{"members":[]}"#
+            } else if path.hasSuffix("/roles") {
+                body = #"{"roles":[]}"#
+            } else if path.hasSuffix("/invites") {
+                body = #"{"invites":[]}"#
+            } else if path.hasSuffix("/audit") {
+                body = #"{"entries":[],"limit":50,"offset":0}"#
+            } else {
+                body = "{}"
+            }
+            return (response, body.data(using: .utf8)!)
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = LumiAPIClient(session: URLSession(configuration: config))
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let store = RemoteVaultsStore(client: client)
+        await store.selectVault(vaultID)
+        #expect(store.notes.count == 2)
+
+        // Simulate a PATCH response that bumps `updated_at` and changes title.
+        let updated = RemoteNote(
+            id: "beta",
+            vaultID: vaultID,
+            path: "beta.md",
+            title: "Beta v2",
+            createdAt: Date(timeIntervalSince1970: 0),
+            updatedAt: Date(timeIntervalSince1970: 999_999)
+        )
+        store.updateNoteRowFromPATCH(updated)
+        #expect(store.notes[1].title == "Beta v2")
+        #expect(store.notes[0].id == "alpha") // unaffected
+
+        // Updating a non-existent id is a no-op (e.g. after pagination).
+        let phantom = RemoteNote(id: "ghost", vaultID: vaultID, path: "ghost.md", title: "G", createdAt: nil, updatedAt: nil)
+        store.updateNoteRowFromPATCH(phantom)
+        #expect(store.notes.count == 2)
+    }
+
     @Test("RemoteVaultsStore.closeOpenNote clears all open-note state")
     @MainActor
     func storeCloseOpenNote() async throws {

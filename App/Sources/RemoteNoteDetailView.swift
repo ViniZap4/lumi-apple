@@ -2,27 +2,27 @@ import SwiftUI
 import LumiKit
 import LumiUI
 
-/// Read-only viewer for a server-vault note (E.1.2 slice 2). Renders the
-/// markdown body via the shared `MarkdownView` pipeline. Editing, save, vim
-/// mode, and reading-mode glide-scroll all stay opt-out for now — this view
-/// is intentionally minimal so slice 2 ships as a small surface; slice 3
-/// will refactor to share the local-vault `MarkdownReader`.
+/// Read + edit viewer for a server-vault note (E.1.2 slices 2 + 3). View
+/// mode renders the markdown body via the shared `MarkdownView` pipeline;
+/// edit mode hosts `VimEditor` (or `PlainTextEditor` if vim is off) bound
+/// to `AppState.remoteEditor.currentText`, with ⌘S → `PATCH .../notes/:id`.
+/// Local-vault reading-mode glide-scroll + link tooltips are deferred to a
+/// later slice that hoists `MarkdownReader` into LumiUI.
 struct RemoteNoteDetailView: View {
-    /// Server-vault row this note belongs to. Used for the breadcrumb and
-    /// to know which list row's title/path to show in the header.
+    /// Server-vault row this note belongs to. Used for the header chrome.
     let vault: RemoteVault
-    /// The full row from the cached note list. Carries title + path which
-    /// we don't have to re-extract from frontmatter for the header.
+    /// The cached row from the note list. Carries title + path which we
+    /// don't have to re-extract from frontmatter for the header.
     let listRow: RemoteNote
 
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
 
-    /// Cached parsed AST — re-derives only when the body string changes.
-    /// Without this the markdown reparse fires on every state churn (theme
-    /// flips, error banners, etc.), which is wasteful on long notes.
+    /// Cached parsed AST for view mode. Re-derives only when the editor's
+    /// `currentText` changes (live-typing in edit mode keeps view mode
+    /// in sync when the user flips back).
     @State private var parsed: MarkdownDocument?
-    @State private var parsedBody: String?
+    @State private var parsedSource: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -31,6 +31,10 @@ struct RemoteNoteDetailView: View {
                 .padding(.top, 18)
                 .padding(.bottom, 12)
 
+            errorBanner
+                .padding(.horizontal, 32)
+                .padding(.bottom, 8)
+
             Divider().background(theme.border)
 
             content
@@ -38,22 +42,23 @@ struct RemoteNoteDetailView: View {
         .background(theme.background)
         .onAppear(perform: ensureLoaded)
         .onChange(of: appState.remoteVaultsStore.openNoteContent) { _, newContent in
-            // Re-parse the AST whenever the body string changes (initial
-            // load, or a future "refresh" action).
-            guard let newContent else {
-                parsed = nil
-                parsedBody = nil
-                return
-            }
-            if parsedBody != newContent.body {
-                parsedBody = newContent.body
-                parsed = MarkdownParser.parse(newContent.body, baseURL: nil)
+            handleContentChange(newContent)
+        }
+        .onChange(of: appState.remoteEditor.currentText) { _, newText in
+            // Re-parse on every edit so view mode is current when the user
+            // flips back. Cheap on small notes; consider debounce later.
+            if parsedSource != newText {
+                parsedSource = newText
+                parsed = MarkdownParser.parse(newText, baseURL: nil)
             }
         }
     }
 
+    // MARK: - Header
+
     @ViewBuilder
     private var header: some View {
+        @Bindable var bound = appState
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 Button(action: close) {
@@ -66,9 +71,42 @@ struct RemoteNoteDetailView: View {
 
                 Spacer()
 
-                Button {
-                    refresh()
-                } label: {
+                if canEditNotes {
+                    Picker("", selection: $bound.remoteEditorMode) {
+                        Image(systemName: "book").tag(NoteDisplayMode.view)
+                        Image(systemName: "pencil").tag(NoteDisplayMode.edit)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 110)
+                    .labelsHidden()
+                }
+
+                if appState.remoteEditor.isDirty {
+                    Text("modified")
+                        .font(.caption2)
+                        .foregroundStyle(theme.warning)
+                } else if case .saving = appState.remoteEditor.status {
+                    Text("saving…")
+                        .font(.caption2)
+                        .foregroundStyle(theme.textDim)
+                } else if case .saved = appState.remoteEditor.status {
+                    Text("saved")
+                        .font(.caption2)
+                        .foregroundStyle(theme.accent)
+                }
+
+                if canEditNotes {
+                    Button(action: requestSave) {
+                        Label("Save", systemImage: "checkmark")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(appState.remoteEditor.isDirty ? theme.primary : theme.textDim)
+                    .disabled(!appState.remoteEditor.isDirty || isSaving)
+                    .keyboardShortcut("s", modifiers: .command)
+                }
+
+                Button(action: refresh) {
                     Label("Refresh", systemImage: "arrow.clockwise")
                         .labelStyle(.iconOnly)
                 }
@@ -87,11 +125,23 @@ struct RemoteNoteDetailView: View {
                     .foregroundStyle(theme.textDim)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text("· read-only")
-                    .font(.caption2)
-                    .foregroundStyle(theme.textDim)
+                if !canEditNotes {
+                    Text("· read-only (note.write required)")
+                        .font(.caption2)
+                        .foregroundStyle(theme.textDim)
+                }
             }
         }
+    }
+
+    /// `note.write` capability check. Mirrors the audit/invite checks in
+    /// `RemoteVaultDetailView` — matches against the current session's
+    /// member row inside the active vault.
+    private var canEditNotes: Bool {
+        guard let session = appState.authService.currentSession else { return false }
+        let me = appState.remoteVaultsStore.members.first { $0.username == session.user.username }
+        guard let caps = me?.capabilities else { return false }
+        return caps.contains { $0 == "*" || $0 == "note.*" || $0 == "note.write" || $0 == "vault.*" }
     }
 
     private var displayTitle: String {
@@ -99,27 +149,108 @@ struct RemoteNoteDetailView: View {
         return listRow.id
     }
 
+    private var isSaving: Bool {
+        if case .saving = appState.remoteEditor.status { return true }
+        return false
+    }
+
+    // MARK: - Error banner
+
+    @ViewBuilder
+    private var errorBanner: some View {
+        if case let .error(message) = appState.remoteEditor.status {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(theme.error)
+                Text(message)
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundStyle(theme.error)
+                Spacer()
+                Button("Dismiss") { appState.remoteEditor.discard() }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(theme.textDim)
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(theme.error.opacity(0.08))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(theme.error.opacity(0.4), lineWidth: 0.5)
+                    )
+            )
+        }
+    }
+
+    // MARK: - Content
+
     @ViewBuilder
     private var content: some View {
         if appState.remoteVaultsStore.openNoteIsLoading && parsed == nil {
             loadingState
         } else if let error = appState.remoteVaultsStore.openNoteError, parsed == nil {
             errorState(error)
-        } else if let parsed {
-            ScrollView {
+        } else if parsed != nil {
+            switch appState.remoteEditorMode {
+            case .view:
+                viewMode
+            case .edit:
+                editMode
+            }
+        } else {
+            EmptyView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(theme.background)
+        }
+    }
+
+    @ViewBuilder
+    private var viewMode: some View {
+        ScrollView {
+            if let parsed {
                 MarkdownView(parsed)
                     .padding(.horizontal, 32)
                     .padding(.vertical, 20)
                     .frame(maxWidth: 820, alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .background(theme.background)
-        } else {
-            // Initial state before the first task fires — show nothing
-            // (the header is already visible so the user sees something).
-            EmptyView()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(theme.background)
+        }
+        .background(theme.background)
+    }
+
+    @ViewBuilder
+    private var editMode: some View {
+        @Bindable var editor = appState.remoteEditor
+        Group {
+            if appState.preferences.vimEnabled {
+                VimEditor(
+                    text: $editor.currentText,
+                    onModeChange: { appState.liveVimMode = $0 },
+                    onEffect: handleVimEffect,
+                    jjEscapeEnabled: appState.preferences.jjEscapeMapping,
+                    showLineNumbers: appState.preferences.showLineNumbers,
+                    relativeLineNumbers: appState.preferences.relativeLineNumbers
+                )
+                .overlay(alignment: .top) { editModeStripe }
+            } else {
+                PlainTextEditor(text: $editor.currentText)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var editModeStripe: some View {
+        Rectangle()
+            .fill(editModeColor)
+            .frame(height: 3)
+    }
+
+    private var editModeColor: Color {
+        switch appState.liveVimMode {
+        case .insert: return theme.primary
+        case .visual: return theme.warning
+        case .commandLine: return theme.accent
+        case .normal: return theme.info
         }
     }
 
@@ -157,18 +288,50 @@ struct RemoteNoteDetailView: View {
         .background(theme.background)
     }
 
+    // MARK: - Lifecycle / actions
+
     private func ensureLoaded() {
+        appState.remoteEditorMode = .view
         let store = appState.remoteVaultsStore
         if let current = store.openNoteContent, current.id == listRow.id {
-            // Hot path: row tap triggered the load before this view
-            // appeared; just sync our parsed cache.
-            if parsedBody != current.body {
-                parsedBody = current.body
-                parsed = MarkdownParser.parse(current.body, baseURL: nil)
-            }
+            seedEditorIfNeeded(from: current)
             return
         }
         Task { await store.loadOpenNote(vaultID: vault.id, noteID: listRow.id) }
+    }
+
+    private func handleContentChange(_ newContent: RemoteNoteContent?) {
+        guard let newContent else {
+            parsed = nil
+            parsedSource = nil
+            return
+        }
+        seedEditorIfNeeded(from: newContent)
+    }
+
+    /// Seed the markdown cache + editor state from a fetched payload — but
+    /// only when this content is for the currently-displayed note, and
+    /// only if the editor isn't already showing it. Avoids clobbering
+    /// dirty in-flight edits on an idempotent re-fetch.
+    private func seedEditorIfNeeded(from content: RemoteNoteContent) {
+        guard content.id == listRow.id else { return }
+
+        if parsedSource != content.body {
+            parsedSource = content.body
+            parsed = MarkdownParser.parse(content.body, baseURL: nil)
+        }
+
+        let editor = appState.remoteEditor
+        if !editor.isBound(toVaultID: vault.id, noteID: content.id) {
+            // Different note bound previously — replace state.
+            editor.load(content)
+        } else if !editor.isDirty {
+            // Same note, no in-progress edits — refresh from server.
+            editor.load(content)
+        }
+        // Else: same note, user has dirty edits — leave them be. The
+        // newContent change came from a /content refresh on top of in-
+        // flight edits, which is unusual but we don't clobber.
     }
 
     private func refresh() {
@@ -176,11 +339,52 @@ struct RemoteNoteDetailView: View {
         Task { await store.loadOpenNote(vaultID: vault.id, noteID: listRow.id) }
     }
 
+    private func requestSave() {
+        guard appState.remoteEditor.isDirty, !isSaving else { return }
+        let editor = appState.remoteEditor
+        let store = appState.remoteVaultsStore
+        let client = appState.authService.apiClient
+        Task {
+            if let updated = await editor.save(via: client) {
+                // Reflect new updated_at + title into the cached list row.
+                store.updateNoteRowFromPATCH(updated)
+            }
+        }
+    }
+
     private func close() {
+        // Auto-save dirty edits on back, matching the local-vault
+        // `closeNote()` behavior. We don't block on completion — the user
+        // can return to the vault detail immediately; the PATCH completes
+        // in the background and a failure surfaces on the next open.
+        if appState.remoteEditor.isDirty, canEditNotes {
+            requestSave()
+        }
         appState.selectedRemoteNoteID = nil
         appState.remoteVaultsStore.closeOpenNote()
+        appState.remoteEditor.reset()
+        appState.remoteEditorMode = .view
         parsed = nil
-        parsedBody = nil
+        parsedSource = nil
+    }
+
+    private func handleVimEffect(_ effect: VimEffect) {
+        let editor = appState.remoteEditor
+        switch effect {
+        case .save:
+            // Server PATCH has no force/conflict distinction (last-write-
+            // wins for now), so :w and :w! both just save.
+            requestSave()
+        case .saveAndClose:
+            requestSave()
+            appState.remoteEditorMode = .view
+        case .close(force: false):
+            // :q refuses a dirty buffer (matches local vim semantics).
+            if !editor.isDirty { appState.remoteEditorMode = .view }
+        case .close(force: true):
+            editor.discard()
+            appState.remoteEditorMode = .view
+        }
     }
 
     private func describe(_ error: LumiAPIError) -> String {
