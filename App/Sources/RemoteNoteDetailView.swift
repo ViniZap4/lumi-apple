@@ -29,6 +29,10 @@ struct RemoteNoteDetailView: View {
                 .padding(.horizontal, 32)
                 .padding(.bottom, 8)
 
+            remoteUpdateBanner
+                .padding(.horizontal, 32)
+                .padding(.bottom, 8)
+
             Divider().background(theme.border)
 
             content
@@ -37,6 +41,9 @@ struct RemoteNoteDetailView: View {
         .onAppear(perform: ensureLoaded)
         .onChange(of: appState.remoteVaultsStore.openNoteSnapshot) { _, newSnapshot in
             handleSnapshotChange(newSnapshot)
+        }
+        .onChange(of: appState.remoteVaultsStore.hasRemoteUpdate) { _, flag in
+            handleRemoteUpdateFlag(flag)
         }
     }
 
@@ -141,6 +148,32 @@ struct RemoteNoteDetailView: View {
     }
 
     // MARK: - Error banner
+
+    /// "Remote changes pending" banner — shown only when the user has
+    /// dirty edits AND a remote update has arrived. When the user isn't
+    /// dirty, we auto-refetch instead (handled by `handleRemoteUpdateFlag`).
+    @ViewBuilder
+    private var remoteUpdateBanner: some View {
+        if appState.remoteVaultsStore.hasRemoteUpdate && appState.remoteEditor.isDirty {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .foregroundStyle(theme.info)
+                Text("remote changes pending — your next save will merge them via the server CRDT")
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundStyle(theme.text)
+                Spacer()
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(theme.info.opacity(0.08))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(theme.info.opacity(0.4), lineWidth: 0.5)
+                    )
+            )
+        }
+    }
 
     @ViewBuilder
     private var errorBanner: some View {
@@ -299,9 +332,28 @@ struct RemoteNoteDetailView: View {
         let store = appState.remoteVaultsStore
         if let current = store.openNoteSnapshot, current.id == listRow.id {
             seedEditorIfNeeded(from: current)
+            // Idempotent — no-ops if already subscribed.
+            Task { await store.subscribeToOpenNote(vaultID: vault.id, noteID: listRow.id) }
             return
         }
-        Task { await store.loadOpenNote(vaultID: vault.id, noteID: listRow.id) }
+        Task {
+            await store.loadOpenNote(vaultID: vault.id, noteID: listRow.id)
+            await store.subscribeToOpenNote(vaultID: vault.id, noteID: listRow.id)
+        }
+    }
+
+    /// React to the store's `hasRemoteUpdate` flag flipping to `true`.
+    /// Policy: if the user has NO dirty edits, refetch the snapshot
+    /// silently — the screen updates to reflect the new server state.
+    /// If they DO have dirty edits, leave the flag set so the banner
+    /// shows; the next save's `applyDiff` will merge.
+    private func handleRemoteUpdateFlag(_ flag: Bool) {
+        guard flag else { return }
+        if !appState.remoteEditor.isDirty {
+            let store = appState.remoteVaultsStore
+            Task { await store.loadOpenNote(vaultID: vault.id, noteID: listRow.id) }
+        }
+        // Else: banner picks up the flag; user will save through it.
     }
 
     private func handleSnapshotChange(_ newSnapshot: RemoteNoteSnapshot?) {

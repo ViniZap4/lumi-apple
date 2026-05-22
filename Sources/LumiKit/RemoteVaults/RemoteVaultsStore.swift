@@ -34,6 +34,18 @@ public final class RemoteVaultsStore {
     /// Non-nil when the most recent `loadOpenNote` failed. Cleared on a
     /// successful subsequent load or on `closeOpenNote`.
     public private(set) var openNoteError: LumiAPIError?
+
+    /// True when the WS sync subscription has flagged that a remote update
+    /// landed since the host last refreshed. Reset by
+    /// `acknowledgeRemoteUpdate()` (typically called by the host after a
+    /// `loadOpenNote` refetch settles the screen). Slice 4e.
+    public private(set) var hasRemoteUpdate: Bool = false
+    /// Active WS sync client; nil when no note is open or the host is
+    /// running in REST-only mode.
+    @ObservationIgnored private var syncClient: NoteSyncClient?
+    /// Task pumping `syncClient.events` onto the main actor. Cancelled by
+    /// `unsubscribeFromOpenNote()`.
+    @ObservationIgnored private var syncEventsTask: Task<Void, Never>?
     public private(set) var isLoading: Bool = false
     public private(set) var lastError: LumiAPIError?
 
@@ -130,13 +142,15 @@ public final class RemoteVaultsStore {
     /// Load the CRDT snapshot for a server note. Sets `openNoteSnapshot` on
     /// success; surfaces failures via `openNoteError`. Idempotent — calling
     /// twice with the same arguments simply re-fetches and re-arms the
-    /// clock.
+    /// clock. Also implicitly acknowledges any pending remote-update
+    /// signal — the screen is current again.
     public func loadOpenNote(vaultID: UUID, noteID: String) async {
         openNoteIsLoading = true
         openNoteError = nil
         do {
             let snapshot = try await client.getNoteSnapshot(vaultID: vaultID, noteID: noteID)
             openNoteSnapshot = snapshot
+            hasRemoteUpdate = false
         } catch {
             openNoteSnapshot = nil
             openNoteError = error
@@ -153,11 +167,86 @@ public final class RemoteVaultsStore {
     }
 
     /// Clear the currently-open server note. UI calls this when the user
-    /// navigates back to the vault detail view.
+    /// navigates back to the vault detail view. Also tears down the WS
+    /// sync subscription if one is active.
     public func closeOpenNote() {
+        unsubscribeFromOpenNote()
         openNoteSnapshot = nil
         openNoteError = nil
         openNoteIsLoading = false
+        hasRemoteUpdate = false
+    }
+
+    /// Mark the pending remote-update signal as observed. Host calls this
+    /// after refetching the snapshot (or after deciding the user's dirty
+    /// edits will absorb the change on save). Cleared automatically by
+    /// `loadOpenNote` too.
+    public func acknowledgeRemoteUpdate() {
+        hasRemoteUpdate = false
+    }
+
+    // MARK: - WS sync subscription (slice 4e)
+
+    /// Open the live-sync WebSocket against the currently-open note.
+    /// Idempotent — call after `loadOpenNote` has settled. Pass the
+    /// `stateVector` so the server can compute Step2 against our position;
+    /// pass empty Data if unknown.
+    ///
+    /// The store consumes the resulting event stream on the main actor;
+    /// the only host-observable signal is `hasRemoteUpdate`, which flips
+    /// to `true` when the server fans out a SyncUpdate from another
+    /// client. Hosts decide policy from there (refetch if clean, banner
+    /// if dirty).
+    public func subscribeToOpenNote(vaultID: UUID, noteID: String) async {
+        unsubscribeFromOpenNote()
+        let baseURL = await client.baseURL
+        let token = await client.token
+        guard let baseURL, let token, !token.isEmpty else {
+            // No session → skip silently. The REST path may still work
+            // with a stale token; we just won't have live updates.
+            return
+        }
+        let stateVector = decodeBase64StateVector(openNoteSnapshot?.vectorClock)
+        let sub = NoteSyncClient(
+            baseURL: baseURL,
+            token: token,
+            vaultID: vaultID,
+            noteID: noteID
+        )
+        syncClient = sub
+        sub.start(stateVector: stateVector)
+
+        syncEventsTask = Task { @MainActor [weak self] in
+            for await event in sub.events {
+                guard let self else { return }
+                switch event {
+                case .syncStep2, .syncUpdate:
+                    // Server sent a diff or another client's update. Flip
+                    // the flag; host decides whether to refetch or hold.
+                    self.hasRemoteUpdate = true
+                case .opened, .awareness, .closed:
+                    // No host-actionable signal for slice 4e.
+                    continue
+                }
+            }
+        }
+    }
+
+    /// Tear down the WS sync subscription. Idempotent.
+    public func unsubscribeFromOpenNote() {
+        syncEventsTask?.cancel()
+        syncEventsTask = nil
+        syncClient?.stop()
+        syncClient = nil
+    }
+
+    /// Decode the base64 state vector from a `RemoteNoteSnapshot.vectorClock`
+    /// into the raw `Data` we'd send as `SyncStep1`'s body. Returns empty
+    /// Data when the clock string is empty or undecodable (server still
+    /// replies with a full Step2 in that case).
+    private func decodeBase64StateVector(_ clock: String?) -> Data {
+        guard let clock, !clock.isEmpty else { return Data() }
+        return Data(base64Encoded: clock) ?? Data()
     }
 
     /// Bump the `updatedAt` of a cached note row to now. Used after a
@@ -220,9 +309,11 @@ public final class RemoteVaultsStore {
         try await client.deleteNote(vaultID: vaultID, noteID: noteID)
         notes.removeAll { $0.id == noteID }
         if openNoteSnapshot?.id == noteID {
+            unsubscribeFromOpenNote()
             openNoteSnapshot = nil
             openNoteError = nil
             openNoteIsLoading = false
+            hasRemoteUpdate = false
         }
     }
 
@@ -360,6 +451,7 @@ public final class RemoteVaultsStore {
 
     /// Wipe all state. Call on sign-out so the next sign-in starts clean.
     public func clear() {
+        unsubscribeFromOpenNote()
         vaults = []
         selectedVaultID = nil
         members = []
@@ -372,6 +464,7 @@ public final class RemoteVaultsStore {
         openNoteSnapshot = nil
         openNoteError = nil
         openNoteIsLoading = false
+        hasRemoteUpdate = false
         lastError = nil
         isLoading = false
     }
