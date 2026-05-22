@@ -28,6 +28,50 @@ struct NoteDetailView: View {
         appState.editorMode
     }
 
+    /// Map the user's preference enum onto LumiUI's `MarkdownFontFamily`.
+    /// Kept here (rather than as a free function) so the conversion stays
+    /// adjacent to the call site that consumes it.
+    private var markdownFontFamilyFromPreferences: MarkdownFontFamily {
+        switch appState.preferences.readingFontFamily {
+        case .system: return .system
+        case .serif: return .serif
+        case .monospace: return .monospace
+        }
+    }
+
+    /// In-app link handler for `MarkdownReader`. Returns `true` when the
+    /// URL was a `file://*.md` inside the active vault and we successfully
+    /// kicked off in-app navigation. Both link paths (`OpenURLAction` for
+    /// SwiftUI Text + `MarkdownLinkAction` for NSTextView) call this so
+    /// the routing logic stays in one place.
+    private func handleInAppLink(_ url: URL) -> Bool {
+        guard url.isFileURL, url.pathExtension.lowercased() == "md" else {
+            return false
+        }
+        guard let session = appState.session,
+              FileManager.default.fileExists(atPath: url.path)
+        else {
+            return false
+        }
+        let vaultRoot = session.rootURL.standardizedFileURL
+        let resolved = url.standardizedFileURL
+        let prefix = vaultRoot.path + "/"
+        let relativePath: String
+        if resolved.path.hasPrefix(prefix) {
+            relativePath = String(resolved.path.dropFirst(prefix.count))
+        } else {
+            relativePath = resolved.lastPathComponent
+        }
+        let mtime = (try? resolved.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+        let entry = NoteEntry(url: resolved, relativePath: relativePath, updatedAt: mtime)
+        if appState.editor.isDirty { appState.editor.save() }
+        appState.editor.load(noteID: relativePath, at: resolved, vaultRoot: vaultRoot)
+        appState.selectedNoteID = relativePath
+        appState.selectedEntry = entry
+        appState.editorMode = .view
+        return true
+    }
+
     var body: some View {
         @Bindable var editor = appState.editor
         VStack(spacing: 0) {
@@ -85,7 +129,14 @@ struct NoteDetailView: View {
                     text: editor.currentText,
                     noteURL: entry.url,
                     baseURL: baseURL,
-                    vaultRoot: vaultRoot
+                    vaultRoot: vaultRoot,
+                    isDirty: editor.isDirty,
+                    scale: appState.preferences.readingScale,
+                    fontFamily: markdownFontFamilyFromPreferences,
+                    contentAnimations: appState.preferences.contentAnimations,
+                    readingWidth: appState.preferences.readingWidth,
+                    onInAppLink: handleInAppLink,
+                    yankFlashTrigger: appState.yankFlashAt
                 )
             }
             // Per-note identity: new entry → fresh scroll-host coord,
@@ -224,280 +275,6 @@ private struct DetailStatusBar: View {
     }
 }
 
-/// Renders the parsed markdown document for read-mode. Memoizes the parse
-/// step so each scroll/repaint doesn't re-parse the whole note — for large
-/// notes the parser is the dominant cost. We key the cache on the raw text
-/// string; SwiftUI calls `body` whenever editor.currentText flips, so the
-/// `.onChange` reruns the parser only then.
-private struct MarkdownReader: View {
-    let title: String
-    let tags: [String]
-    let text: String
-    /// The note's own file URL. Used as the `MarkdownDocumentCache` key.
-    /// Previously the cache was keyed on `baseURL` (the parent directory),
-    /// which meant every note in the same folder collided on the same
-    /// cache entry and any sibling-file mutation invalidated it via the
-    /// directory mtime. Keying on the note's URL fixes that.
-    let noteURL: URL
-    let baseURL: URL?
-    /// Active vault root. Threaded into the markdown env so leaf views
-    /// (`LinkAwareTextView`) can render in-vault file:// URLs as
-    /// vault-relative paths inside their hover tooltips.
-    let vaultRoot: URL?
-    @Environment(\.theme) private var theme
-    @Environment(AppState.self) private var appState
-    @State private var parsed: MarkdownDocument?
-    @State private var parsedFor: String = ""
-    /// Opacity of the yank-flash overlay. Bumped to 0.28 on each `y` /
-    /// ⌘C trigger (`appState.yankFlashAt`), then animated back to 0 over
-    /// 0.45 s. Sits above the content as a non-interactive overlay so
-    /// text selection isn't disrupted.
-    @State private var yankFlashOpacity: Double = 0
-
-    private var scale: Double { appState.preferences.readingScale }
-
-    private var fontFamilyEnv: MarkdownFontFamily {
-        switch appState.preferences.readingFontFamily {
-        case .system: return .system
-        case .serif: return .serif
-        case .monospace: return .monospace
-        }
-    }
-
-    var body: some View {
-        // The header items (title, tags, separator) live in the same
-        // stagger pipeline as the markdown blocks so the page assembles
-        // top-down on mount. Each block animates independently via
-        // `StaggeredBlock`; the cascade is gated by
-        // `preferences.contentAnimations`.
-        VStack(alignment: .leading, spacing: 22 * scale) {
-            StaggeredBlock(index: 0) {
-                VStack(alignment: .leading, spacing: 10 * scale) {
-                    Text(title)
-                        .font(.system(size: 34 * scale, weight: .bold, design: .default))
-                        .foregroundStyle(theme.primary)
-                        .lineSpacing(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if !tags.isEmpty {
-                        HStack(spacing: 6) {
-                            ForEach(tags, id: \.self) { tag in
-                                TagChip(tag: tag)
-                            }
-                        }
-                    }
-                }
-                .padding(.bottom, 4)
-            }
-
-            StaggeredBlock(index: 1) {
-                Rectangle()
-                    .fill(theme.border)
-                    .frame(height: 0.5)
-                    .padding(.bottom, 2)
-            }
-
-            if let parsed {
-                // Stagger fade-in is nice on small notes; on large
-                // notes the same effect fires continuously as LazyVStack
-                // materialises new blocks during scroll, which is both
-                // visually noisy and expensive (one Task + animation
-                // transaction per block). Gate it on block count so the
-                // animation auto-disables for the heavy-document case.
-                let useStagger = appState.preferences.contentAnimations
-                    && parsed.blocks.count <= largeMarkdownBlockThreshold
-                MarkdownView(parsed, indexOffset: 2)
-                    .environment(\.markdownScale, scale)
-                    .environment(\.markdownFontFamily, fontFamilyEnv)
-                    .environment(\.markdownStagger, useStagger)
-            } else {
-                Text("loading…")
-                    .font(.system(.callout, design: .monospaced))
-                    .foregroundStyle(theme.textDim)
-            }
-        }
-        .environment(\.markdownStagger, appState.preferences.contentAnimations)
-        // Vault root for tooltips + link-relative rendering. The
-        // LinkAwareTextView uses this to translate file:// URLs back
-        // to vault-relative paths in tooltips so the hover shows
-        // `./subfolder/note.md` instead of a full home-directory path.
-        .environment(\.markdownVaultRoot, vaultRoot)
-        // Intercept link taps. For file:// .md URLs we navigate to
-        // that note in-app; everything else (https, mailto, etc.)
-        // falls through to the system handler.
-        .environment(\.openURL, OpenURLAction { url in
-            handleInAppLink(url) ? .handled : .systemAction
-        })
-        // NSTextView-backed paragraph + heading renderers route link
-        // clicks through this synchronous action instead of SwiftUI's
-        // async openURL chain — faster than the round-trip through
-        // OpenURLAction, and the only path the AppKit text view will
-        // see for clickedOnLink. Closure returns true when it
-        // intercepted the URL (in-app navigation) so the caller knows
-        // not to fall through to the system handler.
-        .environment(\.markdownLinkAction, MarkdownLinkAction { url in
-            handleInAppLink(url)
-        })
-        .padding(.horizontal, 48)
-        .padding(.top, 32)
-        .padding(.bottom, 40)
-        // Comfortable measure. Width is user-tunable via the toolbar
-        // ("Reading width") and persists in preferences.
-        .frame(maxWidth: appState.preferences.readingWidth, alignment: .leading)
-        .frame(maxWidth: .infinity, alignment: .center)
-        // Flash overlay for vim-yank feedback. Non-interactive (allowsHitTesting
-        // false) so it doesn't swallow clicks / text-selection drags. Animates
-        // opacity → 0 on every yank event via .onChange below.
-        .overlay {
-            Rectangle()
-                .fill(theme.warning)
-                .opacity(yankFlashOpacity)
-                .allowsHitTesting(false)
-                .animation(.easeOut(duration: 0.45), value: yankFlashOpacity)
-        }
-        // Coordinate space that `LinkAwareTextView` converts its local
-        // link rect into. The overlay below shares the same space, so
-        // the published `linkRect` can be used as-is for positioning.
-        .coordinateSpace(name: linkTooltipReaderCoordinateSpace)
-        // Global link-tooltip overlay. Each `LinkAwareTextView`
-        // publishes the hovered link's rect (already translated into
-        // this view's coordinate space) through
-        // `LinkHoverAnchorPreferenceKey`; this overlay reads that rect
-        // and places the themed bubble just below the link. Living up
-        // here — outside the LazyVStack's child tree — means the
-        // bubble's appearance can't cascade back into per-block
-        // layout passes (the F.54→F.56 zIndex hoist did, which is
-        // what was nudging the link out from under the cursor on
-        // hover).
-        //
-        // `.overlayPreferenceValue` (not plain `.overlay`) so the
-        // builder closure receives the latest preference value that
-        // descendants of this view have published. Regular `.overlay`
-        // doesn't see preferences from siblings of itself.
-        .overlayPreferenceValue(LinkHoverAnchorPreferenceKey.self) { value in
-            GeometryReader { proxy in
-                LinkTooltipOverlay(hover: value, maxWidth: proxy.size.width)
-            }
-            .allowsHitTesting(false)
-        }
-        .onAppear { reparseIfNeeded() }
-        .onChange(of: text) { _, _ in reparseIfNeeded() }
-        .onChange(of: appState.yankFlashAt) { _, _ in
-            // Two-step: set to peak instantly (no animation transaction yet
-            // because we're outside `withAnimation`), then on the next tick
-            // let the modifier's animation curve drain to zero. Without the
-            // tick the SwiftUI runtime would coalesce the up + down into a
-            // single transition with no visible flash.
-            yankFlashOpacity = 0.28
-            Task { @MainActor in
-                yankFlashOpacity = 0
-            }
-        }
-    }
-
-    /// Pure helper: returns `true` when `url` is a `file://*.md` inside
-    /// the active vault and we successfully kicked off the in-app
-    /// navigation to it; `false` otherwise. The two link paths
-    /// (`OpenURLAction` for SwiftUI Text + `MarkdownLinkAction` for
-    /// NSTextView) both reuse this so the routing logic stays in one
-    /// place. Returning Bool sidesteps `OpenURLAction.Result` not
-    /// conforming to Equatable on this SDK.
-    private func handleInAppLink(_ url: URL) -> Bool {
-        guard url.isFileURL, url.pathExtension.lowercased() == "md" else {
-            return false
-        }
-        guard let session = appState.session,
-              FileManager.default.fileExists(atPath: url.path)
-        else {
-            return false
-        }
-        let vaultRoot = session.rootURL.standardizedFileURL
-        let resolved = url.standardizedFileURL
-        let prefix = vaultRoot.path + "/"
-        let relativePath: String
-        if resolved.path.hasPrefix(prefix) {
-            relativePath = String(resolved.path.dropFirst(prefix.count))
-        } else {
-            relativePath = resolved.lastPathComponent
-        }
-        let mtime = (try? resolved.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
-        let entry = NoteEntry(url: resolved, relativePath: relativePath, updatedAt: mtime)
-        if appState.editor.isDirty { appState.editor.save() }
-        appState.editor.load(noteID: relativePath, at: resolved, vaultRoot: vaultRoot)
-        appState.selectedNoteID = relativePath
-        appState.selectedEntry = entry
-        appState.editorMode = .view
-        return true
-    }
-
-    private func reparseIfNeeded() {
-        guard text != parsedFor else { return }
-        parsedFor = text
-
-        // Cache check: same note URL + same mtime → reuse the prior
-        // parse. When a link tap navigates back to a recently-viewed
-        // note (or when the preview pane just parsed this note a
-        // moment ago), this skips the parse entirely — biggest single
-        // win on math-heavy notes where parse + KaTeX-WebView spawn
-        // latencies stack.
-        //
-        // **Skipped when the buffer is dirty.** In-memory edits don't
-        // bump disk mtime, so a cache hit on a dirty buffer would
-        // return the pre-edit parse and the user would see stale
-        // content after a quick edit→view toggle.
-        if !appState.editor.isDirty,
-           noteURL.isFileURL,
-           let mtime = mtime(for: noteURL),
-           let cached = MarkdownDocumentCache.shared.document(for: noteURL, mtime: mtime) {
-            parsed = cached
-            return
-        }
-
-        // Always async. The previous code went sync below a 32 KB
-        // threshold on the theory that "small parse is faster than a
-        // task hop"; in practice the parse + the *follow-up
-        // LazyVStack materialisation that runs in the same render
-        // pass* (WKWebView spawns per math paragraph, NSTextView
-        // setup per link paragraph) blocked the main thread for
-        // tens to a couple hundred ms on link clicks, which the user
-        // reads as "click and the app freezes for a second".
-        //
-        // Off-loading the parse to a detached Task keeps the click
-        // itself responsive. The previously-rendered MarkdownView
-        // stays on screen during the parse — old content briefly
-        // visible is better than UI hanging.
-        let snapshot = text
-        let url = baseURL
-        let cacheURL = noteURL
-        let canCache = !appState.editor.isDirty
-        Task.detached(priority: .userInitiated) {
-            let document = MarkdownParser.parse(snapshot, baseURL: url)
-            await MainActor.run {
-                // Only apply if the user hasn't moved on to a newer
-                // text since we started — protects against stale
-                // overwrites if they typed fast in edit mode and we
-                // race a stale parse home.
-                if parsedFor == snapshot {
-                    parsed = document
-                    if canCache,
-                       cacheURL.isFileURL,
-                       let mtime = self.mtime(for: cacheURL) {
-                        MarkdownDocumentCache.shared.store(document, for: cacheURL, mtime: mtime)
-                    }
-                }
-            }
-        }
-    }
-
-    /// Resource mtime for the active note's URL. Returns nil for vaults
-    /// where the URL isn't a real file (server-bound vaults, in-memory
-    /// previews) so the caller knows to skip the cache.
-    private func mtime(for url: URL) -> Date? {
-        guard url.isFileURL else { return nil }
-        return (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
-            .contentModificationDate
-    }
-}
-
 /// Wraps content in a state-driven opacity that fades in on appear. Pair
 /// with `.id(...)` so each identity change re-runs the mount animation.
 /// `animated: false` skips the fade entirely — content lands fully visible
@@ -535,7 +312,7 @@ private struct MountFader<Content: View>: View {
 /// hosted SwiftUI subtree grabs first-responder for itself, so the scroll
 /// view never sees the key event. Going through SwiftUI's focus model
 /// works regardless.
-private struct ReadModeScroll<Content: View>: View {
+struct ReadModeScroll<Content: View>: View {
     let jkEnabled: Bool
     @ViewBuilder let content: () -> Content
     @Environment(AppState.self) private var appState
@@ -1113,31 +890,6 @@ private struct ErrorBanner: View {
     }
 }
 
-private struct TagChip: View {
-    let tag: String
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "number")
-                .font(.system(size: 9, weight: .semibold))
-                .opacity(0.7)
-            Text(tag)
-                .font(.system(.caption, design: .rounded).weight(.medium))
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(
-            Capsule()
-                .fill(theme.accent.opacity(0.12))
-        )
-        .overlay(
-            Capsule().stroke(theme.accent.opacity(0.25), lineWidth: 0.5)
-        )
-        .foregroundStyle(theme.accent)
-    }
-}
-
 struct NoteDetailEmpty: View {
     @Environment(\.theme) private var theme
 
@@ -1155,43 +907,3 @@ struct NoteDetailEmpty: View {
     }
 }
 
-/// Renders the active link-hover tooltip as a global overlay above the
-/// reader's content. Reads the `LinkHoverAnchorPreferenceKey` value
-/// that `LinkAwareTextView` publishes (forwarded into the `hover`
-/// prop from the MarkdownReader's `.overlayPreferenceValue` builder).
-///
-/// We take the preference value as a prop rather than reading it via
-/// `.onPreferenceChange` here because the overlay is a sibling of the
-/// LinkAwareTextView's published preference — only the
-/// `.overlayPreferenceValue` builder on the underlying view can see
-/// it. Mirroring into `@State` via `.onChange` gives the SwiftUI
-/// `.transition` modifier identity changes to animate against, so the
-/// bubble fades + scales in / out cleanly when hover starts and ends.
-private struct LinkTooltipOverlay: View {
-    let hover: LinkHoverAnchor?
-    let maxWidth: CGFloat
-    @State private var displayed: LinkHoverAnchor?
-
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            Color.clear
-            if let displayed {
-                LinkTooltipBubble(label: displayed.label)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .offset(
-                        x: max(0, min(max(0, maxWidth - linkTooltipMaxWidth), displayed.linkRect.minX)),
-                        y: displayed.linkRect.maxY + 8
-                    )
-                    .transition(
-                        .opacity.combined(with: .scale(scale: 0.94, anchor: .topLeading))
-                    )
-            }
-        }
-        .onAppear { displayed = hover }
-        .onChange(of: hover) { _, new in
-            withAnimation(.easeOut(duration: 0.16)) {
-                displayed = new
-            }
-        }
-    }
-}

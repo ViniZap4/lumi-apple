@@ -18,12 +18,6 @@ struct RemoteNoteDetailView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
 
-    /// Cached parsed AST for view mode. Re-derives only when the editor's
-    /// `currentText` changes (live-typing in edit mode keeps view mode
-    /// in sync when the user flips back).
-    @State private var parsed: MarkdownDocument?
-    @State private var parsedSource: String?
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -43,14 +37,6 @@ struct RemoteNoteDetailView: View {
         .onAppear(perform: ensureLoaded)
         .onChange(of: appState.remoteVaultsStore.openNoteContent) { _, newContent in
             handleContentChange(newContent)
-        }
-        .onChange(of: appState.remoteEditor.currentText) { _, newText in
-            // Re-parse on every edit so view mode is current when the user
-            // flips back. Cheap on small notes; consider debounce later.
-            if parsedSource != newText {
-                parsedSource = newText
-                parsed = MarkdownParser.parse(newText, baseURL: nil)
-            }
         }
     }
 
@@ -186,36 +172,54 @@ struct RemoteNoteDetailView: View {
 
     @ViewBuilder
     private var content: some View {
-        if appState.remoteVaultsStore.openNoteIsLoading && parsed == nil {
+        if appState.remoteVaultsStore.openNoteIsLoading && appState.remoteEditor.status == .idle {
             loadingState
-        } else if let error = appState.remoteVaultsStore.openNoteError, parsed == nil {
+        } else if let error = appState.remoteVaultsStore.openNoteError, !appState.remoteEditor.isBound(toVaultID: vault.id, noteID: listRow.id) {
             errorState(error)
-        } else if parsed != nil {
+        } else {
             switch appState.remoteEditorMode {
             case .view:
                 viewMode
             case .edit:
                 editMode
             }
-        } else {
-            EmptyView()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(theme.background)
         }
     }
 
     @ViewBuilder
     private var viewMode: some View {
-        ScrollView {
-            if let parsed {
-                MarkdownView(parsed)
-                    .padding(.horizontal, 32)
-                    .padding(.vertical, 20)
-                    .frame(maxWidth: 820, alignment: .leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+        ReadModeScroll(jkEnabled: appState.preferences.jkScrollInView) {
+            MarkdownReader(
+                title: displayTitle,
+                tags: [],
+                text: appState.remoteEditor.currentText,
+                // Server notes have no on-disk URL → cache is disabled, but
+                // MarkdownReader handles the nil path cleanly.
+                noteURL: nil,
+                baseURL: nil,
+                vaultRoot: nil,
+                isDirty: appState.remoteEditor.isDirty,
+                scale: appState.preferences.readingScale,
+                fontFamily: markdownFontFamilyFromPreferences,
+                contentAnimations: appState.preferences.contentAnimations,
+                readingWidth: appState.preferences.readingWidth,
+                // No in-app link routing for server notes yet — the slug
+                // resolution endpoint isn't wired up.
+                onInAppLink: nil,
+                yankFlashTrigger: appState.yankFlashAt
+            )
         }
-        .background(theme.background)
+        .id(listRow.id)
+    }
+
+    /// Map the user's preference enum onto LumiUI's `MarkdownFontFamily`,
+    /// mirroring the helper inside `NoteDetailView`.
+    private var markdownFontFamilyFromPreferences: MarkdownFontFamily {
+        switch appState.preferences.readingFontFamily {
+        case .system: return .system
+        case .serif: return .serif
+        case .monospace: return .monospace
+        }
     }
 
     @ViewBuilder
@@ -301,26 +305,16 @@ struct RemoteNoteDetailView: View {
     }
 
     private func handleContentChange(_ newContent: RemoteNoteContent?) {
-        guard let newContent else {
-            parsed = nil
-            parsedSource = nil
-            return
-        }
+        guard let newContent else { return }
         seedEditorIfNeeded(from: newContent)
     }
 
-    /// Seed the markdown cache + editor state from a fetched payload — but
-    /// only when this content is for the currently-displayed note, and
-    /// only if the editor isn't already showing it. Avoids clobbering
-    /// dirty in-flight edits on an idempotent re-fetch.
+    /// Seed the editor state from a fetched payload — but only when this
+    /// content is for the currently-displayed note, and only if the editor
+    /// isn't already holding dirty edits for this exact note. Avoids
+    /// clobbering in-flight edits on an idempotent re-fetch.
     private func seedEditorIfNeeded(from content: RemoteNoteContent) {
         guard content.id == listRow.id else { return }
-
-        if parsedSource != content.body {
-            parsedSource = content.body
-            parsed = MarkdownParser.parse(content.body, baseURL: nil)
-        }
-
         let editor = appState.remoteEditor
         if !editor.isBound(toVaultID: vault.id, noteID: content.id) {
             // Different note bound previously — replace state.
@@ -329,9 +323,7 @@ struct RemoteNoteDetailView: View {
             // Same note, no in-progress edits — refresh from server.
             editor.load(content)
         }
-        // Else: same note, user has dirty edits — leave them be. The
-        // newContent change came from a /content refresh on top of in-
-        // flight edits, which is unusual but we don't clobber.
+        // Else: same note, user has dirty edits — leave them be.
     }
 
     private func refresh() {
@@ -364,8 +356,6 @@ struct RemoteNoteDetailView: View {
         appState.remoteVaultsStore.closeOpenNote()
         appState.remoteEditor.reset()
         appState.remoteEditorMode = .view
-        parsed = nil
-        parsedSource = nil
     }
 
     private func handleVimEffect(_ effect: VimEffect) {

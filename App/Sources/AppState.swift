@@ -165,9 +165,10 @@ final class AppState {
         readKeyMonitor = ReadKeyMonitor(
             isActive: { [weak self] in
                 guard let self else { return false }
-                return self.editorMode == .view
-                    && self.selectedEntry != nil
-                    && self.preferences.jkScrollInView
+                guard self.preferences.jkScrollInView else { return false }
+                let localOpen = self.editorMode == .view && self.selectedEntry != nil
+                let remoteOpen = self.remoteEditorMode == .view && self.selectedRemoteNoteID != nil
+                return localOpen || remoteOpen
             },
             glide: { coord.glide(by: CGFloat($0)) },
             halfPage: { coord.scrollHalfPage(direction: CGFloat($0)) },
@@ -175,9 +176,29 @@ final class AppState {
             scrollToEdge: { coord.scrollTo($0) },
             closeNote: { [weak self] in
                 guard let self else { return }
-                if self.editor.isDirty { self.editor.save() }
-                self.selectedEntry = nil
-                self.selectedNoteID = nil
+                // Branch by which note kind is open. Local-vault path
+                // auto-saves dirty edits; server-vault path triggers the
+                // same auto-save in the server editor before clearing.
+                if self.selectedEntry != nil {
+                    if self.editor.isDirty { self.editor.save() }
+                    self.selectedEntry = nil
+                    self.selectedNoteID = nil
+                } else if self.selectedRemoteNoteID != nil {
+                    if self.remoteEditor.isDirty {
+                        let client = self.authService.apiClient
+                        let store = self.remoteVaultsStore
+                        let editor = self.remoteEditor
+                        Task {
+                            if let updated = await editor.save(via: client) {
+                                store.updateNoteRowFromPATCH(updated)
+                            }
+                        }
+                    }
+                    self.selectedRemoteNoteID = nil
+                    self.remoteVaultsStore.closeOpenNote()
+                    self.remoteEditor.reset()
+                    self.remoteEditorMode = .view
+                }
             },
             yankSelected: { [weak self] in
                 self?.performYank()
