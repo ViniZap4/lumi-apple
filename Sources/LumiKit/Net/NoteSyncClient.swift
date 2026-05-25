@@ -43,6 +43,14 @@ public final class NoteSyncClient: @unchecked Sendable {
         /// Connection closed cleanly or with an error. `reason` is best-
         /// effort; nil means clean close.
         case closed(reason: String?)
+
+        /// Connection closed for a *transient* reason (network blip, server
+        /// restart, decode error). Emitted right before `.closed` so the
+        /// host knows the close wasn't user-initiated. Carries the suggested
+        /// attempt number to use on the next `subscribeToOpenNote` call,
+        /// plus a delay (seconds) computed via exponential backoff with
+        /// jitter. Slice 4f.
+        case willReconnect(attempt: Int, delaySeconds: Double)
     }
 
     private let baseURL: URL
@@ -50,6 +58,12 @@ public final class NoteSyncClient: @unchecked Sendable {
     private let vaultID: UUID
     private let noteID: String
     private let session: URLSession
+    /// The 1-based attempt number for *this* connection. Slice 4f hosts
+    /// pass an incremented attempt when re-subscribing after a transient
+    /// close so the emitted `.willReconnect(attempt:)` can carry the
+    /// correct "next attempt" number without the host having to do its
+    /// own arithmetic. Initial subscribes default to 1.
+    private let attempt: Int
 
     private let continuation: AsyncStream<Event>.Continuation
     public let events: AsyncStream<Event>
@@ -60,12 +74,20 @@ public final class NoteSyncClient: @unchecked Sendable {
     private var task: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
 
-    public init(baseURL: URL, token: String, vaultID: UUID, noteID: String, session: URLSession = .shared) {
+    public init(
+        baseURL: URL,
+        token: String,
+        vaultID: UUID,
+        noteID: String,
+        session: URLSession = .shared,
+        attempt: Int = 1
+    ) {
         self.baseURL = baseURL
         self.token = token
         self.vaultID = vaultID
         self.noteID = noteID
         self.session = session
+        self.attempt = max(1, attempt)
         var c: AsyncStream<Event>.Continuation!
         self.events = AsyncStream { c = $0 }
         self.continuation = c
@@ -132,8 +154,9 @@ public final class NoteSyncClient: @unchecked Sendable {
         // Capture task + continuation by value so the detached loop never
         // touches `self` — no actor-isolation question, no race against
         // a concurrent `stop()` that nils them on the calling actor.
-        receiveTask = Task.detached { [newTask, cont] in
-            await Self.runReceiveLoop(task: newTask, continuation: cont)
+        let myAttempt = attempt
+        receiveTask = Task.detached { [newTask, cont, myAttempt] in
+            await Self.runReceiveLoop(task: newTask, continuation: cont, attempt: myAttempt)
         }
     }
 
@@ -151,7 +174,8 @@ public final class NoteSyncClient: @unchecked Sendable {
 
     private static func runReceiveLoop(
         task: URLSessionWebSocketTask,
-        continuation: AsyncStream<Event>.Continuation
+        continuation: AsyncStream<Event>.Continuation,
+        attempt: Int
     ) async {
         while !Task.isCancelled {
             do {
@@ -161,7 +185,9 @@ public final class NoteSyncClient: @unchecked Sendable {
                 case .data(let d): data = d
                 case .string(let s):
                     // Server spec'd to send binary frames — text means a
-                    // misbehaving peer. Surface as a close.
+                    // misbehaving peer. Surface as a close. This is a
+                    // protocol mismatch, not a transient blip — no
+                    // willReconnect signal.
                     continuation.yield(.closed(reason: "unexpected text frame: \(s.prefix(40))"))
                     return
                 @unknown default:
@@ -170,14 +196,20 @@ public final class NoteSyncClient: @unchecked Sendable {
                 }
                 handleIncoming(data, continuation: continuation)
             } catch is CancellationError {
+                // Explicit stop() on our side — no reconnect signal.
                 return
             } catch let urlErr as URLError where urlErr.code == .cancelled {
+                // WS task cancelled (also from stop()) — clean close.
                 continuation.yield(.closed(reason: nil))
                 return
             } catch {
-                // `receive()` after a normal close returns POSIX 57
-                // (ENOTCONN) on Apple platforms — surface as a clean
-                // disconnect rather than an error.
+                // Anything else is treated as a transient close: network
+                // hiccup, server restart, ENOTCONN after a clean close
+                // from the peer. Emit `.willReconnect` so the host can
+                // schedule a retry, then the terminal `.closed`.
+                let nextAttempt = attempt + 1
+                let delay = backoffSeconds(attempt: nextAttempt)
+                continuation.yield(.willReconnect(attempt: nextAttempt, delaySeconds: delay))
                 let nserr = error as NSError
                 if nserr.domain == NSPOSIXErrorDomain && nserr.code == 57 {
                     continuation.yield(.closed(reason: nil))
@@ -187,6 +219,29 @@ public final class NoteSyncClient: @unchecked Sendable {
                 return
             }
         }
+    }
+
+    // MARK: - Backoff
+
+    /// Exponential backoff with jitter for slice 4f reconnect timing.
+    ///
+    /// Base curve: `min(32, 2^(attempt-1))` seconds — so attempt 1 → 1s,
+    /// 2 → 2s, 3 → 4s … 6+ → 32s (the cap). On top of that we layer
+    /// ±20% uniform jitter so independent clients don't lock-step into
+    /// the same retry instant after a regional outage.
+    ///
+    /// Pure (deterministic up to the jitter random) — exposed as a
+    /// static so the host can compute its own delay if it ever needs to
+    /// (e.g. to display "retrying in Xs" to the user without waiting
+    /// for the WS to actually emit `.willReconnect`).
+    public static func backoffSeconds(attempt: Int) -> Double {
+        let n = max(1, attempt)
+        let raw = pow(2.0, Double(n - 1))
+        let capped = min(32.0, raw)
+        let jitter = Double.random(in: -0.2 ... 0.2) * capped
+        // Clamp at >=0 to avoid negative sleeps if jitter undershoots
+        // a small base (shouldn't happen at 1s with ±20%, but cheap).
+        return max(0, capped + jitter)
     }
 
     private static func handleIncoming(

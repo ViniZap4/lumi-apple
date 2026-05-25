@@ -46,6 +46,21 @@ public final class RemoteVaultsStore {
     /// Task pumping `syncClient.events` onto the main actor. Cancelled by
     /// `unsubscribeFromOpenNote()`.
     @ObservationIgnored private var syncEventsTask: Task<Void, Never>?
+    /// Pending reconnect Task created in response to a `.willReconnect`
+    /// event. Cancelled by `unsubscribeFromOpenNote()` so an explicit
+    /// stop never gets undone by a delayed wake-up. Slice 4f.
+    @ObservationIgnored private var syncReconnectTask: Task<Void, Never>?
+    /// (vaultID, noteID) of whatever note the WS client is currently
+    /// subscribed to. Recorded so the reconnect path knows what to
+    /// re-subscribe to without the host having to re-issue. Cleared by
+    /// `unsubscribeFromOpenNote()`. Slice 4f.
+    @ObservationIgnored private var syncOpenNoteKey: (vaultID: UUID, noteID: String)?
+    /// Max consecutive transient-close reconnect attempts before we give
+    /// up. With 1s base + 2^n growth capped at 32s, 8 attempts ≈ 2.5
+    /// minutes of trying — beyond that the server is presumably down or
+    /// the network is gone for good, and silently retrying forever just
+    /// burns battery. The host can re-arm by re-opening the note.
+    private static let maxReconnectAttempts: Int = 8
     public private(set) var isLoading: Bool = false
     public private(set) var lastError: LumiAPIError?
 
@@ -192,12 +207,17 @@ public final class RemoteVaultsStore {
     /// `stateVector` so the server can compute Step2 against our position;
     /// pass empty Data if unknown.
     ///
+    /// `attempt` is the 1-based attempt counter. Hosts always pass the
+    /// default (1) on a fresh subscribe; the reconnect path passes the
+    /// bumped value so emitted `.willReconnect` events carry an honest
+    /// attempt number all the way back. Slice 4f.
+    ///
     /// The store consumes the resulting event stream on the main actor;
     /// the only host-observable signal is `hasRemoteUpdate`, which flips
     /// to `true` when the server fans out a SyncUpdate from another
     /// client. Hosts decide policy from there (refetch if clean, banner
     /// if dirty).
-    public func subscribeToOpenNote(vaultID: UUID, noteID: String) async {
+    public func subscribeToOpenNote(vaultID: UUID, noteID: String, attempt: Int = 1) async {
         unsubscribeFromOpenNote()
         let baseURL = await client.baseURL
         let token = await client.token
@@ -211,9 +231,11 @@ public final class RemoteVaultsStore {
             baseURL: baseURL,
             token: token,
             vaultID: vaultID,
-            noteID: noteID
+            noteID: noteID,
+            attempt: max(1, attempt)
         )
         syncClient = sub
+        syncOpenNoteKey = (vaultID, noteID)
         sub.start(stateVector: stateVector)
 
         syncEventsTask = Task { @MainActor [weak self] in
@@ -224,6 +246,13 @@ public final class RemoteVaultsStore {
                     // Server sent a diff or another client's update. Flip
                     // the flag; host decides whether to refetch or hold.
                     self.hasRemoteUpdate = true
+                case .willReconnect(let nextAttempt, let delaySeconds):
+                    // Transient close — schedule a re-subscribe with the
+                    // bumped attempt count. Capping is enforced here (not
+                    // in NoteSyncClient) so the policy stays at the host
+                    // layer where retries can be UI-aware.
+                    self.scheduleReconnect(vaultID: vaultID, noteID: noteID,
+                                           attempt: nextAttempt, delaySeconds: delaySeconds)
                 case .opened, .awareness, .closed:
                     // No host-actionable signal for slice 4e.
                     continue
@@ -234,10 +263,50 @@ public final class RemoteVaultsStore {
 
     /// Tear down the WS sync subscription. Idempotent.
     public func unsubscribeFromOpenNote() {
+        syncReconnectTask?.cancel()
+        syncReconnectTask = nil
         syncEventsTask?.cancel()
         syncEventsTask = nil
         syncClient?.stop()
         syncClient = nil
+        syncOpenNoteKey = nil
+    }
+
+    /// Sleep `delaySeconds`, then re-issue `subscribeToOpenNote` with the
+    /// bumped attempt count. Caps at `maxReconnectAttempts` — beyond
+    /// that we leave the WS quiet and let the host decide whether to
+    /// surface a banner or wait for the user to re-open the note. Slice
+    /// 4f.
+    private func scheduleReconnect(vaultID: UUID, noteID: String,
+                                   attempt: Int, delaySeconds: Double) {
+        guard attempt <= Self.maxReconnectAttempts else {
+            // Exhausted retries — clear the open-note key so a stale
+            // entry doesn't leak into a future surprise reconnect.
+            syncOpenNoteKey = nil
+            return
+        }
+        syncReconnectTask?.cancel()
+        syncReconnectTask = Task { @MainActor [weak self] in
+            // Convert to nanoseconds. Negative/zero delay is fine — sleep
+            // returns immediately. Cancellation throws, which is caught
+            // below as the "stop while waiting" path.
+            let ns = UInt64(max(0, delaySeconds) * 1_000_000_000)
+            do {
+                try await Task.sleep(nanoseconds: ns)
+            } catch {
+                return
+            }
+            guard let self else { return }
+            // If the user closed the note (or re-opened a different one)
+            // while we were sleeping, the key was cleared or replaced —
+            // don't double-subscribe.
+            guard let key = self.syncOpenNoteKey,
+                  key.vaultID == vaultID,
+                  key.noteID == noteID else {
+                return
+            }
+            await self.subscribeToOpenNote(vaultID: vaultID, noteID: noteID, attempt: attempt)
+        }
     }
 
     /// Decode the base64 state vector from a `RemoteNoteSnapshot.vectorClock`
