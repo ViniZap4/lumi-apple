@@ -29,6 +29,10 @@ struct RemoteNoteDetailView: View {
                 .padding(.horizontal, 32)
                 .padding(.bottom, 8)
 
+            reconnectBanner
+                .padding(.horizontal, 32)
+                .padding(.bottom, 8)
+
             remoteUpdateBanner
                 .padding(.horizontal, 32)
                 .padding(.bottom, 8)
@@ -148,6 +152,38 @@ struct RemoteNoteDetailView: View {
     }
 
     // MARK: - Error banner
+
+    /// "Reconnecting in Ns…" hint — shown while the WS sync subscription
+    /// is waiting out a backoff between attempts. Drives a per-second
+    /// `TimelineView` so the countdown ticks without us managing a
+    /// Timer. Slice 4f.3.
+    @ViewBuilder
+    private var reconnectBanner: some View {
+        if let status = appState.remoteVaultsStore.reconnectStatus {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                HStack(spacing: 8) {
+                    Image(systemName: "wifi.exclamationmark")
+                        .foregroundStyle(theme.warning)
+                    Text(status.formatHint(now: context.date))
+                        .font(.system(.callout, design: .monospaced))
+                        .foregroundStyle(theme.text)
+                    Spacer()
+                    Text("attempt \(status.attempt)")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(theme.textDim)
+                }
+                .padding(8)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(theme.warning.opacity(0.08))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(theme.warning.opacity(0.4), lineWidth: 0.5)
+                        )
+                )
+            }
+        }
+    }
 
     /// "Remote changes pending" banner — shown only when the user has
     /// dirty edits AND a remote update has arrived. When the user isn't
