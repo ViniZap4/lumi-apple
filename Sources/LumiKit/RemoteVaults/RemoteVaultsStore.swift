@@ -40,6 +40,13 @@ public final class RemoteVaultsStore {
     /// `acknowledgeRemoteUpdate()` (typically called by the host after a
     /// `loadOpenNote` refetch settles the screen). Slice 4e.
     public private(set) var hasRemoteUpdate: Bool = false
+
+    /// Non-nil when the store is currently waiting out a backoff before
+    /// re-subscribing the WS sync channel. Hosts render this as a small
+    /// "reconnecting in Ns…" hint above the editor; nil means the WS is
+    /// either connected (`.opened` cleared it) or the host stopped
+    /// subscribing (`unsubscribeFromOpenNote` cleared it). Slice 4f.2.
+    public private(set) var reconnectStatus: ReconnectStatus?
     /// Active WS sync client; nil when no note is open or the host is
     /// running in REST-only mode.
     @ObservationIgnored private var syncClient: NoteSyncClient?
@@ -266,6 +273,9 @@ public final class RemoteVaultsStore {
                     // this drop continues the prior backoff curve or
                     // starts a fresh one. Slice 4f.1.
                     self.syncOpenedAt = Date()
+                    // Clear the reconnect hint — we're connected again.
+                    // Slice 4f.2.
+                    self.reconnectStatus = nil
                 case .willReconnect(let nextAttempt, let delaySeconds):
                     // Transient close — schedule a re-subscribe. The
                     // host-layer decision honours stability: if we'd
@@ -283,6 +293,23 @@ public final class RemoteVaultsStore {
                     // (without an intervening `.opened`) inherits the
                     // bumped attempt instead of looping at 1.
                     self.syncOpenedAt = nil
+                    // Publish a hint so the UI can render "reconnecting
+                    // in Ns…" while the sleep elapses. Cleared on the
+                    // next .opened or on unsubscribe. Slice 4f.2.
+                    //
+                    // Skipped when the host-side cap is about to drop
+                    // the attempt entirely — `scheduleReconnect` no-ops
+                    // beyond maxReconnectAttempts, and surfacing a hint
+                    // that never fires would just confuse the user.
+                    if decision.attempt <= Self.maxReconnectAttempts {
+                        self.reconnectStatus = ReconnectStatus(
+                            attempt: decision.attempt,
+                            delaySeconds: decision.delaySeconds,
+                            scheduledAt: Date()
+                        )
+                    } else {
+                        self.reconnectStatus = nil
+                    }
                     self.scheduleReconnect(
                         vaultID: vaultID,
                         noteID: noteID,
@@ -332,6 +359,7 @@ public final class RemoteVaultsStore {
         syncClient = nil
         syncOpenNoteKey = nil
         syncOpenedAt = nil
+        reconnectStatus = nil
     }
 
     /// Sleep `delaySeconds`, then re-issue `subscribeToOpenNote` with the
