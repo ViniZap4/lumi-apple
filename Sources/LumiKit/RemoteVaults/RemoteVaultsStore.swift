@@ -55,12 +55,26 @@ public final class RemoteVaultsStore {
     /// re-subscribe to without the host having to re-issue. Cleared by
     /// `unsubscribeFromOpenNote()`. Slice 4f.
     @ObservationIgnored private var syncOpenNoteKey: (vaultID: UUID, noteID: String)?
+    /// Wall-clock instant at which the WS most recently received an
+    /// `.opened` event. Used by `decideReconnect` to detect a long-
+    /// lived connection that drops — the next failure is then treated
+    /// as a fresh curve (attempt 1) instead of inheriting the prior
+    /// backoff state. Cleared on `.willReconnect` (consumed for the
+    /// decision) and on `unsubscribeFromOpenNote()`. Slice 4f.1.
+    @ObservationIgnored private var syncOpenedAt: Date?
     /// Max consecutive transient-close reconnect attempts before we give
     /// up. With 1s base + 2^n growth capped at 32s, 8 attempts ≈ 2.5
     /// minutes of trying — beyond that the server is presumably down or
     /// the network is gone for good, and silently retrying forever just
     /// burns battery. The host can re-arm by re-opening the note.
     private static let maxReconnectAttempts: Int = 8
+    /// Connections that survive at least this many seconds before a
+    /// transient close are considered "stabilised" — the next drop
+    /// starts a fresh backoff curve instead of continuing the prior
+    /// one. Tuned for "user moved off coffee shop wifi for a minute
+    /// after typing for half an hour" — not for "server is flapping".
+    /// Slice 4f.1.
+    public static let reconnectStabilitySeconds: TimeInterval = 30
     public private(set) var isLoading: Bool = false
     public private(set) var lastError: LumiAPIError?
 
@@ -246,19 +260,66 @@ public final class RemoteVaultsStore {
                     // Server sent a diff or another client's update. Flip
                     // the flag; host decides whether to refetch or hold.
                     self.hasRemoteUpdate = true
+                case .opened:
+                    // Arm the stability window — `decideReconnect` reads
+                    // this on the next willReconnect to decide whether
+                    // this drop continues the prior backoff curve or
+                    // starts a fresh one. Slice 4f.1.
+                    self.syncOpenedAt = Date()
                 case .willReconnect(let nextAttempt, let delaySeconds):
-                    // Transient close — schedule a re-subscribe with the
-                    // bumped attempt count. Capping is enforced here (not
-                    // in NoteSyncClient) so the policy stays at the host
-                    // layer where retries can be UI-aware.
-                    self.scheduleReconnect(vaultID: vaultID, noteID: noteID,
-                                           attempt: nextAttempt, delaySeconds: delaySeconds)
-                case .opened, .awareness, .closed:
+                    // Transient close — schedule a re-subscribe. The
+                    // host-layer decision honours stability: if we'd
+                    // been connected long enough before the drop, the
+                    // curve resets to attempt 1. Capping (8 attempts)
+                    // is enforced here, not in NoteSyncClient.
+                    let decision = Self.decideReconnect(
+                        suggestedAttempt: nextAttempt,
+                        suggestedDelay: delaySeconds,
+                        openedAt: self.syncOpenedAt,
+                        now: Date(),
+                        stabilityWindow: Self.reconnectStabilitySeconds
+                    )
+                    // Consume the stamp so a subsequent willReconnect
+                    // (without an intervening `.opened`) inherits the
+                    // bumped attempt instead of looping at 1.
+                    self.syncOpenedAt = nil
+                    self.scheduleReconnect(
+                        vaultID: vaultID,
+                        noteID: noteID,
+                        attempt: decision.attempt,
+                        delaySeconds: decision.delaySeconds
+                    )
+                case .awareness, .closed:
                     // No host-actionable signal for slice 4e.
                     continue
                 }
             }
         }
+    }
+
+    /// Decide the effective (attempt, delay) for a reconnect cycle.
+    /// Pure — exposed `internal` for tests; production call site lives
+    /// in `subscribeToOpenNote`'s event loop.
+    ///
+    /// Rule: if the WS had been `.opened` and stayed connected for at
+    /// least `stabilityWindow` seconds before the willReconnect arrived,
+    /// the connection is treated as healthy-then-blipped and the next
+    /// retry starts at attempt = 1 (with the corresponding short delay).
+    /// Otherwise we honour `NoteSyncClient`'s suggestion (a continuation
+    /// of the prior backoff curve).
+    ///
+    /// Slice 4f.1.
+    static func decideReconnect(
+        suggestedAttempt: Int,
+        suggestedDelay: Double,
+        openedAt: Date?,
+        now: Date,
+        stabilityWindow: TimeInterval
+    ) -> (attempt: Int, delaySeconds: Double) {
+        if let openedAt, now.timeIntervalSince(openedAt) >= stabilityWindow {
+            return (1, NoteSyncClient.backoffSeconds(attempt: 1))
+        }
+        return (suggestedAttempt, suggestedDelay)
     }
 
     /// Tear down the WS sync subscription. Idempotent.
@@ -270,6 +331,7 @@ public final class RemoteVaultsStore {
         syncClient?.stop()
         syncClient = nil
         syncOpenNoteKey = nil
+        syncOpenedAt = nil
     }
 
     /// Sleep `delaySeconds`, then re-issue `subscribeToOpenNote` with the

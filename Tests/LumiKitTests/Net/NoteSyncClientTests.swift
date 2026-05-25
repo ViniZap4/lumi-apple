@@ -120,3 +120,99 @@ struct NoteSyncClientTests {
         #expect(a != d)
     }
 }
+
+/// Slice 4f.1 — stability-aware attempt reset. After a connection that
+/// survived the configured stability window, the next transient close
+/// starts a fresh backoff curve instead of inheriting the prior one.
+/// `decideReconnect` is a static method on the @MainActor-isolated
+/// `RemoteVaultsStore`, so the suite hops to the main actor — mirrors
+/// the existing pattern in `LumiAPIClientVaultTests` for store tests.
+@Suite("RemoteVaultsStore.decideReconnect — slice 4f.1 stability reset")
+@MainActor
+struct DecideReconnectTests {
+
+    @Test("no openedAt -> honours the suggestion (initial connect failed)")
+    func noOpenedAtPreservesSuggestion() {
+        let now = Date()
+        let r = RemoteVaultsStore.decideReconnect(
+            suggestedAttempt: 3,
+            suggestedDelay: 4.0,
+            openedAt: nil,
+            now: now,
+            stabilityWindow: 30
+        )
+        #expect(r.attempt == 3)
+        #expect(r.delaySeconds == 4.0)
+    }
+
+    @Test("openedAt within window -> honours the suggestion (rapid flap)")
+    func withinWindowPreservesSuggestion() {
+        let now = Date()
+        let r = RemoteVaultsStore.decideReconnect(
+            suggestedAttempt: 4,
+            suggestedDelay: 8.0,
+            openedAt: now.addingTimeInterval(-10),
+            now: now,
+            stabilityWindow: 30
+        )
+        // Connection survived only 10s — keep escalating.
+        #expect(r.attempt == 4)
+        #expect(r.delaySeconds == 8.0)
+    }
+
+    @Test("openedAt exactly at the boundary -> resets")
+    func boundaryResets() {
+        let now = Date()
+        let r = RemoteVaultsStore.decideReconnect(
+            suggestedAttempt: 5,
+            suggestedDelay: 16.0,
+            openedAt: now.addingTimeInterval(-30),
+            now: now,
+            stabilityWindow: 30
+        )
+        #expect(r.attempt == 1)
+        // Reset delay is the attempt-1 backoff (1s + jitter), not the
+        // suggestion. Allow ±20% jitter window.
+        #expect(r.delaySeconds >= 0.8)
+        #expect(r.delaySeconds <= 1.2)
+    }
+
+    @Test("openedAt past the window -> resets to attempt 1 short delay")
+    func pastWindowResets() {
+        let now = Date()
+        let r = RemoteVaultsStore.decideReconnect(
+            suggestedAttempt: 7,
+            suggestedDelay: 32.0,
+            openedAt: now.addingTimeInterval(-3600),  // 1h stable session
+            now: now,
+            stabilityWindow: 30
+        )
+        #expect(r.attempt == 1)
+        // Same ±20% window: a 1h stable session that drops shouldn't
+        // make the user wait 32s for a retry.
+        #expect(r.delaySeconds >= 0.8)
+        #expect(r.delaySeconds <= 1.2)
+    }
+
+    @Test("openedAt in the future (clock skew) -> honours the suggestion")
+    func futureOpenedAtPreservesSuggestion() {
+        // Defensive — Date can drift slightly when the laptop wakes
+        // from sleep. A negative elapsed time is "not yet stable", so
+        // we keep escalating rather than awarding a free reset.
+        let now = Date()
+        let r = RemoteVaultsStore.decideReconnect(
+            suggestedAttempt: 2,
+            suggestedDelay: 2.0,
+            openedAt: now.addingTimeInterval(60),
+            now: now,
+            stabilityWindow: 30
+        )
+        #expect(r.attempt == 2)
+        #expect(r.delaySeconds == 2.0)
+    }
+
+    @Test("stabilityWindow constant matches the documented 30s default")
+    func stabilityWindowConstant() {
+        #expect(RemoteVaultsStore.reconnectStabilitySeconds == 30)
+    }
+}
