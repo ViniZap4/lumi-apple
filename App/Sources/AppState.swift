@@ -195,8 +195,16 @@ final class AppState {
                         let client = self.authService.apiClient
                         let store = self.remoteVaultsStore
                         let editor = self.remoteEditor
+                        // Use the CRDT commit path (Phase H slice 3) so
+                        // this auto-save shares wire shape with the
+                        // Cmd-S / Save-button path in
+                        // RemoteNoteDetailView.requestSave. CRDT is nil
+                        // only when the store hasn't armed one yet
+                        // (loadOpenNote not finished) — saveViaDiff
+                        // falls back to the text path in that case.
+                        let crdt = store.openNoteCRDT
                         Task {
-                            if let snapshot = await editor.saveViaDiff(via: client) {
+                            if let snapshot = await editor.saveViaDiff(via: client, crdt: crdt) {
                                 store.setOpenNoteSnapshot(snapshot)
                                 store.bumpNoteUpdatedAt(noteID: snapshot.id, path: snapshot.path)
                             }

@@ -1936,6 +1936,17 @@ struct LumiAPIClientVaultTests {
         #expect(store.openNotePresence.isEmpty)
     }
 
+    /// Pin the heartbeat cadence against canonical y-protocols
+    /// awareness (`outdatedTimeout = 30s`, refresh at half). A faster
+    /// heartbeat wastes bandwidth; a slower one risks peers evicting
+    /// us between sends. Locking the value at the type level catches
+    /// accidental drift.
+    @Test("presenceHeartbeatSeconds matches canonical y-protocols cadence")
+    @MainActor
+    func presenceHeartbeatCadence() {
+        #expect(RemoteVaultsStore.presenceHeartbeatSeconds == 15)
+    }
+
     /// closeOpenNote nukes the CRDT + live text so a re-open starts fresh.
     @Test("closeOpenNote clears CRDT + openNoteLiveText")
     @MainActor

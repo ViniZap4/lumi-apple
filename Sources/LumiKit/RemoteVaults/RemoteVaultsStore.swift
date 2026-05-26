@@ -117,6 +117,21 @@ public final class RemoteVaultsStore {
     /// changes. Phase H slice 4.
     @ObservationIgnored private var presenceByClient: [UUID: PresenceState] = [:]
 
+    /// Background Task that re-broadcasts `ownPresence` every
+    /// `presenceHeartbeatSeconds` while a WS subscription is alive.
+    /// Without this, a peer who joined the room *after* our initial
+    /// broadcast wouldn't see us (the server only relays; it doesn't
+    /// keep state). Matches canonical y-protocols cadence
+    /// (`outdatedTimeout / 2 = 15s`) — peers locally evict us at
+    /// `outdatedTimeout = 30s`, so a 15s heartbeat keeps us alive
+    /// with margin. Cancelled by `unsubscribeFromOpenNote()`.
+    @ObservationIgnored private var presenceHeartbeatTask: Task<Void, Never>?
+
+    /// Canonical y-protocols Awareness outdatedTimeout is 30s; we
+    /// re-broadcast at half that so peers always have a fresh stamp
+    /// before they'd evict us. Public so tests can pin the contract.
+    public static let presenceHeartbeatSeconds: TimeInterval = 15
+
     public private(set) var isLoading: Bool = false
     public private(set) var lastError: LumiAPIError?
 
@@ -355,8 +370,12 @@ public final class RemoteVaultsStore {
                     // peers see we're here. The server fans this out
                     // to other subscribers but echoes it back to us
                     // too — the `applyPresenceFrame` filter drops the
-                    // self-echo.
+                    // self-echo. The heartbeat keeps us alive in
+                    // peers' lists past the 30s outdatedTimeout and
+                    // makes us visible to peers who joined after
+                    // .opened fired.
                     self.broadcastOwnPresence()
+                    self.startPresenceHeartbeat()
                 case .willReconnect(let nextAttempt, let delaySeconds):
                     // Transient close — schedule a re-subscribe. The
                     // host-layer decision honours stability: if we'd
@@ -496,9 +515,42 @@ public final class RemoteVaultsStore {
         openNotePresence = presenceByClient.values.sorted { $0.clientID.uuidString < $1.clientID.uuidString }
     }
 
+    /// Start a recurring heartbeat that re-broadcasts `ownPresence`
+    /// every `presenceHeartbeatSeconds`. Idempotent — cancels any
+    /// prior task first. No-op when `ownPresence` is nil (listen-only
+    /// host). Cancelled by `stopPresenceHeartbeat()` /
+    /// `unsubscribeFromOpenNote()`. Phase H follow-up.
+    private func startPresenceHeartbeat() {
+        stopPresenceHeartbeat()
+        guard ownPresence != nil else { return }
+        let interval = Self.presenceHeartbeatSeconds
+        presenceHeartbeatTask = Task { @MainActor [weak self] in
+            let ns = UInt64(interval * 1_000_000_000)
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: ns)
+                } catch {
+                    return
+                }
+                guard let self else { return }
+                // If we've torn down the subscription mid-sleep,
+                // ownPresence is nil and broadcastOwnPresence no-ops —
+                // safe to keep ticking until the task is cancelled.
+                self.broadcastOwnPresence()
+            }
+        }
+    }
+
+    /// Stop the heartbeat task. Idempotent.
+    private func stopPresenceHeartbeat() {
+        presenceHeartbeatTask?.cancel()
+        presenceHeartbeatTask = nil
+    }
+
     /// Reset the presence cache. Called from unsubscribe/close/clear
     /// so a re-open starts with no stale peers visible. Phase H slice 4.
     private func resetPresence() {
+        stopPresenceHeartbeat()
         presenceByClient = [:]
         openNotePresence = []
         ownPresence = nil
