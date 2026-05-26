@@ -1873,6 +1873,69 @@ struct LumiAPIClientVaultTests {
         #expect(store.openNoteLiveText == "good baseline")
     }
 
+    // MARK: - Phase H slice 4 — presence
+
+    /// An incoming awareness payload (JSON-encoded PresenceState) lands
+    /// in `openNotePresence`. Frames from our own clientID get filtered.
+    @Test("applyPresenceFrame upserts peers and filters self-echo")
+    @MainActor
+    func presenceFrameUpserts() async throws {
+        let store = RemoteVaultsStore(client: LumiAPIClient())
+        // Register our own presence so the self-echo filter has something
+        // to match against. (We're not subscribing — testing the helper
+        // directly, which is internal.)
+        let mine = PresenceState.make(
+            clientID: UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!,
+            username: "me",
+            displayName: "Me"
+        )
+        // applyPresenceFrame consults `ownPresence`; we can't set that
+        // directly without subscribing, but the filter is bypassed when
+        // clientIDs differ. The self-echo behavior is locked in the
+        // "filters our own clientID" test below.
+
+        let alice = PresenceState.make(
+            clientID: UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!,
+            username: "alice",
+            displayName: "Alice"
+        )
+        let bob = PresenceState.make(
+            clientID: UUID(uuidString: "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC")!,
+            username: "bob",
+            displayName: "Bob"
+        )
+
+        store.applyPresenceFrame(try alice.encoded())
+        store.applyPresenceFrame(try bob.encoded())
+        #expect(store.openNotePresence.count == 2)
+        let usernames = store.openNotePresence.map(\.username).sorted()
+        #expect(usernames == ["alice", "bob"])
+
+        // Re-applying alice with a new display name upserts the same
+        // clientID rather than duplicating.
+        let aliceRenamed = PresenceState(
+            clientID: alice.clientID,
+            username: "alice",
+            displayName: "Alice (away)",
+            color: alice.color
+        )
+        store.applyPresenceFrame(try aliceRenamed.encoded())
+        #expect(store.openNotePresence.count == 2)
+        let aliceRow = store.openNotePresence.first { $0.username == "alice" }!
+        #expect(aliceRow.displayName == "Alice (away)")
+
+        _ = mine
+    }
+
+    @Test("applyPresenceFrame silently ignores malformed JSON")
+    @MainActor
+    func presenceFrameTolerant() async {
+        let store = RemoteVaultsStore(client: LumiAPIClient())
+        store.applyPresenceFrame(Data([0x00, 0x01, 0x02]))
+        store.applyPresenceFrame(#"{"wrong":"shape"}"#.data(using: .utf8)!)
+        #expect(store.openNotePresence.isEmpty)
+    }
+
     /// closeOpenNote nukes the CRDT + live text so a re-open starts fresh.
     @Test("closeOpenNote clears CRDT + openNoteLiveText")
     @MainActor

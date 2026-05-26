@@ -67,6 +67,13 @@ final class AppState {
     /// gate themselves on this being populated.
     let authService: AuthService
 
+    /// Stable per-app-launch identity used as the `clientID` for
+    /// presence broadcasts. Different devices for the same user need
+    /// distinct clientIDs so peers see them as separate viewers, so
+    /// this is a fresh UUID per launch — not derived from the user.
+    /// Phase H slice 4.
+    let clientID: UUID = UUID()
+
     /// Server-vault discovery cache (E.1.1). Populated on sign-in via
     /// `remoteVaultsStore.refresh()`; cleared on sign-out.
     let remoteVaultsStore: RemoteVaultsStore

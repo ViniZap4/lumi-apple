@@ -161,6 +161,21 @@ public final class NoteSyncClient: @unchecked Sendable {
         }
     }
 
+    /// Send an awareness frame to the server. The server fans it out to
+    /// every other subscriber on the same room (it does NOT persist
+    /// awareness). `payload` is the opaque application-defined body —
+    /// in lumi we send JSON-encoded `PresenceState`. No-op when the
+    /// connection isn't open. Phase H slice 4.
+    public func send(awareness payload: Data) {
+        guard let task else { return }
+        let frame = YProtocol.encodeAwareness(payload)
+        task.send(.data(frame)) { _ in
+            // Best-effort. A failure here is the same shape as any other
+            // WS send failure — the read loop will surface a .closed
+            // event and the host will reconnect.
+        }
+    }
+
     /// Tear down the connection. Idempotent. Caller must invoke from the
     /// same actor as `start()` (no internal serialization).
     public func stop() {

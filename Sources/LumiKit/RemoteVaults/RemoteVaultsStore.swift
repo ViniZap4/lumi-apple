@@ -99,6 +99,24 @@ public final class RemoteVaultsStore {
     /// Phase H slice 2.
     public private(set) var openNoteLiveText: String?
 
+    /// Other peers currently subscribed to the open note, sorted by
+    /// clientID for a stable rendering order. Phase H slice 4. The
+    /// local user's own presence is broadcast on subscribe but is
+    /// NOT included in this list — `openNotePresence` is "everyone
+    /// else viewing".
+    public private(set) var openNotePresence: [PresenceState] = []
+
+    /// Our own presence broadcast on the awareness channel for the
+    /// open note. Echoed back from the server but filtered out of
+    /// `openNotePresence` via `clientID`. Set by `subscribeToOpenNote`
+    /// when the caller passes a non-nil `presence`. Phase H slice 4.
+    @ObservationIgnored private var ownPresence: PresenceState?
+
+    /// Peer-keyed presence map populated by incoming awareness frames.
+    /// Republished as the sorted `openNotePresence` whenever it
+    /// changes. Phase H slice 4.
+    @ObservationIgnored private var presenceByClient: [UUID: PresenceState] = [:]
+
     public private(set) var isLoading: Bool = false
     public private(set) var lastError: LumiAPIError?
 
@@ -271,8 +289,14 @@ public final class RemoteVaultsStore {
     /// to `true` when the server fans out a SyncUpdate from another
     /// client. Hosts decide policy from there (refetch if clean, banner
     /// if dirty).
-    public func subscribeToOpenNote(vaultID: UUID, noteID: String, attempt: Int = 1) async {
+    public func subscribeToOpenNote(
+        vaultID: UUID,
+        noteID: String,
+        attempt: Int = 1,
+        presence: PresenceState? = nil
+    ) async {
         unsubscribeFromOpenNote()
+        ownPresence = presence
         let baseURL = await client.baseURL
         let token = await client.token
         guard let baseURL, let token, !token.isEmpty else {
@@ -327,6 +351,12 @@ public final class RemoteVaultsStore {
                     // Clear the reconnect hint — we're connected again.
                     // Slice 4f.2.
                     self.reconnectStatus = nil
+                    // Phase H slice 4: broadcast our own presence so
+                    // peers see we're here. The server fans this out
+                    // to other subscribers but echoes it back to us
+                    // too — the `applyPresenceFrame` filter drops the
+                    // self-echo.
+                    self.broadcastOwnPresence()
                 case .willReconnect(let nextAttempt, let delaySeconds):
                     // Transient close — schedule a re-subscribe. The
                     // host-layer decision honours stability: if we'd
@@ -367,8 +397,15 @@ public final class RemoteVaultsStore {
                         attempt: decision.attempt,
                         delaySeconds: decision.delaySeconds
                     )
-                case .awareness, .closed:
-                    // No host-actionable signal for slice 4e.
+                case .awareness(let payload):
+                    // Phase H slice 4: decode peer presence + update
+                    // the room list. Malformed/foreign-format payloads
+                    // are silently ignored so a stray frame from a
+                    // different presence protocol doesn't disrupt us.
+                    self.applyPresenceFrame(payload)
+                case .closed:
+                    // No host-actionable signal beyond what
+                    // .willReconnect already conveyed.
                     continue
                 }
             }
@@ -427,6 +464,46 @@ public final class RemoteVaultsStore {
         }
     }
 
+    /// Encode our own `ownPresence` (if set) and ship it over the WS
+    /// awareness channel. Called from the `.opened` handler so the
+    /// frame goes out the moment we know peers can hear us. Silent
+    /// no-op when no own presence has been registered (e.g. the host
+    /// chose REST-only mode or the user hasn't completed auth).
+    /// Phase H slice 4.
+    private func broadcastOwnPresence() {
+        guard let presence = ownPresence, let client = syncClient else { return }
+        do {
+            let payload = try presence.encoded()
+            client.send(awareness: payload)
+        } catch {
+            // JSON-encoding a Codable struct can't realistically fail
+            // for our shape, but if it does the host has no recourse —
+            // peers just won't see us. Swallow.
+            _ = error
+        }
+    }
+
+    /// Decode an incoming awareness payload and update the presence
+    /// list. Drops our own echo (server fans out to ALL subscribers
+    /// including the origin) by matching on `clientID`. Phase H slice 4.
+    func applyPresenceFrame(_ payload: Data) {
+        guard let peer = try? PresenceState.decoded(from: payload) else { return }
+        // Filter our own echo. Different devices for the same user
+        // sign in with different clientIDs so both show up as distinct
+        // peers — only "this exact session" is filtered.
+        if let mine = ownPresence, mine.clientID == peer.clientID { return }
+        presenceByClient[peer.clientID] = peer
+        openNotePresence = presenceByClient.values.sorted { $0.clientID.uuidString < $1.clientID.uuidString }
+    }
+
+    /// Reset the presence cache. Called from unsubscribe/close/clear
+    /// so a re-open starts with no stale peers visible. Phase H slice 4.
+    private func resetPresence() {
+        presenceByClient = [:]
+        openNotePresence = []
+        ownPresence = nil
+    }
+
     /// Tear down the WS sync subscription. Idempotent.
     public func unsubscribeFromOpenNote() {
         syncReconnectTask?.cancel()
@@ -438,6 +515,7 @@ public final class RemoteVaultsStore {
         syncOpenNoteKey = nil
         syncOpenedAt = nil
         reconnectStatus = nil
+        resetPresence()
     }
 
     /// Sleep `delaySeconds`, then re-issue `subscribeToOpenNote` with the
@@ -473,7 +551,13 @@ public final class RemoteVaultsStore {
                   key.noteID == noteID else {
                 return
             }
-            await self.subscribeToOpenNote(vaultID: vaultID, noteID: noteID, attempt: attempt)
+            // Phase H slice 4: re-use the same presence on reconnect so
+            // peers don't see us disappear+reappear when the network
+            // blips. ownPresence is set by the original subscribe and
+            // cleared on host-driven unsubscribe — re-passing it here
+            // is safe even when it's nil.
+            let presence = self.ownPresence
+            await self.subscribeToOpenNote(vaultID: vaultID, noteID: noteID, attempt: attempt, presence: presence)
         }
     }
 

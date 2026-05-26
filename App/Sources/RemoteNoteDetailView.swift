@@ -134,6 +134,37 @@ struct RemoteNoteDetailView: View {
                         .font(.caption2)
                         .foregroundStyle(theme.textDim)
                 }
+                presencePill
+            }
+        }
+    }
+
+    /// "+N viewing: alice, bob" pill. Visible only when at least one
+    /// other peer is on this note. Each peer renders as a small filled
+    /// circle in their assigned color followed by their display name;
+    /// long lists truncate at 3 names + a "+M more" tail. Phase H slice 4.
+    @ViewBuilder
+    private var presencePill: some View {
+        let peers = appState.remoteVaultsStore.openNotePresence
+        if !peers.isEmpty {
+            HStack(spacing: 6) {
+                Text("·")
+                    .foregroundStyle(theme.textDim)
+                ForEach(peers.prefix(3)) { peer in
+                    HStack(spacing: 3) {
+                        Circle()
+                            .fill(Color(hex: peer.color))
+                            .frame(width: 6, height: 6)
+                        Text(peer.displayName)
+                            .font(.caption2)
+                            .foregroundStyle(theme.text)
+                    }
+                }
+                if peers.count > 3 {
+                    Text("+\(peers.count - 3) more")
+                        .font(.caption2)
+                        .foregroundStyle(theme.textDim)
+                }
             }
         }
     }
@@ -403,16 +434,30 @@ struct RemoteNoteDetailView: View {
     private func ensureLoaded() {
         appState.remoteEditorMode = .view
         let store = appState.remoteVaultsStore
+        let presence = makeOwnPresence()
         if let current = store.openNoteSnapshot, current.id == listRow.id {
             seedEditorIfNeeded(from: current)
             // Idempotent — no-ops if already subscribed.
-            Task { await store.subscribeToOpenNote(vaultID: vault.id, noteID: listRow.id) }
+            Task { await store.subscribeToOpenNote(vaultID: vault.id, noteID: listRow.id, presence: presence) }
             return
         }
         Task {
             await store.loadOpenNote(vaultID: vault.id, noteID: listRow.id)
-            await store.subscribeToOpenNote(vaultID: vault.id, noteID: listRow.id)
+            await store.subscribeToOpenNote(vaultID: vault.id, noteID: listRow.id, presence: presence)
         }
+    }
+
+    /// Build a presence broadcast for the local user from `AuthService`
+    /// + `AppState.clientID`. Returns nil when there's no active
+    /// session (REST-only mode or pre-login state) — the store treats
+    /// nil as "don't broadcast, just listen". Phase H slice 4.
+    private func makeOwnPresence() -> PresenceState? {
+        guard let session = appState.authService.currentSession else { return nil }
+        return PresenceState.make(
+            clientID: appState.clientID,
+            username: session.user.username,
+            displayName: session.user.displayName
+        )
     }
 
     /// React to the store's `hasRemoteUpdate` flag flipping to `true`.
