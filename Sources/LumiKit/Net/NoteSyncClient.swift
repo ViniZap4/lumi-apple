@@ -3,12 +3,12 @@ import Foundation
 /// `URLSessionWebSocketTask`-backed subscription to a lumi-server v2 note's
 /// live-sync channel (`WSS /api/vaults/:vault/notes/:id/sync`).
 ///
-/// **Scope (E.1.2 slice 4e):** Apple-side decoding of Yjs CRDT updates is
-/// deferred until a future Phase H slice adds a yswift-equivalent Swift
-/// binding. This client opens the WS, sends the initial `SyncStep1` with
-/// our last-known state vector, and surfaces *signals* to consumers ("a
-/// remote update arrived") so the host can refetch the snapshot via REST.
-/// We do not decode or apply Y.Doc updates locally.
+/// **Scope:** the WS client itself only handles the framing — opens the
+/// socket, sends `SyncStep1` with the caller-supplied state vector, and
+/// emits events carrying raw `Data` payloads. Decoding + applying the
+/// CRDT updates lives in `LumiCRDT` (Phase H slice 1) and is wired in
+/// by `RemoteVaultsStore` (Phase H slice 2). Slice 4e originally
+/// discarded the payload; H.2 carries it through.
 ///
 /// Auth: lumi-server's WS endpoints accept `?token=` query-string auth
 /// because browsers cannot set custom headers on WebSocket upgrades. We
@@ -27,14 +27,15 @@ public final class NoteSyncClient: @unchecked Sendable {
         case opened
 
         /// Server replied to our SyncStep1 with the missing-update diff.
-        /// Body discarded by slice 4e since we don't apply CRDT updates;
-        /// host treats this the same as `syncUpdate` (refetch trigger).
-        case syncStep2
+        /// `payload` is the lib0-v1 encoded Y.Doc update — feed it into
+        /// `LumiCRDT.apply(update:)`. Slice H.2 added the payload (slice
+        /// 4e discarded it).
+        case syncStep2(payload: Data)
 
         /// Fan-out from another client (or our own REST writes echoing
-        /// through the hub). Host should refetch the snapshot when not
-        /// dirty, or surface a "remote changes pending" hint when dirty.
-        case syncUpdate
+        /// through the hub). `payload` is the lib0-v1 encoded incremental
+        /// Y.Doc update — apply it to merge the remote edit live.
+        case syncUpdate(payload: Data)
 
         /// Opaque awareness blob. Reserved for a future slice that wires
         /// cursors / presence.
@@ -260,9 +261,9 @@ public final class NoteSyncClient: @unchecked Sendable {
                     // still fan out via the hub.
                     return
                 case YProtocol.syncStep2:
-                    continuation.yield(.syncStep2)
+                    continuation.yield(.syncStep2(payload: parsed.body))
                 case YProtocol.syncUpdate:
-                    continuation.yield(.syncUpdate)
+                    continuation.yield(.syncUpdate(payload: parsed.body))
                 default:
                     return
                 }

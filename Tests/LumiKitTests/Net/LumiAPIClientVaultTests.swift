@@ -1718,5 +1718,128 @@ struct LumiAPIClientVaultTests {
         // Forbidden on a single section must not poison lastError.
         #expect(store.lastError == nil)
     }
+
+    // MARK: - Phase H slice 2 — live CRDT updates
+
+    /// loadOpenNote installs a fresh empty CRDT and leaves openNoteLiveText nil
+    /// (the snapshot's `text` drives the initial render; live text only
+    /// updates once a WS frame applies cleanly).
+    @Test("loadOpenNote arms an empty CRDT; openNoteLiveText starts nil")
+    @MainActor
+    func loadOpenNoteArmsCRDT() async {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"id":"hello","path":"hello.md","text":"initial body","vector_clock":"AAAA"}"#.data(using: .utf8)!
+            return (response, body)
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = LumiAPIClient(session: URLSession(configuration: config))
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let store = RemoteVaultsStore(client: client)
+        await store.loadOpenNote(vaultID: vaultID, noteID: "hello")
+        #expect(store.openNoteSnapshot?.text == "initial body")
+        // Live text stays nil until the WS feeds a real update.
+        #expect(store.openNoteLiveText == nil)
+    }
+
+    /// End-to-end of the H.2 plumbing: a peer LumiCRDT produces an update,
+    /// we feed it through `applyLiveUpdate`, and `openNoteLiveText`
+    /// reflects the peer's text.
+    @Test("applyLiveUpdate merges a peer's Yjs update into openNoteLiveText")
+    @MainActor
+    func applyLiveUpdateMergesPeerText() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"id":"hello","path":"hello.md","text":"","vector_clock":"AAAA"}"#.data(using: .utf8)!
+            return (response, body)
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = LumiAPIClient(session: URLSession(configuration: config))
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let store = RemoteVaultsStore(client: client)
+        await store.loadOpenNote(vaultID: vaultID, noteID: "hello")
+
+        // Peer Y.Doc on another "client" makes an edit and exports the
+        // full state. This is what the server would fan out via
+        // SyncStep2 on subscribe (or SyncUpdate after the fact).
+        let peer = LumiCRDT()
+        await peer.setText("live from peer")
+        let payload = await peer.encodeStateAsUpdate()
+
+        await store.applyLiveUpdate(payload)
+        #expect(store.openNoteLiveText == "live from peer")
+    }
+
+    /// Malformed update bytes don't tear down the store — `openNoteLiveText`
+    /// keeps its prior known-good value. The next valid frame will
+    /// overwrite it.
+    @Test("applyLiveUpdate tolerates malformed payloads without clobbering live text")
+    @MainActor
+    func applyLiveUpdateTolerant() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"id":"hello","path":"hello.md","text":"","vector_clock":"AAAA"}"#.data(using: .utf8)!
+            return (response, body)
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = LumiAPIClient(session: URLSession(configuration: config))
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let store = RemoteVaultsStore(client: client)
+        await store.loadOpenNote(vaultID: vaultID, noteID: "hello")
+
+        // Seed with one good update.
+        let peer = LumiCRDT()
+        await peer.setText("good baseline")
+        await store.applyLiveUpdate(peer.encodeStateAsUpdate())
+        #expect(store.openNoteLiveText == "good baseline")
+
+        // Empty payload is a no-op.
+        await store.applyLiveUpdate(Data())
+        #expect(store.openNoteLiveText == "good baseline")
+
+        // Garbage bytes: the apply throws internally; live text stays.
+        await store.applyLiveUpdate(Data([0xff, 0xff, 0xff, 0xff, 0x00]))
+        #expect(store.openNoteLiveText == "good baseline")
+    }
+
+    /// closeOpenNote nukes the CRDT + live text so a re-open starts fresh.
+    @Test("closeOpenNote clears CRDT + openNoteLiveText")
+    @MainActor
+    func closeOpenNoteClearsCRDT() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"id":"hello","path":"hello.md","text":"","vector_clock":"AAAA"}"#.data(using: .utf8)!
+            return (response, body)
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = LumiAPIClient(session: URLSession(configuration: config))
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let store = RemoteVaultsStore(client: client)
+        await store.loadOpenNote(vaultID: vaultID, noteID: "hello")
+
+        let peer = LumiCRDT()
+        await peer.setText("something")
+        await store.applyLiveUpdate(peer.encodeStateAsUpdate())
+        #expect(store.openNoteLiveText == "something")
+
+        store.closeOpenNote()
+        #expect(store.openNoteLiveText == nil)
+
+        // After close, a stray update gets dropped (no CRDT to apply against).
+        await store.applyLiveUpdate(peer.encodeStateAsUpdate())
+        #expect(store.openNoteLiveText == nil)
+    }
 }
 

@@ -82,6 +82,22 @@ public final class RemoteVaultsStore {
     /// after typing for half an hour" — not for "server is flapping".
     /// Slice 4f.1.
     public static let reconnectStabilitySeconds: TimeInterval = 30
+
+    /// CRDT mirroring the server's state for the currently-open note.
+    /// Lifecycle is bound to (loadOpenNote → subscribeToOpenNote →
+    /// closeOpenNote): fresh on every open, populated by the first
+    /// SyncStep2 the server replies with, kept up-to-date by
+    /// subsequent SyncUpdate frames. nil when no note is open.
+    /// Phase H slice 2.
+    @ObservationIgnored private var openNoteCRDT: LumiCRDT?
+
+    /// Latest text the open-note CRDT holds. Updated after each
+    /// successfully-applied WS update (`.syncStep2` / `.syncUpdate`).
+    /// Hosts observe this to merge live edits into the editor when
+    /// the user isn't dirty; nil means no update has arrived yet.
+    /// Phase H slice 2.
+    public private(set) var openNoteLiveText: String?
+
     public private(set) var isLoading: Bool = false
     public private(set) var lastError: LumiAPIError?
 
@@ -121,6 +137,8 @@ public final class RemoteVaultsStore {
             notesHasMore = false
             openNoteSnapshot = nil
             openNoteError = nil
+            openNoteCRDT = nil
+            openNoteLiveText = nil
             return
         }
         selectedVaultID = id
@@ -135,6 +153,8 @@ public final class RemoteVaultsStore {
         notesHasMore = false
         openNoteSnapshot = nil
         openNoteError = nil
+        openNoteCRDT = nil
+        openNoteLiveText = nil
         // Sequential rather than `async let` — Swift 6 typed throws don't
         // propagate through `async let` bindings, and serializing a few short
         // requests is fine for the UI flow.
@@ -187,9 +207,19 @@ public final class RemoteVaultsStore {
             let snapshot = try await client.getNoteSnapshot(vaultID: vaultID, noteID: noteID)
             openNoteSnapshot = snapshot
             hasRemoteUpdate = false
+            // Phase H slice 2: spin up a fresh CRDT for this note. Its
+            // initial state is empty; the WS SyncStep2 reply will seed
+            // it with the server's full state (see subscribeToOpenNote).
+            // openNoteLiveText stays nil until the first apply lands —
+            // the host falls back to snapshot.text for the initial
+            // render.
+            openNoteCRDT = LumiCRDT()
+            openNoteLiveText = nil
         } catch {
             openNoteSnapshot = nil
             openNoteError = error
+            openNoteCRDT = nil
+            openNoteLiveText = nil
         }
         openNoteIsLoading = false
     }
@@ -211,6 +241,8 @@ public final class RemoteVaultsStore {
         openNoteError = nil
         openNoteIsLoading = false
         hasRemoteUpdate = false
+        openNoteCRDT = nil
+        openNoteLiveText = nil
     }
 
     /// Mark the pending remote-update signal as observed. Host calls this
@@ -247,7 +279,20 @@ public final class RemoteVaultsStore {
             // with a stale token; we just won't have live updates.
             return
         }
-        let stateVector = decodeBase64StateVector(openNoteSnapshot?.vectorClock)
+        // Phase H slice 2: prefer the local CRDT's state vector over the
+        // snapshot's `vector_clock`. The snapshot SV is *the server's*
+        // notion of "fully synced", which is only correct if our local
+        // doc already mirrors the server. After a fresh open the local
+        // CRDT is empty, so an empty SV → server replies with the full
+        // state in SyncStep2 → we apply and converge. Falls back to the
+        // snapshot's SV when no CRDT is present (e.g. tests bypassing
+        // loadOpenNote).
+        let stateVector: Data
+        if let crdt = openNoteCRDT {
+            stateVector = await crdt.stateVector()
+        } else {
+            stateVector = decodeBase64StateVector(openNoteSnapshot?.vectorClock)
+        }
         let sub = NoteSyncClient(
             baseURL: baseURL,
             token: token,
@@ -263,9 +308,14 @@ public final class RemoteVaultsStore {
             for await event in sub.events {
                 guard let self else { return }
                 switch event {
-                case .syncStep2, .syncUpdate:
-                    // Server sent a diff or another client's update. Flip
-                    // the flag; host decides whether to refetch or hold.
+                case .syncStep2(let payload), .syncUpdate(let payload):
+                    // Server sent a diff or another client's update.
+                    // Apply to the local CRDT (Phase H slice 2); on
+                    // success, publish the new live text so hosts can
+                    // merge clean-state edits. Also keep the legacy
+                    // `hasRemoteUpdate` flag set so dirty-state hosts
+                    // still surface the merge banner.
+                    await self.applyLiveUpdate(payload)
                     self.hasRemoteUpdate = true
                 case .opened:
                     // Arm the stability window — `decideReconnect` reads
@@ -347,6 +397,33 @@ public final class RemoteVaultsStore {
             return (1, NoteSyncClient.backoffSeconds(attempt: 1))
         }
         return (suggestedAttempt, suggestedDelay)
+    }
+
+    /// Apply a WS-delivered Y.Doc update payload to the open-note CRDT
+    /// and republish the resulting text. Phase H slice 2.
+    ///
+    /// Tolerant of failure: a malformed payload from a misbehaving peer
+    /// shouldn't tear down the subscription. We log nothing (no logging
+    /// surface in LumiKit yet) but leave `openNoteLiveText` unchanged
+    /// so the host renders the prior known-good state. The next valid
+    /// update will overwrite it.
+    ///
+    /// Internal because the host never drives this directly — the WS
+    /// event loop is the only caller. `package` would be nicer but
+    /// LumiKit doesn't ship sub-modules yet; `func`-default visibility
+    /// (internal) is fine because LumiKitTests has `@testable import`.
+    func applyLiveUpdate(_ payload: Data) async {
+        guard let crdt = openNoteCRDT, !payload.isEmpty else { return }
+        do {
+            try await crdt.apply(update: payload)
+            openNoteLiveText = await crdt.text()
+        } catch {
+            // Apply failed (malformed bytes). Don't tear down the WS
+            // subscription — a single bad frame may still be followed
+            // by valid ones. Don't touch openNoteLiveText so the host's
+            // last known-good render survives.
+            _ = error
+        }
     }
 
     /// Tear down the WS sync subscription. Idempotent.
@@ -473,6 +550,8 @@ public final class RemoteVaultsStore {
             openNoteError = nil
             openNoteIsLoading = false
             hasRemoteUpdate = false
+            openNoteCRDT = nil
+            openNoteLiveText = nil
         }
     }
 
@@ -605,6 +684,8 @@ public final class RemoteVaultsStore {
             notes = []
             notesHasMore = false
             openNoteSnapshot = nil
+            openNoteCRDT = nil
+            openNoteLiveText = nil
         }
     }
 
@@ -624,6 +705,8 @@ public final class RemoteVaultsStore {
         openNoteError = nil
         openNoteIsLoading = false
         hasRemoteUpdate = false
+        openNoteCRDT = nil
+        openNoteLiveText = nil
         lastError = nil
         isLoading = false
     }

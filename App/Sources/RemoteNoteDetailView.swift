@@ -53,6 +53,9 @@ struct RemoteNoteDetailView: View {
         .onChange(of: appState.remoteVaultsStore.hasRemoteUpdate) { _, flag in
             handleRemoteUpdateFlag(flag)
         }
+        .onChange(of: appState.remoteVaultsStore.openNoteLiveText) { _, newText in
+            handleLiveTextChange(newText)
+        }
     }
 
     // MARK: - Header
@@ -429,6 +432,23 @@ struct RemoteNoteDetailView: View {
     private func handleSnapshotChange(_ newSnapshot: RemoteNoteSnapshot?) {
         guard let newSnapshot else { return }
         seedEditorIfNeeded(from: newSnapshot)
+    }
+
+    /// Merge a live CRDT-driven text update from the WS into the editor.
+    /// Phase H slice 2. Only applies when the editor is bound to this
+    /// note AND the user isn't dirty — a dirty user keeps their edits
+    /// and the remote-update banner (driven by `hasRemoteUpdate`)
+    /// surfaces the pending merge until they save. Skips no-op
+    /// transitions where the live text matches what we already render
+    /// (avoids stomping `originalText` on a self-echo).
+    private func handleLiveTextChange(_ newText: String?) {
+        guard let newText else { return }
+        let editor = appState.remoteEditor
+        guard editor.isBound(toVaultID: vault.id, noteID: listRow.id) else { return }
+        guard !editor.isDirty else { return }
+        guard editor.currentText != newText else { return }
+        editor.originalText = newText
+        editor.currentText = newText
     }
 
     /// Seed the editor state from a fetched payload — but only when this
