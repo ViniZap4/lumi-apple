@@ -24,3 +24,19 @@ public enum LumiAPIError: Error, Sendable, Equatable {
     /// Anything else: unexpected status with no parseable error envelope.
     case invalidResponse(status: Int)
 }
+
+extension LumiAPIError {
+    /// True when this error represents a strict-conflict rejection of an
+    /// `applyDiff` call — the server received a stale `base_clock` and
+    /// refused to merge. Callers handle this by refetching the snapshot
+    /// (to restore baseline) and preserving the user's in-memory edits.
+    /// Slice 4c.
+    public var isApplyDiffConflict: Bool {
+        if case let .server(status, code, _) = self,
+           status == 409,
+           code == "conflict" {
+            return true
+        }
+        return false
+    }
+}

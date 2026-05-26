@@ -1511,6 +1511,55 @@ struct LumiAPIClientVaultTests {
         }
     }
 
+    @Test("applyNoteDiff 409 conflict maps to .server with isApplyDiffConflict true")
+    func applyNoteDiffStrictConflict() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 409, httpVersion: nil, headerFields: nil)!
+            let data = #"{"error":"conflict","detail":"base_clock is stale"}"#.data(using: .utf8)!
+            return (response, data)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let captured = await catchAPIError {
+            _ = try await client.applyNoteDiff(vaultID: vaultID, noteID: "x", baseClock: "stale", text: "z")
+        }
+        guard let err = captured else {
+            Issue.record("expected conflict error, got nil")
+            return
+        }
+        #expect(err.isApplyDiffConflict)
+        if case let .server(status, code, detail) = err {
+            #expect(status == 409)
+            #expect(code == "conflict")
+            #expect(detail == "base_clock is stale")
+        } else {
+            Issue.record("expected .server, got \(err)")
+        }
+    }
+
+    @Test("isApplyDiffConflict false for non-409 .server, non-server cases")
+    func isApplyDiffConflictPredicate() {
+        // Wrong status — same code, different HTTP code.
+        let wrongStatus: LumiAPIError = .server(status: 400, code: "conflict", detail: nil)
+        #expect(!wrongStatus.isApplyDiffConflict)
+
+        // Right status, wrong code (e.g. constraint conflict on another endpoint).
+        let wrongCode: LumiAPIError = .server(status: 409, code: "duplicate", detail: nil)
+        #expect(!wrongCode.isApplyDiffConflict)
+
+        // The exact shape.
+        let match: LumiAPIError = .server(status: 409, code: "conflict", detail: nil)
+        #expect(match.isApplyDiffConflict)
+
+        // Other error families are never strict-conflicts.
+        #expect(!LumiAPIError.unauthorized.isApplyDiffConflict)
+        #expect(!LumiAPIError.network(message: "offline").isApplyDiffConflict)
+        #expect(!LumiAPIError.decoding(message: "bad").isApplyDiffConflict)
+        #expect(!LumiAPIError.invalidResponse(status: 500).isApplyDiffConflict)
+    }
+
     @Test("RemoteVaultsStore.bumpNoteUpdatedAt mutates updated_at on the cached row")
     @MainActor
     func storeBumpUpdatedAt() async throws {

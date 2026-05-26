@@ -29,6 +29,10 @@ struct RemoteNoteDetailView: View {
                 .padding(.horizontal, 32)
                 .padding(.bottom, 8)
 
+            conflictBanner
+                .padding(.horizontal, 32)
+                .padding(.bottom, 8)
+
             reconnectBanner
                 .padding(.horizontal, 32)
                 .padding(.bottom, 8)
@@ -206,6 +210,36 @@ struct RemoteNoteDetailView: View {
                     .overlay(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .stroke(theme.info.opacity(0.4), lineWidth: 0.5)
+                    )
+            )
+        }
+    }
+
+    /// Strict-conflict banner — shown when `applyDiff` was rejected and
+    /// the editor has already refetched the latest snapshot. The user's
+    /// `currentText` is preserved; saving again will diff against the
+    /// fresh clock. Slice 4c.
+    @ViewBuilder
+    private var conflictBanner: some View {
+        if case .conflict = appState.remoteEditor.status {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.triangle.merge")
+                    .foregroundStyle(theme.warning)
+                Text("another device saved first — your edits are preserved, save again to merge")
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundStyle(theme.text)
+                Spacer()
+                Button("Dismiss") { appState.remoteEditor.discard() }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(theme.textDim)
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(theme.warning.opacity(0.08))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(theme.warning.opacity(0.4), lineWidth: 0.5)
                     )
             )
         }

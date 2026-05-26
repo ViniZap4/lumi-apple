@@ -14,6 +14,15 @@ import LumiKit
 /// concurrent edits from other clients, and returns the post-merge
 /// snapshot. We track the base64 state vector so successive diffs anchor
 /// against the right CRDT history position.
+///
+/// Slice 4c adds strict-conflict handling: when the server rejects a
+/// stale `base_clock` with `{"error":"conflict"}` (HTTP 409), the editor
+/// auto-refetches the latest snapshot, replaces the baseline with the
+/// server's new text + clock, but **preserves `currentText`** so the
+/// user's in-flight edits aren't lost. The UI surfaces a `.conflict`
+/// status carrying the server's text so the user can review and resave.
+/// The server currently treats `base_clock` as advisory; once it ships
+/// strict-conflict enforcement this plumbing activates automatically.
 @Observable
 @MainActor
 final class RemoteEditorState {
@@ -23,6 +32,11 @@ final class RemoteEditorState {
         case saving
         case saved(at: Date)
         case error(message: String)
+        /// Server refused the diff because our `base_clock` was stale.
+        /// The editor has refetched the latest snapshot and restored the
+        /// baseline to `serverText`; `currentText` still holds the user's
+        /// edits. The next save will diff against the fresh clock.
+        case conflict(serverText: String)
     }
 
     private(set) var noteID: String?
@@ -101,6 +115,15 @@ final class RemoteEditorState {
             status = .saved(at: Date())
             return merged
         } catch let error as LumiAPIError {
+            // Strict-conflict: server rejected our diff because our
+            // base_clock was stale. Refetch the latest snapshot, restore
+            // the baseline from it, and *preserve* the user's currentText
+            // so their edits survive. The next save will diff against
+            // the fresh clock. Slice 4c.
+            if error.isApplyDiffConflict {
+                await handleStrictConflict(via: client, vaultID: vaultID, noteID: noteID)
+                return nil
+            }
             status = .error(message: describe(error))
             return nil
         } catch {
@@ -109,10 +132,34 @@ final class RemoteEditorState {
         }
     }
 
+    /// Refetch the snapshot, install it as the new baseline, and leave
+    /// `currentText` alone. Sets `status = .conflict(serverText:)`. If
+    /// the refetch itself fails, fall back to a plain `.error` so the
+    /// user at least sees something actionable.
+    private func handleStrictConflict(
+        via client: LumiAPIClient,
+        vaultID: UUID,
+        noteID: String
+    ) async {
+        do {
+            let fresh = try await client.getNoteSnapshot(vaultID: vaultID, noteID: noteID)
+            originalText = fresh.text
+            vectorClock = fresh.vectorClock
+            path = fresh.path
+            // Intentionally leave currentText untouched.
+            status = .conflict(serverText: fresh.text)
+        } catch let error as LumiAPIError {
+            status = .error(message: describe(error))
+        } catch {
+            status = .error(message: error.localizedDescription)
+        }
+    }
+
     /// Discard in-memory edits, restoring the loaded baseline.
     func discard() {
         currentText = originalText
         if case .error = status { status = .loaded }
+        if case .conflict = status { status = .loaded }
     }
 
     /// Drop all editor state. Call when the open note changes or the
@@ -144,7 +191,7 @@ final class RemoteEditorState {
             case "not_found": return "this note no longer exists on the server"
             case "validation_failed", "validation": return detail ?? "validation failed"
             case "crdt_unavailable": return "the server's CRDT service is offline — try again shortly"
-            case "conflict": return detail ?? "the server rejected the diff (conflict)"
+            case "conflict": return detail ?? "another device saved first — refetch and resave"
             default: return detail ?? code
             }
         case .invalidResponse(let s): return "unexpected response (HTTP \(s))"
