@@ -13,13 +13,20 @@ let package = Package(
         .library(name: "LumiUI", targets: ["LumiUI"])
     ],
     dependencies: [
-        .package(url: "https://github.com/swiftlang/swift-markdown.git", from: "0.5.0")
+        .package(url: "https://github.com/swiftlang/swift-markdown.git", from: "0.5.0"),
+        // Yjs CRDT binding for the Apple client. Wire-compatible with the
+        // server's yrs (Rust) — same lib0-v1 encoding for state vectors
+        // and updates. Frozen-since-2024 (0.2.1) wrapper around yrs via
+        // UniFFI; we contain it behind the LumiCRDT actor so the Swift 6
+        // strict-concurrency surface stays small. Phase H slice 1.
+        .package(url: "https://github.com/y-crdt/yswift.git", from: "0.2.1")
     ],
     targets: [
         .target(
             name: "LumiKit",
             dependencies: [
-                .product(name: "Markdown", package: "swift-markdown")
+                .product(name: "Markdown", package: "swift-markdown"),
+                .product(name: "YSwift", package: "yswift")
             ],
             path: "Sources/LumiKit"
         ),

@@ -1,5 +1,5 @@
 {
-  "originHash" : "e2fbcdf469e9d9fc39853a40ea686e4e526b2a4b3835e5cd4f7d4b293e83ac78",
+  "originHash" : "cec9a66c3f2abfdf5d01d09536f686d752f5d76792ec3df44b2267ea8f5edfce",
   "pins" : [
     {
       "identity" : "swift-cmark",
@@ -17,6 +17,15 @@
       "state" : {
         "revision" : "3c6f9523da3a1ec2fd829673e472d95b8097a3b8",
         "version" : "0.8.0"
+      }
+    },
+    {
+      "identity" : "yswift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/y-crdt/yswift.git",
+      "state" : {
+        "revision" : "8c25f088fcccfc3c428c37ac9206a297d031f1c5",
+        "version" : "0.2.1"
       }
     }
   ],
