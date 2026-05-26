@@ -1539,6 +1539,68 @@ struct LumiAPIClientVaultTests {
         }
     }
 
+    @Test("applyNoteUpdate sends update (base64) + origin; no text or base_clock")
+    func applyNoteUpdateWireShape() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/vaults/3f2504e0-4f89-11d3-9a0c-0305e82c3301/notes/hello/diff")
+            #expect(request.httpMethod == "POST")
+            var sentBody = Data()
+            if let stream = request.httpBodyStream {
+                stream.open()
+                var buf = [UInt8](repeating: 0, count: 4096)
+                while stream.hasBytesAvailable {
+                    let n = stream.read(&buf, maxLength: buf.count)
+                    if n <= 0 { break }
+                    sentBody.append(buf, count: n)
+                }
+                stream.close()
+            }
+            let json = String(data: sentBody, encoding: .utf8) ?? ""
+            #expect(json.contains("\"update\""))
+            // The bytes [0xde, 0xad] encode to "3q0=" in base64.
+            #expect(json.contains("3q0="))
+            #expect(json.contains("\"origin\""))
+            #expect(json.contains("apple-diff"))
+            // Slice-3 wire is purely update + origin — no text/base_clock leakage.
+            #expect(!json.contains("\"text\""))
+            #expect(!json.contains("\"base_clock\""))
+
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let data = """
+            {"id":"hello","path":"hello.md","text":"merged body","vector_clock":"eHl6"}
+            """.data(using: .utf8)!
+            return (response, data)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let merged = try await client.applyNoteUpdate(
+            vaultID: vaultID,
+            noteID: "hello",
+            update: Data([0xde, 0xad])
+        )
+        #expect(merged.text == "merged body")
+        #expect(merged.vectorClock == "eHl6")
+    }
+
+    @Test("applyNoteUpdate 409 conflict surfaces via isApplyDiffConflict (same wire as text path)")
+    func applyNoteUpdateStrictConflict() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 409, httpVersion: nil, headerFields: nil)!
+            let data = #"{"error":"conflict","detail":"stale"}"#.data(using: .utf8)!
+            return (response, data)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok-123")
+        let captured = await catchAPIError {
+            _ = try await client.applyNoteUpdate(vaultID: vaultID, noteID: "hello", update: Data([0x00]))
+        }
+        #expect(captured?.isApplyDiffConflict == true)
+    }
+
     @Test("isApplyDiffConflict false for non-409 .server, non-server cases")
     func isApplyDiffConflictPredicate() {
         // Wrong status — same code, different HTTP code.

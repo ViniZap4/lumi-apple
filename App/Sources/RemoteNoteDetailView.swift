@@ -480,8 +480,13 @@ struct RemoteNoteDetailView: View {
         let editor = appState.remoteEditor
         let store = appState.remoteVaultsStore
         let client = appState.authService.apiClient
+        // Prefer the CRDT-aware commit path (Phase H slice 3) when an
+        // open-note CRDT is live; fall back to the text-diff path if
+        // not (rare — would only happen if the store hasn't armed a
+        // CRDT yet, e.g. saveViaDiff fired before loadOpenNote finished).
+        let crdt = store.openNoteCRDT
         Task {
-            if let snapshot = await editor.saveViaDiff(via: client) {
+            if let snapshot = await editor.saveViaDiff(via: client, crdt: crdt) {
                 // Mirror the post-merge snapshot into the store so future
                 // re-opens of this view don't refetch.
                 store.setOpenNoteSnapshot(snapshot)

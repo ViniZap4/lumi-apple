@@ -88,8 +88,9 @@ public final class RemoteVaultsStore {
     /// closeOpenNote): fresh on every open, populated by the first
     /// SyncStep2 the server replies with, kept up-to-date by
     /// subsequent SyncUpdate frames. nil when no note is open.
-    /// Phase H slice 2.
-    @ObservationIgnored private var openNoteCRDT: LumiCRDT?
+    /// Phase H slice 2. Exposed read-only (slice 3) so the editor's
+    /// commit path can encode a diff against the local CRDT's state.
+    @ObservationIgnored public private(set) var openNoteCRDT: LumiCRDT?
 
     /// Latest text the open-note CRDT holds. Updated after each
     /// successfully-applied WS update (`.syncStep2` / `.syncUpdate`).

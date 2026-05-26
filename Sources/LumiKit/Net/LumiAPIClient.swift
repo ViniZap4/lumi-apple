@@ -272,6 +272,30 @@ public actor LumiAPIClient {
         return try await request(method: "POST", path: path, body: body, requireToken: true)
     }
 
+    /// `POST /api/vaults/:vault/notes/:id/diff` — capability `note.write`
+    /// required. Phase H slice 3 sibling of `applyNoteDiff`: instead of
+    /// sending the full body text and letting the server compute the
+    /// delta, the caller produces a lib0-v1 Y.Doc update locally (via
+    /// `LumiCRDT.encodeDiff(againstStateVector:)`) and sends only those
+    /// raw bytes. The server applies them directly via `doc.ApplyUpdate`,
+    /// merges concurrent edits, and returns the same post-merge snapshot
+    /// shape as the text path.
+    ///
+    /// `update` is wire-encoded as base64 because the diff endpoint
+    /// accepts JSON only. Empty `update` is a no-op server-side (returns
+    /// the current snapshot unchanged).
+    public func applyNoteUpdate(
+        vaultID: UUID,
+        noteID: String,
+        update: Data,
+        origin: String = "apple-diff"
+    ) async throws(LumiAPIError) -> RemoteNoteSnapshot {
+        let escaped = noteID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? noteID
+        let path = "/api/vaults/\(vaultID.uuidString.lowercased())/notes/\(escaped)/diff"
+        let body = ApplyUpdateRequest(update: update.base64EncodedString(), origin: origin)
+        return try await request(method: "POST", path: path, body: body, requireToken: true)
+    }
+
     /// `POST /api/vaults/:vault/notes` — capability `note.create` required.
     /// Returns the new note's metadata row (matching the list endpoint
     /// shape). Server derives the slug id from `title`; tags default to an
@@ -514,6 +538,20 @@ struct MemberListResponse: Decodable, Sendable {
 
 struct RoleListResponse: Decodable, Sendable {
     let roles: [RemoteRole]
+}
+
+/// Body for `POST /api/vaults/:vault/notes/:id/diff` — Phase H slice 3
+/// raw-update shape. Mutually exclusive with `ApplyDiffRequest`: the
+/// server rejects requests carrying both `text` and `update`. The
+/// caller pre-computes the lib0-v1 Y.Doc update locally; the server
+/// just applies + persists.
+struct ApplyUpdateRequest: Encodable, Sendable {
+    let update: String  // base64
+    let origin: String
+
+    enum CodingKeys: String, CodingKey {
+        case update, origin
+    }
 }
 
 /// Body for `POST /api/vaults/:vault/notes/:id/diff`. The server treats

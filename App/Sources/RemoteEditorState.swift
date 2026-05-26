@@ -95,19 +95,40 @@ final class RemoteEditorState {
     /// non-destructively. Slice 4e (WS Yjs) will make concurrent edits
     /// visible live so this doesn't surface as a jump-on-save.
     @discardableResult
-    func saveViaDiff(via client: LumiAPIClient) async -> RemoteNoteSnapshot? {
+    func saveViaDiff(via client: LumiAPIClient, crdt: LumiCRDT? = nil) async -> RemoteNoteSnapshot? {
         guard let vaultID, let noteID else { return nil }
         status = .saving
         do {
-            let merged = try await client.applyNoteDiff(
-                vaultID: vaultID,
-                noteID: noteID,
-                baseClock: vectorClock,
-                text: currentText,
-                origin: "apple-diff"
-            )
+            let merged: RemoteNoteSnapshot
+            if let crdt {
+                // Phase H slice 3: encode the user's edit as a Yjs update
+                // locally and POST raw bytes. The CRDT's pre-edit state
+                // vector captures "everything the server told us about";
+                // applying setText then encoding against that SV yields
+                // exactly the user's delta.
+                let svBefore = await crdt.stateVector()
+                await crdt.setText(currentText)
+                let update = try await crdt.encodeDiff(againstStateVector: svBefore)
+                merged = try await client.applyNoteUpdate(
+                    vaultID: vaultID,
+                    noteID: noteID,
+                    update: update,
+                    origin: "apple-diff"
+                )
+            } else {
+                merged = try await client.applyNoteDiff(
+                    vaultID: vaultID,
+                    noteID: noteID,
+                    baseClock: vectorClock,
+                    text: currentText,
+                    origin: "apple-diff"
+                )
+            }
             // Accept the server's post-merge view as the new baseline.
-            // currentText is also overwritten — see doc comment above.
+            // currentText is also overwritten — concurrent edits from
+            // another client land on screen the moment we save, but the
+            // user's edits already round-tripped non-destructively
+            // through the CRDT.
             originalText = merged.text
             currentText = merged.text
             vectorClock = merged.vectorClock
