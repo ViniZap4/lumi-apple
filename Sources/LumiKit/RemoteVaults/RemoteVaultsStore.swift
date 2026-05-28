@@ -117,6 +117,13 @@ public final class RemoteVaultsStore {
     /// changes. Phase H slice 4.
     @ObservationIgnored private var presenceByClient: [UUID: PresenceState] = [:]
 
+    /// Last time we received a heartbeat from each peer. Used by
+    /// `cullStalePresence` to evict peers whose heartbeats stopped
+    /// arriving — the server emits an explicit leave frame on a clean
+    /// disconnect, but a hard network drop never reaches the server,
+    /// so the TTL is the only safety net. Post-H follow-up.
+    @ObservationIgnored private var presenceLastSeen: [UUID: Date] = [:]
+
     /// Background Task that re-broadcasts `ownPresence` every
     /// `presenceHeartbeatSeconds` while a WS subscription is alive.
     /// Without this, a peer who joined the room *after* our initial
@@ -131,6 +138,14 @@ public final class RemoteVaultsStore {
     /// re-broadcast at half that so peers always have a fresh stamp
     /// before they'd evict us. Public so tests can pin the contract.
     public static let presenceHeartbeatSeconds: TimeInterval = 15
+
+    /// Drop a peer if we haven't seen a heartbeat from them for this
+    /// long. 3× heartbeat (= 45s) tolerates a single missed broadcast
+    /// without flickering the UI, but evicts within a sensible window
+    /// after a hard disconnect that never reached the server's
+    /// explicit-leave path. Public so tests can pin the contract.
+    /// Post-H follow-up.
+    public static let presenceStaleSeconds: TimeInterval = 45
 
     public private(set) var isLoading: Bool = false
     public private(set) var lastError: LumiAPIError?
@@ -338,7 +353,8 @@ public final class RemoteVaultsStore {
             token: token,
             vaultID: vaultID,
             noteID: noteID,
-            attempt: max(1, attempt)
+            attempt: max(1, attempt),
+            clientID: presence?.clientID
         )
         syncClient = sub
         syncOpenNoteKey = (vaultID, noteID)
@@ -504,15 +520,60 @@ public final class RemoteVaultsStore {
 
     /// Decode an incoming awareness payload and update the presence
     /// list. Drops our own echo (server fans out to ALL subscribers
-    /// including the origin) by matching on `clientID`. Phase H slice 4.
+    /// including the origin) by matching on `clientID`.
+    ///
+    /// Recognises two frame shapes:
+    /// - **Normal heartbeat** — full presence struct; upserts the peer
+    ///   and refreshes the `lastSeen` stamp used by `cullStalePresence`.
+    /// - **Leave frame** (`left: true`, server-emitted on disconnect) —
+    ///   drops the peer immediately so the UI doesn't carry a stale
+    ///   chip for up to a full TTL window after a clean disconnect.
+    ///
+    /// Phase H slice 4 + post-H follow-up.
     func applyPresenceFrame(_ payload: Data) {
+        applyPresenceFrame(payload, now: Date())
+    }
+
+    /// Test-seam variant of `applyPresenceFrame` so the lastSeen stamp
+    /// can be driven from a fixed clock.
+    func applyPresenceFrame(_ payload: Data, now: Date) {
         guard let peer = try? PresenceState.decoded(from: payload) else { return }
         // Filter our own echo. Different devices for the same user
         // sign in with different clientIDs so both show up as distinct
         // peers — only "this exact session" is filtered.
         if let mine = ownPresence, mine.clientID == peer.clientID { return }
+        if peer.left == true {
+            presenceByClient.removeValue(forKey: peer.clientID)
+            presenceLastSeen.removeValue(forKey: peer.clientID)
+            refreshOpenNotePresence()
+            return
+        }
         presenceByClient[peer.clientID] = peer
-        openNotePresence = presenceByClient.values.sorted { $0.clientID.uuidString < $1.clientID.uuidString }
+        presenceLastSeen[peer.clientID] = now
+        refreshOpenNotePresence()
+    }
+
+    /// Drop peers whose last heartbeat is older than
+    /// `presenceStaleSeconds`. Called from the heartbeat tick so the
+    /// cull cadence matches the broadcast cadence. Pure on the supplied
+    /// clock; exposed `internal` for tests.
+    func cullStalePresence(now: Date = Date()) {
+        let threshold = now.addingTimeInterval(-Self.presenceStaleSeconds)
+        var removed = false
+        for (id, seen) in presenceLastSeen where seen < threshold {
+            presenceByClient.removeValue(forKey: id)
+            presenceLastSeen.removeValue(forKey: id)
+            removed = true
+        }
+        if removed { refreshOpenNotePresence() }
+    }
+
+    /// Republish the sorted presence list. Centralised so every mutator
+    /// uses the same ordering rule.
+    private func refreshOpenNotePresence() {
+        openNotePresence = presenceByClient.values.sorted {
+            $0.clientID.uuidString < $1.clientID.uuidString
+        }
     }
 
     /// Start a recurring heartbeat that re-broadcasts `ownPresence`
@@ -533,9 +594,15 @@ public final class RemoteVaultsStore {
                     return
                 }
                 guard let self else { return }
-                // If we've torn down the subscription mid-sleep,
-                // ownPresence is nil and broadcastOwnPresence no-ops —
-                // safe to keep ticking until the task is cancelled.
+                // Tick housekeeping: cull stale peers first so the UI
+                // doesn't show ghosts past their TTL even when the
+                // server's leave frame never arrived (hard network
+                // drop, server restart). Then re-broadcast our own
+                // presence so peers keep seeing us. If we've torn down
+                // the subscription mid-sleep, ownPresence is nil and
+                // broadcastOwnPresence no-ops — safe to keep ticking
+                // until the task is cancelled.
+                self.cullStalePresence()
                 self.broadcastOwnPresence()
             }
         }
@@ -552,6 +619,7 @@ public final class RemoteVaultsStore {
     private func resetPresence() {
         stopPresenceHeartbeat()
         presenceByClient = [:]
+        presenceLastSeen = [:]
         openNotePresence = []
         ownPresence = nil
     }

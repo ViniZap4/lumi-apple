@@ -28,13 +28,22 @@ public struct PresenceState: Codable, Sendable, Equatable, Identifiable {
     /// every observer agrees on the same color without coordination.
     public let color: String
 
+    /// Departure signal. When `true`, the frame is a server-emitted
+    /// "this peer just disconnected" notification — observers should
+    /// drop the entry from their presence map immediately rather than
+    /// waiting on the per-peer TTL. `nil` (the wire default for
+    /// regular heartbeat frames) is treated the same as `false`.
+    /// Post-H follow-up.
+    public let left: Bool?
+
     public var id: UUID { clientID }
 
-    public init(clientID: UUID, username: String, displayName: String, color: String) {
+    public init(clientID: UUID, username: String, displayName: String, color: String, left: Bool? = nil) {
         self.clientID = clientID
         self.username = username
         self.displayName = displayName
         self.color = color
+        self.left = left
     }
 
     /// Pick a stable hex color for `clientID` from a small palette.
@@ -85,6 +94,21 @@ public struct PresenceState: Codable, Sendable, Equatable, Identifiable {
         case username
         case displayName = "display_name"
         case color
+        case left
+    }
+
+    /// Build a synthetic "this peer has left" frame. Mirrors the shape
+    /// the server fans out on disconnect — empty user fields, `left:
+    /// true`. Useful in tests; production never constructs leave
+    /// frames on the client side (servers do).
+    public static func makeLeave(clientID: UUID) -> PresenceState {
+        PresenceState(
+            clientID: clientID,
+            username: "",
+            displayName: "",
+            color: "",
+            left: true
+        )
     }
 
     /// JSON-encode for the awareness frame. Uses a stable encoder

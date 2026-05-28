@@ -65,6 +65,12 @@ public final class NoteSyncClient: @unchecked Sendable {
     /// correct "next attempt" number without the host having to do its
     /// own arithmetic. Initial subscribes default to 1.
     private let attempt: Int
+    /// Per-session presence identity. Stamped into the WS URL as
+    /// `?client_id=<uuid>` so the server can fan out a leave frame to
+    /// remaining peers when this connection closes. Optional — when
+    /// nil the server cannot emit a leave frame and peers fall back to
+    /// the client-side TTL. Post-H follow-up.
+    private let clientID: UUID?
 
     private let continuation: AsyncStream<Event>.Continuation
     public let events: AsyncStream<Event>
@@ -81,7 +87,8 @@ public final class NoteSyncClient: @unchecked Sendable {
         vaultID: UUID,
         noteID: String,
         session: URLSession = .shared,
-        attempt: Int = 1
+        attempt: Int = 1,
+        clientID: UUID? = nil
     ) {
         self.baseURL = baseURL
         self.token = token
@@ -89,6 +96,7 @@ public final class NoteSyncClient: @unchecked Sendable {
         self.noteID = noteID
         self.session = session
         self.attempt = max(1, attempt)
+        self.clientID = clientID
         var c: AsyncStream<Event>.Continuation!
         self.events = AsyncStream { c = $0 }
         self.continuation = c
@@ -120,8 +128,11 @@ public final class NoteSyncClient: @unchecked Sendable {
         // `%2520` instead of `%20` for a space.
         components.percentEncodedPath = basePath + "/api/vaults/\(vaultID.uuidString.lowercased())/notes/\(slugEscaped)/sync"
         var query = components.queryItems ?? []
-        query.removeAll { $0.name == "token" }
+        query.removeAll { $0.name == "token" || $0.name == "client_id" }
         query.append(URLQueryItem(name: "token", value: token))
+        if let clientID {
+            query.append(URLQueryItem(name: "client_id", value: clientID.uuidString.lowercased()))
+        }
         components.queryItems = query
         return components.url
     }

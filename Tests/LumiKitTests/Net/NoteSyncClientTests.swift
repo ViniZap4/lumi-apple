@@ -107,6 +107,33 @@ struct NoteSyncClientTests {
         #expect(c.wsURL() != nil)
     }
 
+    @Test("clientID is stamped into the WS URL as ?client_id= when supplied")
+    func wsURLCarriesClientID() {
+        // Post-H follow-up: the server uses this query param to populate
+        // Subscriber.ClientID so it can emit a leave frame on disconnect.
+        let id = UUID(uuidString: "DEADBEEF-1234-5678-9ABC-0123456789AB")!
+        let base = URL(string: "https://lumi.example")!
+        let c = NoteSyncClient(
+            baseURL: base,
+            token: "tok",
+            vaultID: UUID(),
+            noteID: "note",
+            clientID: id
+        )
+        let s = c.wsURL()?.absoluteString ?? ""
+        // UUID is lowercased on the wire to match the server's accept.
+        #expect(s.contains("client_id=" + id.uuidString.lowercased()))
+        #expect(s.contains("token=tok"))
+    }
+
+    @Test("omitting clientID omits the query param entirely")
+    func wsURLOmitsClientIDWhenNil() {
+        let base = URL(string: "https://lumi.example")!
+        let c = NoteSyncClient(baseURL: base, token: "tok", vaultID: UUID(), noteID: "note")
+        let s = c.wsURL()?.absoluteString ?? ""
+        #expect(!s.contains("client_id="))
+    }
+
     // MARK: - Event Equatable round-trip (sanity)
 
     @Test("willReconnect events compare by attempt + delay")

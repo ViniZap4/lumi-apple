@@ -70,4 +70,49 @@ struct PresenceStateTests {
         let q = PresenceState.make(clientID: id, username: "alice", displayName: "Alice")
         #expect(q.displayName == "Alice")
     }
+
+    // MARK: - left field (post-H follow-up)
+
+    @Test("regular frames omit the 'left' key on the wire")
+    func leftOmittedOnWire() throws {
+        let p = PresenceState.make(clientID: UUID(), username: "alice", displayName: "Alice")
+        let json = String(data: try p.encoded(), encoding: .utf8)!
+        // Optional Bool that's nil encodes as absent (default Codable).
+        #expect(!json.contains("\"left\""))
+    }
+
+    @Test("decoding a v1 wire (no 'left' key) yields left == nil")
+    func decodeWithoutLeftKey() throws {
+        // Double-`#` delimiters so the `"#` inside the color hex doesn't
+        // accidentally close the raw string.
+        let payload = ##"{"client_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301","color":"#7aa2f7","display_name":"Alice","username":"alice"}"##.data(using: .utf8)!
+        let p = try PresenceState.decoded(from: payload)
+        #expect(p.left == nil)
+    }
+
+    @Test("server-emitted leave frame decodes to left == true")
+    func decodeLeaveFrame() throws {
+        // Matches the shape server/internal/wsync/hub.go broadcasts on
+        // Subscriber.Leave when ClientID is non-nil. Empty user fields,
+        // `left: true`.
+        let id = UUID()
+        let payload = ##"{"client_id":"\##(id.uuidString)","color":"","display_name":"","left":true,"username":""}"##.data(using: .utf8)!
+        let p = try PresenceState.decoded(from: payload)
+        #expect(p.left == true)
+        #expect(p.clientID == id)
+    }
+
+    @Test("makeLeave produces a leave frame with empty user fields")
+    func makeLeaveShape() throws {
+        let id = UUID()
+        let p = PresenceState.makeLeave(clientID: id)
+        #expect(p.clientID == id)
+        #expect(p.left == true)
+        #expect(p.username.isEmpty)
+        #expect(p.displayName.isEmpty)
+        #expect(p.color.isEmpty)
+        // Round-trips through JSON cleanly.
+        let p2 = try PresenceState.decoded(from: try p.encoded())
+        #expect(p == p2)
+    }
 }
