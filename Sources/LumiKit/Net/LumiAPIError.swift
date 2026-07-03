@@ -39,4 +39,32 @@ extension LumiAPIError {
         }
         return false
     }
+
+    /// True when the server rejected a `copyVault` call because the
+    /// requested recipient username doesn't exist on this server
+    /// (`400 {"error":"recipient_not_found"}`). Callers surface this as
+    /// "check the username" rather than a generic failure. SPEC-V3
+    /// share-a-copy.
+    public var isRecipientNotFound: Bool {
+        if case let .server(status, code, _) = self,
+           status == 400,
+           code == "recipient_not_found" {
+            return true
+        }
+        return false
+    }
+
+    /// True when a member mutation (remove, role change) bounced off the
+    /// vault owner's non-removable Admin-equivalent grant
+    /// (`409 {"error":"owner_protected","message":...}`). The server's
+    /// human-readable `message` rides in the error's `detail` slot. SPEC-V3
+    /// vault ownership.
+    public var isOwnerProtected: Bool {
+        if case let .server(status, code, _) = self,
+           status == 409,
+           code == "owner_protected" {
+            return true
+        }
+        return false
+    }
 }

@@ -150,6 +150,22 @@ public final class RemoteVaultsStore {
     public private(set) var isLoading: Bool = false
     public private(set) var lastError: LumiAPIError?
 
+    /// The cached row for the currently-selected vault, if any. Derived so
+    /// it stays consistent with `vaults` after a transfer-ownership or
+    /// rename replaces the row in place.
+    public var selectedVault: RemoteVault? {
+        guard let selectedVaultID else { return nil }
+        return vaults.first { $0.id == selectedVaultID }
+    }
+
+    /// The selected vault's owner as a member row (SPEC-V3 ownership).
+    /// nil when no vault is selected, when the server predates
+    /// `owner_user_id`, or when the owner isn't in the loaded member list.
+    public var selectedVaultOwner: RemoteMember? {
+        guard let ownerID = selectedVault?.ownerUserID else { return nil }
+        return members.first { $0.userID == ownerID }
+    }
+
     private let auditPageSize: Int = 50
     private let notesPageSize: Int = 100
 
@@ -872,6 +888,37 @@ public final class RemoteVaultsStore {
             vaults[idx] = updated
         }
         return updated
+    }
+
+    /// Transfer ownership of the currently-selected vault to another member
+    /// (owner-only server-side). Replaces the cached vault row with the
+    /// returned DTO so `selectedVaultOwner` reflects the new owner
+    /// immediately. Errors rethrow typed — an `owner_protected` /
+    /// validation failure carries the server's readable message in the
+    /// error's `detail` slot.
+    @discardableResult
+    public func transferOwnership(newOwnerUserID: UUID) async throws(LumiAPIError) -> RemoteVault {
+        guard let id = selectedVaultID else {
+            throw LumiAPIError.network(message: "no vault selected")
+        }
+        let updated = try await client.transferOwnership(vaultID: id, newOwnerUserID: newOwnerUserID)
+        if let idx = vaults.firstIndex(where: { $0.id == id }) {
+            vaults[idx] = updated
+        }
+        return updated
+    }
+
+    /// Fork the currently-selected vault to another user on this server
+    /// (SPEC-V3 share-a-copy; capability `vault.export`). Returns the
+    /// fork's vault DTO — owned by the recipient, so it is deliberately
+    /// NOT inserted into our `vaults` cache (we're not a member of it).
+    /// Unknown recipients rethrow with `isRecipientNotFound == true`.
+    @discardableResult
+    public func sendCopy(recipientUsername: String) async throws(LumiAPIError) -> RemoteVault {
+        guard let id = selectedVaultID else {
+            throw LumiAPIError.network(message: "no vault selected")
+        }
+        return try await client.copyVault(vaultID: id, recipientUsername: recipientUsername)
     }
 
     /// Delete the given vault server-side. Drops it from the cache; clears

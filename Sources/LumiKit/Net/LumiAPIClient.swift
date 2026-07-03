@@ -151,6 +151,36 @@ public actor LumiAPIClient {
         )
     }
 
+    /// `POST /api/vaults/:vault/transfer-ownership` — owner only. Target must
+    /// already be a member; the server returns the updated vault DTO with the
+    /// new `owner_user_id`. Non-owners get 403; a non-member target gets a
+    /// 400 validation error. Audited server-side as `vault.transfer`.
+    public func transferOwnership(vaultID: UUID, newOwnerUserID: UUID) async throws(LumiAPIError) -> RemoteVault {
+        let body = TransferOwnershipRequest(userID: newOwnerUserID.uuidString.lowercased())
+        return try await request(
+            method: "POST",
+            path: "/api/vaults/\(vaultID.uuidString.lowercased())/transfer-ownership",
+            body: body,
+            requireToken: true
+        )
+    }
+
+    /// `POST /api/vaults/:vault/copies` — capability `vault.export` required.
+    /// Forks the vault's current FS state + a fresh CRDT into a brand-new
+    /// vault owned by `recipientUsername` (201 → the fork's vault DTO, with
+    /// `copied_from` provenance). No membership, no live link — edits diverge
+    /// permanently after creation. Unknown recipients surface as a 400 with
+    /// code `recipient_not_found` (see `LumiAPIError.isRecipientNotFound`).
+    public func copyVault(vaultID: UUID, recipientUsername: String) async throws(LumiAPIError) -> RemoteVault {
+        let body = CopyVaultRequest(recipientUsername: recipientUsername)
+        return try await request(
+            method: "POST",
+            path: "/api/vaults/\(vaultID.uuidString.lowercased())/copies",
+            body: body,
+            requireToken: true
+        )
+    }
+
     /// `GET /api/vaults/:vault/members`.
     public func listMembers(vaultID: UUID) async throws(LumiAPIError) -> [RemoteMember] {
         let envelope: MemberListResponse = try await request(method: "GET", path: "/api/vaults/\(vaultID.uuidString.lowercased())/members", body: nil as EmptyBody?, requireToken: true)
@@ -517,6 +547,23 @@ public struct UserDTO: Codable, Sendable, Equatable, Hashable {
 struct ServerErrorEnvelope: Decodable, Sendable {
     let error: String
     let detail: String?
+
+    enum CodingKeys: String, CodingKey {
+        case error, detail, message
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.error = try c.decode(String.self, forKey: .error)
+        // Most endpoints hint via `detail`; the SPEC-V3 ownership-protection
+        // envelope (`owner_protected`) ships its human-readable text as
+        // `message`. Fold both into `detail` so callers see one field.
+        if let detail = try c.decodeIfPresent(String.self, forKey: .detail) {
+            self.detail = detail
+        } else {
+            self.detail = try c.decodeIfPresent(String.self, forKey: .message)
+        }
+    }
 }
 
 struct VaultListResponse: Decodable, Sendable {
@@ -530,6 +577,25 @@ struct CreateVaultRequest: Codable, Sendable {
 
 struct UpdateVaultRequest: Codable, Sendable {
     let name: String
+}
+
+/// Body for `POST /api/vaults/:vault/transfer-ownership`. The server takes
+/// the target's user id as a canonical UUID string.
+struct TransferOwnershipRequest: Codable, Sendable {
+    let userID: String
+
+    enum CodingKeys: String, CodingKey {
+        case userID = "user_id"
+    }
+}
+
+/// Body for `POST /api/vaults/:vault/copies` — SPEC-V3 share-a-copy.
+struct CopyVaultRequest: Codable, Sendable {
+    let recipientUsername: String
+
+    enum CodingKeys: String, CodingKey {
+        case recipientUsername = "recipient_username"
+    }
 }
 
 struct MemberListResponse: Decodable, Sendable {

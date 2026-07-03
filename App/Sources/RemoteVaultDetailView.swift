@@ -12,6 +12,8 @@ struct RemoteVaultDetailView: View {
     @Environment(\.theme) private var theme
     @State private var showCreateInvite: Bool = false
     @State private var showCreateNote: Bool = false
+    @State private var showTransferOwnership: Bool = false
+    @State private var showSendCopy: Bool = false
     @State private var isEditingName: Bool = false
     @State private var editedName: String = ""
     @State private var showDeleteConfirm: Bool = false
@@ -46,6 +48,16 @@ struct RemoteVaultDetailView: View {
                 .environment(appState)
                 .environment(\.theme, theme)
         }
+        .sheet(isPresented: $showTransferOwnership) {
+            TransferOwnershipSheet(vault: currentVault, members: appState.remoteVaultsStore.members)
+                .environment(appState)
+                .environment(\.theme, theme)
+        }
+        .sheet(isPresented: $showSendCopy) {
+            SendCopySheet(vault: currentVault)
+                .environment(appState)
+                .environment(\.theme, theme)
+        }
         .confirmationDialog(
             noteToDelete.map { "Delete \"\($0.title.isEmpty ? $0.id : $0.title)\"?" } ?? "Delete note?",
             isPresented: Binding(get: { noteToDelete != nil }, set: { if !$0 { noteToDelete = nil } }),
@@ -77,6 +89,36 @@ struct RemoteVaultDetailView: View {
         let me = appState.remoteVaultsStore.members.first { $0.username == session.user.username }
         guard let caps = me?.capabilities else { return false }
         return caps.contains { $0 == "*" || $0 == "vault.*" || $0 == "vault.manage" }
+    }
+
+    /// The freshest row for this vault. The `vault` prop is a snapshot from
+    /// navigation time; the store row is replaced in place after rename or
+    /// transfer-ownership, so prefer it when present.
+    private var currentVault: RemoteVault {
+        appState.remoteVaultsStore.vaults.first { $0.id == vault.id } ?? vault
+    }
+
+    /// The vault owner's user id (SPEC-V3 ownership). nil against pre-v3
+    /// servers that don't emit `owner_user_id` yet.
+    private var ownerUserID: UUID? {
+        currentVault.ownerUserID
+    }
+
+    /// True when the signed-in user is this vault's owner. Ownership gates
+    /// the transfer action — the server rejects non-owners with 403, so we
+    /// don't offer the menu item at all.
+    private var isOwner: Bool {
+        guard let session = appState.authService.currentSession,
+              let ownerUserID else { return false }
+        return UUID(uuidString: session.user.id) == ownerUserID
+    }
+
+    /// `vault.export` capability check — gates "Send a Copy…".
+    private var canExportVault: Bool {
+        guard let session = appState.authService.currentSession else { return false }
+        let me = appState.remoteVaultsStore.members.first { $0.username == session.user.username }
+        guard let caps = me?.capabilities else { return false }
+        return caps.contains { $0 == "*" || $0 == "vault.*" || $0 == "vault.export" }
     }
 
     private func commitRename() async {
@@ -122,6 +164,8 @@ struct RemoteVaultDetailView: View {
                 return "this vault no longer exists on the server"
             case "validation", "validation_failed":
                 return detail ?? "validation error"
+            case "owner_protected":
+                return detail ?? "the vault owner cannot be removed or demoted — transfer ownership first"
             default:
                 return detail ?? code
             }
@@ -390,19 +434,37 @@ struct RemoteVaultDetailView: View {
                         .foregroundStyle(theme.text)
                 }
                 Spacer()
-                if canManageVault, !isEditingName {
+                if canManageVault || isOwner || canExportVault, !isEditingName {
                     Menu {
-                        Button {
-                            editedName = vault.name
-                            isEditingName = true
-                        } label: {
-                            Label("Rename…", systemImage: "pencil")
+                        if canManageVault {
+                            Button {
+                                editedName = vault.name
+                                isEditingName = true
+                            } label: {
+                                Label("Rename…", systemImage: "pencil")
+                            }
                         }
-                        Divider()
-                        Button(role: .destructive) {
-                            showDeleteConfirm = true
-                        } label: {
-                            Label("Delete vault…", systemImage: "trash")
+                        if canExportVault {
+                            Button {
+                                showSendCopy = true
+                            } label: {
+                                Label("Send a Copy…", systemImage: "doc.on.doc")
+                            }
+                        }
+                        if isOwner {
+                            Button {
+                                showTransferOwnership = true
+                            } label: {
+                                Label("Transfer Ownership…", systemImage: "crown")
+                            }
+                        }
+                        if canManageVault {
+                            Divider()
+                            Button(role: .destructive) {
+                                showDeleteConfirm = true
+                            } label: {
+                                Label("Delete vault…", systemImage: "trash")
+                            }
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")
@@ -432,6 +494,17 @@ struct RemoteVaultDetailView: View {
                 Text("created \(created.formatted(date: .abbreviated, time: .omitted))")
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(theme.textDim)
+            }
+            if let provenance = currentVault.copiedFrom {
+                Label {
+                    Text(copiedFromLabel(provenance))
+                        .font(.system(.caption, design: .monospaced))
+                } icon: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.caption2)
+                }
+                .foregroundStyle(theme.textDim)
+                .help("This vault started as a copy — it shares nothing with the original.")
             }
             if let error = appState.remoteVaultsStore.lastError {
                 Text(describe(error))
@@ -472,6 +545,9 @@ struct RemoteVaultDetailView: View {
                     .foregroundStyle(theme.textDim)
             }
             Spacer()
+            if member.userID == ownerUserID {
+                ownerBadge
+            }
             roleChip(member.roleName, isSeed: member.isSeedRole)
         }
         .padding(.vertical, 6)
@@ -688,10 +764,40 @@ struct RemoteVaultDetailView: View {
         )
     }
 
+    private func copiedFromLabel(_ provenance: VaultCopyProvenance) -> String {
+        var label = "copied from \(provenance.slug)"
+        if let when = provenance.copiedAt {
+            label += " on \(when.formatted(date: .abbreviated, time: .omitted))"
+        }
+        return label
+    }
+
     private func sectionTitle(_ text: String) -> some View {
         Text(text)
             .font(.system(.title3, design: .monospaced).weight(.semibold))
             .foregroundStyle(theme.text)
+    }
+
+    /// Crown chip marking the vault owner (SPEC-V3 ownership). The owner
+    /// holds a non-removable Admin-equivalent grant — remove/demote always
+    /// bounces server-side (`owner_protected`), so the badge doubles as the
+    /// "why can't I touch this row" hint.
+    private var ownerBadge: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "crown.fill")
+                .font(.caption2)
+            Text("owner")
+                .font(.system(.caption, design: .monospaced).weight(.medium))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(
+            Capsule()
+                .fill(theme.overlayBackground)
+                .overlay(Capsule().stroke(theme.border, lineWidth: 0.5))
+        )
+        .foregroundStyle(theme.warning)
+        .help("Vault owner — cannot be removed or demoted. Transfer ownership first.")
     }
 
     private func roleChip(_ name: String, isSeed: Bool) -> some View {

@@ -9,19 +9,31 @@ public struct RemoteVault: Codable, Sendable, Equatable, Hashable, Identifiable 
     public let name: String
     public let createdBy: UUID
     public let createdAt: Date?
+    /// SPEC-V3 vault ownership: the user who holds the non-removable
+    /// Admin-equivalent grant. Optional so DTOs from pre-v3 servers (no
+    /// `owner_user_id` column yet) still decode.
+    public let ownerUserID: UUID?
+    /// SPEC-V3 share-a-copy provenance. Present only on vaults created via
+    /// `POST /api/vaults/:vault/copies` — records where the fork came from.
+    public let copiedFrom: VaultCopyProvenance?
 
     enum CodingKeys: String, CodingKey {
         case id, slug, name
         case createdBy = "created_by"
         case createdAt = "created_at"
+        case ownerUserID = "owner_user_id"
+        case copiedFrom = "copied_from"
     }
 
-    public init(id: UUID, slug: String, name: String, createdBy: UUID, createdAt: Date?) {
+    public init(id: UUID, slug: String, name: String, createdBy: UUID, createdAt: Date?,
+                ownerUserID: UUID? = nil, copiedFrom: VaultCopyProvenance? = nil) {
         self.id = id
         self.slug = slug
         self.name = name
         self.createdBy = createdBy
         self.createdAt = createdAt
+        self.ownerUserID = ownerUserID
+        self.copiedFrom = copiedFrom
     }
 
     public init(from decoder: Decoder) throws {
@@ -35,6 +47,8 @@ public struct RemoteVault: Codable, Sendable, Equatable, Hashable, Identifiable 
         } else {
             self.createdAt = nil
         }
+        self.ownerUserID = try container.decodeIfPresent(UUID.self, forKey: .ownerUserID)
+        self.copiedFrom = try container.decodeIfPresent(VaultCopyProvenance.self, forKey: .copiedFrom)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -45,6 +59,58 @@ public struct RemoteVault: Codable, Sendable, Equatable, Hashable, Identifiable 
         try container.encode(createdBy, forKey: .createdBy)
         if let createdAt {
             try container.encode(createdAt.ISO8601Format(.iso8601(timeZone: .gmt)), forKey: .createdAt)
+        }
+        if let ownerUserID {
+            try container.encode(ownerUserID, forKey: .ownerUserID)
+        }
+        if let copiedFrom {
+            try container.encode(copiedFrom, forKey: .copiedFrom)
+        }
+    }
+}
+
+/// Provenance stamp on a vault that was created as a share-a-copy fork
+/// (`copied_from` JSONB on the server). A copy shares nothing after
+/// creation — this is a historical record only, no live link.
+public struct VaultCopyProvenance: Codable, Sendable, Equatable, Hashable {
+    public let vaultID: UUID
+    public let slug: String
+    public let copiedBy: UUID
+    public let copiedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case vaultID = "vault_id"
+        case slug
+        case copiedBy = "copied_by"
+        case copiedAt = "copied_at"
+    }
+
+    public init(vaultID: UUID, slug: String, copiedBy: UUID, copiedAt: Date?) {
+        self.vaultID = vaultID
+        self.slug = slug
+        self.copiedBy = copiedBy
+        self.copiedAt = copiedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.vaultID = try c.decode(UUID.self, forKey: .vaultID)
+        self.slug = try c.decode(String.self, forKey: .slug)
+        self.copiedBy = try c.decode(UUID.self, forKey: .copiedBy)
+        if let raw = try c.decodeIfPresent(String.self, forKey: .copiedAt) {
+            self.copiedAt = SessionResponse.parseISO8601(raw)
+        } else {
+            self.copiedAt = nil
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(vaultID, forKey: .vaultID)
+        try c.encode(slug, forKey: .slug)
+        try c.encode(copiedBy, forKey: .copiedBy)
+        if let copiedAt {
+            try c.encode(copiedAt.ISO8601Format(.iso8601(timeZone: .gmt)), forKey: .copiedAt)
         }
     }
 }

@@ -1977,5 +1977,419 @@ struct LumiAPIClientVaultTests {
         await store.applyLiveUpdate(peer.encodeStateAsUpdate())
         #expect(store.openNoteLiveText == nil)
     }
+
+    // MARK: - Ownership + share-a-copy (SPEC-V3)
+
+    @Test("RemoteVault decodes owner_user_id + copied_from")
+    func vaultDecodesOwnershipFields() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        let ownerID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3302")!
+        let sourceID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3305")!
+        MockURLProtocol.setHandler { request in
+            let body = """
+            {"id":"\(vaultID.uuidString)","slug":"work-copy","name":"Work (copy)",
+             "created_by":"\(ownerID.uuidString)","created_at":"2026-07-01T10:00:00Z",
+             "owner_user_id":"\(ownerID.uuidString)",
+             "copied_from":{"vault_id":"\(sourceID.uuidString)","slug":"work",
+                            "copied_by":"\(ownerID.uuidString)","copied_at":"2026-07-01T10:00:00Z"}}
+            """.data(using: .utf8)!
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let vault = try await client.vaultDetail(id: vaultID)
+        #expect(vault.ownerUserID == ownerID)
+        #expect(vault.copiedFrom?.vaultID == sourceID)
+        #expect(vault.copiedFrom?.slug == "work")
+        #expect(vault.copiedFrom?.copiedBy == ownerID)
+        #expect(vault.copiedFrom?.copiedAt != nil)
+    }
+
+    @Test("RemoteVault decodes without owner_user_id / copied_from (pre-v3 servers)")
+    func vaultDecodesWithoutOwnershipFields() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let body = """
+            {"id":"\(vaultID.uuidString)","slug":"work","name":"Work",
+             "created_by":"3F2504E0-4F89-11D3-9A0C-0305E82C3302","created_at":"2026-05-13T10:00:00Z"}
+            """.data(using: .utf8)!
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let vault = try await client.vaultDetail(id: vaultID)
+        #expect(vault.ownerUserID == nil)
+        #expect(vault.copiedFrom == nil)
+        #expect(vault.name == "Work")
+    }
+
+    @Test("transferOwnership POSTs user_id and decodes the updated vault")
+    func transferOwnershipRoundtrip() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        let newOwnerID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3305")!
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/vaults/3f2504e0-4f89-11d3-9a0c-0305e82c3301/transfer-ownership")
+            #expect(request.httpMethod == "POST")
+            #expect(request.value(forHTTPHeaderField: "X-Lumi-Token") == "tok")
+            // Body arrives on .httpBodyStream under URLProtocol.
+            var sentBody = Data()
+            if let stream = request.httpBodyStream {
+                stream.open()
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                while stream.hasBytesAvailable {
+                    let n = stream.read(&buffer, maxLength: buffer.count)
+                    if n <= 0 { break }
+                    sentBody.append(buffer, count: n)
+                }
+                stream.close()
+            }
+            let json = String(data: sentBody, encoding: .utf8) ?? ""
+            #expect(json.contains("\"user_id\""))
+            #expect(json.contains("3f2504e0-4f89-11d3-9a0c-0305e82c3305"))
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = """
+            {"id":"\(vaultID.uuidString)","slug":"work","name":"Work",
+             "created_by":"3F2504E0-4F89-11D3-9A0C-0305E82C3302","created_at":"2026-05-13T10:00:00Z",
+             "owner_user_id":"\(newOwnerID.uuidString)"}
+            """.data(using: .utf8)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let updated = try await client.transferOwnership(vaultID: vaultID, newOwnerUserID: newOwnerID)
+        #expect(updated.ownerUserID == newOwnerID)
+        #expect(updated.slug == "work")
+    }
+
+    @Test("transferOwnership as non-owner surfaces .server forbidden")
+    func transferOwnershipForbidden() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!
+            return (response, #"{"error":"forbidden","detail":"only the owner can transfer ownership"}"#.data(using: .utf8)!)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let thrown = await catchAPIError {
+            _ = try await client.transferOwnership(vaultID: vaultID, newOwnerUserID: UUID())
+        }
+        if case let .server(status, code, _) = thrown {
+            #expect(status == 403)
+            #expect(code == "forbidden")
+        } else {
+            Issue.record("expected .server forbidden, got \(String(describing: thrown))")
+        }
+    }
+
+    @Test("transferOwnership to non-member surfaces .server validation")
+    func transferOwnershipNonMember() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!
+            return (response, #"{"error":"validation_failed","detail":"target user is not a member of this vault"}"#.data(using: .utf8)!)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let thrown = await catchAPIError {
+            _ = try await client.transferOwnership(vaultID: vaultID, newOwnerUserID: UUID())
+        }
+        if case let .server(status, code, detail) = thrown {
+            #expect(status == 400)
+            #expect(code == "validation_failed")
+            #expect(detail == "target user is not a member of this vault")
+        } else {
+            Issue.record("expected .server validation_failed, got \(String(describing: thrown))")
+        }
+    }
+
+    @Test("copyVault POSTs recipient_username and decodes the fork with copied_from")
+    func copyVaultRoundtrip() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        let recipientID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3305")!
+        let forkID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3306")!
+        MockURLProtocol.setHandler { request in
+            #expect(request.url?.path == "/api/vaults/3f2504e0-4f89-11d3-9a0c-0305e82c3301/copies")
+            #expect(request.httpMethod == "POST")
+            #expect(request.value(forHTTPHeaderField: "X-Lumi-Token") == "tok")
+            var sentBody = Data()
+            if let stream = request.httpBodyStream {
+                stream.open()
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                while stream.hasBytesAvailable {
+                    let n = stream.read(&buffer, maxLength: buffer.count)
+                    if n <= 0 { break }
+                    sentBody.append(buffer, count: n)
+                }
+                stream.close()
+            }
+            let json = String(data: sentBody, encoding: .utf8) ?? ""
+            #expect(json.contains("\"recipient_username\""))
+            #expect(json.contains("\"bob\""))
+            let response = HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil)!
+            let body = """
+            {"id":"\(forkID.uuidString)","slug":"work-copy","name":"Work (copy)",
+             "created_by":"3F2504E0-4F89-11D3-9A0C-0305E82C3302","created_at":"2026-07-02T10:00:00Z",
+             "owner_user_id":"\(recipientID.uuidString)",
+             "copied_from":{"vault_id":"\(vaultID.uuidString)","slug":"work",
+                            "copied_by":"3F2504E0-4F89-11D3-9A0C-0305E82C3302",
+                            "copied_at":"2026-07-02T10:00:00Z"}}
+            """.data(using: .utf8)!
+            return (response, body)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let fork = try await client.copyVault(vaultID: vaultID, recipientUsername: "bob")
+        #expect(fork.id == forkID)
+        #expect(fork.slug == "work-copy")
+        #expect(fork.ownerUserID == recipientID)
+        #expect(fork.copiedFrom?.vaultID == vaultID)
+        #expect(fork.copiedFrom?.slug == "work")
+    }
+
+    @Test("copyVault unknown recipient maps to isRecipientNotFound")
+    func copyVaultRecipientNotFound() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!
+            return (response, #"{"error":"recipient_not_found"}"#.data(using: .utf8)!)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let thrown = await catchAPIError {
+            _ = try await client.copyVault(vaultID: vaultID, recipientUsername: "ghost")
+        }
+        #expect(thrown?.isRecipientNotFound == true)
+        if case let .server(status, code, _) = thrown {
+            #expect(status == 400)
+            #expect(code == "recipient_not_found")
+        } else {
+            Issue.record("expected .server recipient_not_found, got \(String(describing: thrown))")
+        }
+    }
+
+    @Test("owner_protected 409 maps to isOwnerProtected and folds message into detail")
+    func ownerProtectedMapping() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            // The SPEC-V3 envelope uses `message`, not `detail` — the
+            // client must fold it into the error's detail slot so UIs
+            // get a readable string without knowing about the variant.
+            let response = HTTPURLResponse(url: request.url!, statusCode: 409, httpVersion: nil, headerFields: nil)!
+            return (response, #"{"error":"owner_protected","message":"the vault owner cannot be removed"}"#.data(using: .utf8)!)
+        }
+        let client = makeClient()
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let thrown = await catchAPIError {
+            _ = try await client.transferOwnership(vaultID: vaultID, newOwnerUserID: UUID())
+        }
+        #expect(thrown?.isOwnerProtected == true)
+        if case let .server(status, code, detail) = thrown {
+            #expect(status == 409)
+            #expect(code == "owner_protected")
+            #expect(detail == "the vault owner cannot be removed")
+        } else {
+            Issue.record("expected .server owner_protected, got \(String(describing: thrown))")
+        }
+    }
+
+    @Test("isRecipientNotFound / isOwnerProtected false for other errors")
+    func ownershipErrorAccessorsNegative() {
+        #expect(LumiAPIError.server(status: 404, code: "not_found", detail: nil).isRecipientNotFound == false)
+        #expect(LumiAPIError.server(status: 400, code: "validation_failed", detail: nil).isRecipientNotFound == false)
+        #expect(LumiAPIError.server(status: 409, code: "conflict", detail: nil).isOwnerProtected == false)
+        #expect(LumiAPIError.server(status: 403, code: "owner_protected", detail: nil).isOwnerProtected == false)
+        #expect(LumiAPIError.unauthorized.isOwnerProtected == false)
+        #expect(LumiAPIError.network(message: "x").isRecipientNotFound == false)
+    }
+
+    @Test("RemoteVaultsStore.transferOwnership updates the cached row + selectedVaultOwner")
+    @MainActor
+    func storeTransferOwnership() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        let aliceID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3302")!
+        let bobID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3305")!
+        let roleID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3303")!
+        MockURLProtocol.setHandler { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let path = request.url?.path ?? ""
+            let body: String
+            if path.hasSuffix("/transfer-ownership") {
+                body = """
+                {"id":"\(vaultID.uuidString)","slug":"work","name":"Work","created_by":"\(aliceID.uuidString)","created_at":"2026-05-13T10:00:00Z","owner_user_id":"\(bobID.uuidString)"}
+                """
+            } else if path == "/api/vaults" {
+                body = """
+                {"vaults":[{"id":"\(vaultID.uuidString)","slug":"work","name":"Work","created_by":"\(aliceID.uuidString)","created_at":"2026-05-13T10:00:00Z","owner_user_id":"\(aliceID.uuidString)"}]}
+                """
+            } else if path.hasSuffix("/members") {
+                body = """
+                {"members":[
+                  {"vault_id":"\(vaultID.uuidString)","user_id":"\(aliceID.uuidString)","username":"alice","display_name":"Alice","role_id":"\(roleID.uuidString)","role_name":"Admin","capabilities":["*"],"is_seed_role":true,"joined_at":"2026-05-13T10:00:00Z"},
+                  {"vault_id":"\(vaultID.uuidString)","user_id":"\(bobID.uuidString)","username":"bob","display_name":"Bob","role_id":"\(roleID.uuidString)","role_name":"Admin","capabilities":["*"],"is_seed_role":true,"joined_at":"2026-05-14T10:00:00Z"}
+                ]}
+                """
+            } else if path.hasSuffix("/roles") {
+                body = #"{"roles":[]}"#
+            } else if path.hasSuffix("/invites") {
+                body = #"{"invites":[]}"#
+            } else if path.hasSuffix("/audit") {
+                body = #"{"entries":[],"limit":50,"offset":0}"#
+            } else if path.hasSuffix("/notes") {
+                body = #"{"notes":[],"limit":100,"offset":0}"#
+            } else {
+                body = "{}"
+            }
+            return (response, body.data(using: .utf8)!)
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = LumiAPIClient(session: URLSession(configuration: config))
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let store = RemoteVaultsStore(client: client)
+        await store.refresh()
+        await store.selectVault(vaultID)
+        #expect(store.selectedVault?.ownerUserID == aliceID)
+        #expect(store.selectedVaultOwner?.username == "alice")
+
+        let updated = try await store.transferOwnership(newOwnerUserID: bobID)
+        #expect(updated.ownerUserID == bobID)
+        // Cached row replaced in place → derived owner flips too.
+        #expect(store.vaults.first?.ownerUserID == bobID)
+        #expect(store.selectedVaultOwner?.username == "bob")
+    }
+
+    @Test("RemoteVaultsStore.sendCopy returns the fork without touching the vaults cache")
+    @MainActor
+    func storeSendCopy() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        let forkID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3306")!
+        MockURLProtocol.setHandler { request in
+            let path = request.url?.path ?? ""
+            if path.hasSuffix("/copies") {
+                let response = HTTPURLResponse(url: request.url!, statusCode: 201, httpVersion: nil, headerFields: nil)!
+                let body = """
+                {"id":"\(forkID.uuidString)","slug":"work-copy","name":"Work (copy)","created_by":"3F2504E0-4F89-11D3-9A0C-0305E82C3302","created_at":"2026-07-02T10:00:00Z","owner_user_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3305","copied_from":{"vault_id":"\(vaultID.uuidString)","slug":"work","copied_by":"3F2504E0-4F89-11D3-9A0C-0305E82C3302","copied_at":"2026-07-02T10:00:00Z"}}
+                """.data(using: .utf8)!
+                return (response, body)
+            }
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body: String
+            if path == "/api/vaults" {
+                body = """
+                {"vaults":[{"id":"\(vaultID.uuidString)","slug":"work","name":"Work","created_by":"3F2504E0-4F89-11D3-9A0C-0305E82C3302","created_at":"2026-05-13T10:00:00Z"}]}
+                """
+            } else if path.hasSuffix("/members") {
+                body = #"{"members":[]}"#
+            } else if path.hasSuffix("/roles") {
+                body = #"{"roles":[]}"#
+            } else if path.hasSuffix("/invites") {
+                body = #"{"invites":[]}"#
+            } else if path.hasSuffix("/audit") {
+                body = #"{"entries":[],"limit":50,"offset":0}"#
+            } else if path.hasSuffix("/notes") {
+                body = #"{"notes":[],"limit":100,"offset":0}"#
+            } else {
+                body = "{}"
+            }
+            return (response, body.data(using: .utf8)!)
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = LumiAPIClient(session: URLSession(configuration: config))
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let store = RemoteVaultsStore(client: client)
+        await store.refresh()
+        await store.selectVault(vaultID)
+        #expect(store.vaults.count == 1)
+
+        let fork = try await store.sendCopy(recipientUsername: "bob")
+        #expect(fork.id == forkID)
+        #expect(fork.copiedFrom?.slug == "work")
+        // The fork belongs to the recipient — our own vault list must not
+        // grow (we're not a member of the copy).
+        #expect(store.vaults.count == 1)
+        #expect(store.vaults.first?.id == vaultID)
+    }
+
+    @Test("RemoteVaultsStore ownership actions require a selected vault")
+    @MainActor
+    func storeOwnershipActionsRequireSelection() async {
+        let store = RemoteVaultsStore(client: LumiAPIClient())
+        var transferThrown: LumiAPIError?
+        do {
+            _ = try await store.transferOwnership(newOwnerUserID: UUID())
+        } catch {
+            transferThrown = error
+        }
+        #expect(transferThrown == .network(message: "no vault selected"))
+        var copyThrown: LumiAPIError?
+        do {
+            _ = try await store.sendCopy(recipientUsername: "bob")
+        } catch {
+            copyThrown = error
+        }
+        #expect(copyThrown == .network(message: "no vault selected"))
+    }
+
+    @Test("RemoteVaultsStore.transferOwnership rethrows owner_protected with readable detail")
+    @MainActor
+    func storeTransferOwnershipOwnerProtected() async throws {
+        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
+        MockURLProtocol.setHandler { request in
+            let path = request.url?.path ?? ""
+            if path.hasSuffix("/transfer-ownership") {
+                let response = HTTPURLResponse(url: request.url!, statusCode: 409, httpVersion: nil, headerFields: nil)!
+                return (response, #"{"error":"owner_protected","message":"owner grant is protected"}"#.data(using: .utf8)!)
+            }
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body: String
+            if path.hasSuffix("/members") {
+                body = #"{"members":[]}"#
+            } else if path.hasSuffix("/roles") {
+                body = #"{"roles":[]}"#
+            } else if path.hasSuffix("/invites") {
+                body = #"{"invites":[]}"#
+            } else if path.hasSuffix("/audit") {
+                body = #"{"entries":[],"limit":50,"offset":0}"#
+            } else if path.hasSuffix("/notes") {
+                body = #"{"notes":[],"limit":100,"offset":0}"#
+            } else {
+                body = "{}"
+            }
+            return (response, body.data(using: .utf8)!)
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = LumiAPIClient(session: URLSession(configuration: config))
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let store = RemoteVaultsStore(client: client)
+        await store.selectVault(vaultID)
+
+        var thrown: LumiAPIError?
+        do {
+            _ = try await store.transferOwnership(newOwnerUserID: UUID())
+        } catch {
+            thrown = error
+        }
+        #expect(thrown?.isOwnerProtected == true)
+        if case let .server(_, _, detail) = thrown {
+            #expect(detail == "owner grant is protected")
+        } else {
+            Issue.record("expected .server owner_protected, got \(String(describing: thrown))")
+        }
+    }
 }
 
