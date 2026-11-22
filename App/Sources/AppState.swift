@@ -15,7 +15,9 @@ public enum NoteDisplayMode: Hashable, Sendable {
 final class AppState {
     var theme: LumiTheme = .defaultDark
 
-    var selectedVaultID: UUID?
+    /// Id of the open *local* book (folder session). Server books use
+    /// `selectedRemoteVaultID`.
+    var selectedVaultID: String?
     /// Path (vault-relative) of the currently selected note. Stored as a
     /// string so it survives across selection changes without holding a
     /// reference into the lazy folder tree. `nil` means no note open.
@@ -62,10 +64,37 @@ final class AppState {
     /// notes calls `load` to repopulate.
     let editor = EditorState()
 
-    /// Server connection state. Empty `currentSession` means the app is
-    /// running in local-only mode; later phases (vault discovery, note sync)
-    /// gate themselves on this being populated.
-    let authService: AuthService
+    /// Every account this device is signed into, keyed by
+    /// (server_url, username). One API client per account — there is no
+    /// global "current session" (SPEC-LIVROS §2.2).
+    let accounts: AccountsStore
+
+    /// Shared book registry (`~/.config/lumi/books.yaml`).
+    let books: BooksRegistry
+
+    /// Per-account feeds, catch-up and per-book sync status.
+    let sync: BooksSyncEngine
+
+    /// Presentation flags for the books UI.
+    var showAddServer: Bool = false
+    var showManageBooks: Bool = false
+    var showNewBook: Bool = false
+    var showBookSwitcher: Bool = false
+    /// Prefilled server for "Sign in" from a book row/status popover.
+    var signInPrefill: AccountKey?
+
+    /// Active book id (mirrors `books.activeBookID`, set by selection).
+    var activeBookID: String? { books.activeBookID }
+
+    /// The account the open server book syncs through.
+    var activeAccountKey: AccountKey? {
+        guard selectedRemoteVaultID != nil else { return nil }
+        return books.activeBook?.accountKey
+    }
+
+    var activeAccount: Account? {
+        activeAccountKey.flatMap { accounts.account($0) }
+    }
 
     /// Stable per-app-launch identity used as the `clientID` for
     /// presence broadcasts. Different devices for the same user need
@@ -145,9 +174,13 @@ final class AppState {
     #endif
 
     init() {
-        let auth = AuthService()
-        self.authService = auth
-        self.remoteVaultsStore = RemoteVaultsStore(client: auth.apiClient)
+        let accounts = AccountsStore()
+        let books = BooksRegistry(bookmarks: SwiftDataBookmarkStore(context: LumiApp.sharedContainer.mainContext))
+        self.accounts = accounts
+        self.books = books
+        self.sync = BooksSyncEngine(accounts: accounts, registry: books)
+        // Placeholder client until a bound book selects its account's.
+        self.remoteVaultsStore = RemoteVaultsStore(client: LumiAPIClient())
         #if canImport(AppKit)
         // Silence the system beep app-wide. Method-swizzles
         // NSResponder.noResponderFor(_:) to a no-op so AppKit's
@@ -192,7 +225,7 @@ final class AppState {
                     self.selectedNoteID = nil
                 } else if self.selectedRemoteNoteID != nil {
                     if self.remoteEditor.isDirty {
-                        let client = self.authService.apiClient
+                        let client = self.remoteVaultsStore.apiClient
                         let store = self.remoteVaultsStore
                         // Use the CRDT commit path (Phase H slice 3) so
                         // this auto-save shares wire shape with the
@@ -223,6 +256,105 @@ final class AppState {
         )
     }
     #endif
+
+    // MARK: Books
+
+    /// Load accounts, import legacy vaults once, reconcile and start feeds.
+    /// Called once at launch from RootView.
+    func bootstrapBooks(legacyRecords: [LegacyVaultSnapshot]) async {
+        accounts.load()
+        books.importIfNeeded(records: legacyRecords)
+        books.reload()
+        sync.onNotesChanged = { [weak self] bookID, outcome in
+            guard let self, let book = self.books.book(bookID), let vault = book.vaultUUID else { return }
+            Task { await self.remoteVaultsStore.applyCatchUp(outcome, vaultID: vault) }
+        }
+        if let active = books.activeBook {
+            await selectBook(active, markOpened: false)
+        }
+        await sync.syncAccounts()
+    }
+
+    /// Accounts changed (sign in/out/remove): restart feeds and reconcile.
+    func accountsChanged() async {
+        await sync.syncAccounts()
+        if let active = books.activeBook, active.kind == .bound, selectedRemoteVaultID == nil {
+            await selectBook(active, markOpened: false)
+        }
+    }
+
+    /// Open a book: local → folder session; bound → server vault through
+    /// its own account's client.
+    func selectBook(_ book: Book, markOpened: Bool = true) async {
+        if editor.isDirty { editor.save() }
+        selectedNoteID = nil
+        selectedEntry = nil
+        editor.reset()
+        if selectedRemoteNoteID != nil {
+            remoteVaultsStore.closeOpenNote()
+            remoteEditor.reset()
+            selectedRemoteNoteID = nil
+        }
+        if markOpened { books.setActive(book.id) } else if books.activeBookID == nil { books.setActive(book.id) }
+
+        switch book.kind {
+        case .local:
+            selectedRemoteVaultID = nil
+            guard let session = VaultSession.open(book: book, bookmark: books.bookmarks.bookmark(for: book.id)) else {
+                setSession(nil)
+                rootFolder = nil
+                browserState = nil
+                selectedVaultID = book.id // shows the "folder unavailable" state
+                return
+            }
+            setSession(session)
+            let root = session.rootFolder()
+            rootFolder = root
+            browserState = TreeBrowserState(root: root)
+            selectedVaultID = book.id
+            Task { await root.loadIfNeededAsync() }
+        case .bound:
+            setSession(nil)
+            rootFolder = nil
+            browserState = nil
+            selectedVaultID = nil
+            selectedRemoteVaultID = book.vaultUUID
+            sync.openEditor = nil
+            guard let key = book.accountKey, accounts.state(key).isSignedIn,
+                  let client = accounts.client(for: key), let vault = book.vaultUUID else {
+                remoteVaultsStore.clear()
+                return
+            }
+            remoteVaultsStore.setClient(client)
+            await remoteVaultsStore.refresh()
+            await remoteVaultsStore.selectVault(vault)
+        }
+    }
+
+    /// ⌃⌘1–9: n is 1-based, in switcher order.
+    func selectBook(number n: Int) {
+        let list = books.shortcutBooks
+        guard n >= 1, n <= list.count else { return }
+        let book = list[n - 1]
+        Task { await selectBook(book) }
+    }
+
+    /// The registry row for whatever is open now.
+    var openBook: Book? {
+        if let id = selectedVaultID { return books.book(id) }
+        if let remote = selectedRemoteVaultID { return books.book(vaultID: remote.uuidString.lowercased()) }
+        return nil
+    }
+
+    /// Keep the sync engine informed of the open note's CRDT phase.
+    func publishEditorPhase() {
+        guard let book = openBook, book.kind == .bound, selectedRemoteNoteID != nil else {
+            sync.openEditor = nil
+            return
+        }
+        let phase = remoteVaultsStore.openNotePhase
+        sync.openEditor = (book.id, EditorSnapshot(phase: phase, pending: remoteEditor.isDirty && phase != .live))
+    }
 
     /// Replace the active session, closing the previous one to release scope.
     func setSession(_ new: VaultSession?) {

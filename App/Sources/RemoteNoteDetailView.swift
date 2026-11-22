@@ -173,8 +173,8 @@ struct RemoteNoteDetailView: View {
     /// `RemoteVaultDetailView` — matches against the current session's
     /// member row inside the active vault.
     private var canEditNotes: Bool {
-        guard let session = appState.authService.currentSession else { return false }
-        let me = appState.remoteVaultsStore.members.first { $0.username == session.user.username }
+        guard let account = appState.activeAccount else { return false }
+        let me = appState.remoteVaultsStore.members.first { $0.username == account.username }
         guard let caps = me?.capabilities else { return false }
         return caps.contains { $0 == "*" || $0 == "note.*" || $0 == "note.write" || $0 == "vault.*" }
     }
@@ -452,11 +452,11 @@ struct RemoteNoteDetailView: View {
     /// session (REST-only mode or pre-login state) — the store treats
     /// nil as "don't broadcast, just listen". Phase H slice 4.
     private func makeOwnPresence() -> PresenceState? {
-        guard let session = appState.authService.currentSession else { return nil }
+        guard let account = appState.activeAccount else { return nil }
         return PresenceState.make(
             clientID: appState.clientID,
-            username: session.user.username,
-            displayName: session.user.displayName
+            username: account.username,
+            displayName: account.displayName
         )
     }
 
@@ -524,7 +524,7 @@ struct RemoteNoteDetailView: View {
         guard appState.remoteEditor.isDirty, !isSaving else { return }
         let editor = appState.remoteEditor
         let store = appState.remoteVaultsStore
-        let client = appState.authService.apiClient
+        let client = appState.remoteVaultsStore.apiClient
         // Prefer the CRDT-aware commit path (Phase H slice 3) when an
         // open-note CRDT is live; fall back to the text-diff path if
         // not (store hasn't armed a CRDT yet, or the platform has no

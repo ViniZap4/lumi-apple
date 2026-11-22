@@ -2,53 +2,64 @@ import SwiftUI
 import LumiKit
 import LumiUI
 
-/// Toolbar entry point for server sign-in. When signed out, opens a sheet
-/// with the sign-in form. When signed in, shows a menu with the current user
-/// and a sign-out action.
+/// Toolbar accounts menu: every (server, username) this device knows,
+/// its sign-in state, and "Add server…". Several accounts per server are
+/// allowed (SPEC-LIVROS §2.2).
 struct ServerMenu: View {
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
-    @State private var showSignIn: Bool = false
 
     var body: some View {
-        Group {
-            if let session = appState.authService.currentSession {
+        let accounts = appState.accounts.accounts
+        Menu {
+            if accounts.isEmpty {
+                Text("no accounts on this device")
+            }
+            ForEach(accounts) { acc in
+                let state = appState.accounts.state(acc.key)
                 Menu {
-                    Section("Signed in") {
-                        Label(session.user.displayName, systemImage: "person.crop.circle")
-                        if !session.user.username.isEmpty {
-                            Text("@\(session.user.username)")
-                        }
-                        Text(session.serverURL.absoluteString)
-                            .font(.caption)
-                    }
+                    Text(acc.displayName.isEmpty ? acc.username : acc.displayName)
+                    Text(acc.serverURL)
                     Divider()
-                    Button(role: .destructive) {
-                        Task { await appState.authService.signOut() }
-                    } label: {
-                        Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
+                    if state.isSignedIn {
+                        Button("Sign out on this device") {
+                            Task {
+                                await appState.accounts.signOut(acc.key)
+                                await appState.accountsChanged()
+                            }
+                        }
+                    } else {
+                        Button("Sign in…") {
+                            appState.signInPrefill = acc.key
+                            appState.showAddServer = true
+                        }
+                    }
+                    Button("Remove account from this device", role: .destructive) {
+                        Task {
+                            await appState.accounts.remove(acc.key)
+                            await appState.accountsChanged()
+                        }
                     }
                 } label: {
-                    Image(systemName: "cloud.fill")
-                        .foregroundStyle(theme.primary)
-                }
-            } else {
-                Button {
-                    showSignIn = true
-                } label: {
-                    Image(systemName: "cloud")
+                    Label(acc.key.description, systemImage: state.isSignedIn ? "person.crop.circle.fill" : "exclamationmark.circle")
                 }
             }
+            Divider()
+            Button("Add server…") {
+                appState.signInPrefill = nil
+                appState.showAddServer = true
+            }
+        } label: {
+            Image(systemName: accounts.contains { appState.accounts.state($0.key).isSignedIn } ? "cloud.fill" : "cloud")
+                .foregroundStyle(theme.primary)
         }
-        .sheet(isPresented: $showSignIn) {
-            SignInSheet()
-                .environment(appState)
-                .environment(\.theme, theme)
-        }
+        .help("Accounts")
     }
 }
 
-private struct SignInSheet: View {
+/// "Add server…" / sign-in flow: URL → `GET /api/info` → credentials or
+/// invite. Also used to re-sign-in an existing account.
+struct SignInSheet: View {
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
@@ -62,6 +73,9 @@ private struct SignInSheet: View {
 
     @State private var mode: Mode = .signIn
     @State private var serverURL: String = ""
+    @State private var serverInfo: ServerInfo?
+    @State private var serverInfoNote: String?
+    @State private var isCheckingServer = false
     @State private var username: String = ""
     @State private var password: String = ""
     @State private var displayName: String = ""
@@ -99,14 +113,39 @@ private struct SignInSheet: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 fieldLabel("Server URL")
-                TextField("https://lumi.example.com", text: $serverURL)
-                    .textFieldStyle(.roundedBorder)
-                    .textContentType(.URL)
-                    .autocorrectionDisabled()
-                    #if os(iOS) || os(visionOS)
-                    .keyboardType(.URL)
-                    .textInputAutocapitalization(.never)
-                    #endif
+                HStack {
+                    TextField("https://lumi.example.com", text: $serverURL)
+                        .textFieldStyle(.roundedBorder)
+                        .textContentType(.URL)
+                        .autocorrectionDisabled()
+                        #if os(iOS) || os(visionOS)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        #endif
+                        .onSubmit { Task { await checkServer() } }
+                        .onChange(of: serverURL) { _, _ in serverInfo = nil; serverInfoNote = nil }
+                    Button {
+                        Task { await checkServer() }
+                    } label: {
+                        if isCheckingServer { ProgressView().controlSize(.small) } else { Text("Check") }
+                    }
+                    .disabled(serverURL.isEmpty || isCheckingServer)
+                }
+                if let info = serverInfo {
+                    Text("\(info.name ?? "lumi server")\(info.version.map { " · v\($0)" } ?? "")")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(theme.text)
+                }
+                if let note = serverInfoNote {
+                    Text(note)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(theme.textDim)
+                }
+                if let normalized = try? ServerURL.normalize(serverURL), ServerURL.isInsecure(normalized) {
+                    Text("⚠︎ plain http: only use this on a private network — traffic and your password are not encrypted.")
+                        .font(.caption)
+                        .foregroundStyle(theme.warning)
+                }
 
                 if mode == .invite {
                     fieldLabel("Invite link or token")
@@ -222,7 +261,7 @@ private struct SignInSheet: View {
                 Button {
                     Task { await submit() }
                 } label: {
-                    if appState.authService.isBusy {
+                    if appState.accounts.isBusy {
                         ProgressView().controlSize(.small)
                     } else {
                         Text(submitButtonLabel)
@@ -235,11 +274,53 @@ private struct SignInSheet: View {
         .padding(24)
         .frame(minWidth: 380)
         .background(theme.background)
+        .onAppear {
+            if let prefill = appState.signInPrefill {
+                serverURL = prefill.serverURL
+                username = prefill.username
+            }
+        }
+    }
+
+    /// `GET /api/info`: show name/version; warn when the same public key
+    /// is already registered under another URL (§2.1). Pre-feed servers
+    /// answer 404 — that's fine, we just can't show the details.
+    private func checkServer() async {
+        errorMessage = nil
+        guard let normalized = try? ServerURL.normalize(serverURL) else {
+            errorMessage = "invalid server URL (http:// is only allowed for localhost, private IPs and *.local)"
+            return
+        }
+        isCheckingServer = true
+        defer { isCheckingServer = false }
+        do {
+            let info = try await appState.accounts.serverInfo(serverURL: normalized)
+            serverInfo = info
+            serverInfoNote = nil
+            if let key = info.publicKey {
+                let known = Set(appState.accounts.accounts.map(\.serverURL)).subtracting([normalized])
+                for other in known {
+                    if let otherInfo = try? await appState.accounts.serverInfo(serverURL: other), otherInfo.publicKey == key {
+                        serverInfoNote = "this is the same server as \(other) — using that address"
+                        serverURL = other
+                        break
+                    }
+                }
+            }
+        } catch let error as LumiAPIError where error.isEndpointMissing {
+            serverInfo = nil
+            serverInfoNote = "server reachable (older version without /api/info)"
+        } catch let error as LumiAPIError {
+            serverInfo = nil
+            errorMessage = describe(error)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     private var title: String {
         switch mode {
-        case .signIn: return "Sign in to lumi server"
+        case .signIn: return appState.signInPrefill == nil ? "Add server" : "Sign in"
         case .register: return "Create lumi account"
         case .invite: return "Accept lumi invitation"
         }
@@ -254,12 +335,14 @@ private struct SignInSheet: View {
         }
     }
 
-    private var alreadySignedInToThisServer: Bool {
-        guard let session = appState.authService.currentSession,
-              let url = URL(string: serverURL)
-        else { return false }
-        return session.serverURL == url
+    /// Signed-in account on the typed server (invite accept as existing user).
+    private var existingAccountOnThisServer: AccountKey? {
+        guard let normalized = try? ServerURL.normalize(serverURL) else { return nil }
+        let candidates = appState.accounts.accounts(on: normalized).filter { appState.accounts.state($0.key).isSignedIn }
+        return (candidates.first { $0.username == username } ?? candidates.first)?.key
     }
+
+    private var alreadySignedInToThisServer: Bool { existingAccountOnThisServer != nil }
 
     @ViewBuilder
     private func invitePreviewPanel(_ preview: InvitePreview) -> some View {
@@ -299,8 +382,8 @@ private struct SignInSheet: View {
     }
 
     private var canSubmit: Bool {
-        guard !appState.authService.isBusy,
-              URL(string: serverURL) != nil
+        guard !appState.accounts.isBusy,
+              (try? ServerURL.normalize(serverURL)) != nil
         else { return false }
         switch mode {
         case .signIn:
@@ -319,14 +402,10 @@ private struct SignInSheet: View {
 
     private func fetchPreview() async {
         errorMessage = nil
-        guard let url = URL(string: serverURL) else {
-            errorMessage = "invalid server URL"
-            return
-        }
         isFetchingPreview = true
         defer { isFetchingPreview = false }
         do {
-            invitePreview = try await appState.authService.previewInvite(serverURL: url, token: inviteToken)
+            invitePreview = try await appState.accounts.previewInvite(serverURL: serverURL, token: inviteToken)
         } catch let error as LumiAPIError {
             invitePreview = nil
             errorMessage = describe(error)
@@ -338,17 +417,13 @@ private struct SignInSheet: View {
 
     private func submit() async {
         errorMessage = nil
-        guard let url = URL(string: serverURL) else {
-            errorMessage = "invalid server URL"
-            return
-        }
         do {
             switch mode {
             case .signIn:
-                _ = try await appState.authService.signIn(serverURL: url, username: username, password: password)
+                _ = try await appState.accounts.signIn(serverURL: serverURL, username: username, password: password)
             case .register:
-                _ = try await appState.authService.register(
-                    serverURL: url,
+                _ = try await appState.accounts.register(
+                    serverURL: serverURL,
                     username: username,
                     password: password,
                     displayName: displayName,
@@ -361,8 +436,8 @@ private struct SignInSheet: View {
                     return
                 }
                 if preview.requiresSignup {
-                    _ = try await appState.authService.acceptInviteWithSignup(
-                        serverURL: url,
+                    _ = try await appState.accounts.acceptInviteWithSignup(
+                        serverURL: serverURL,
                         token: inviteToken,
                         username: username,
                         password: password,
@@ -371,9 +446,15 @@ private struct SignInSheet: View {
                         privacyVersion: privacyVersion
                     )
                 } else {
-                    _ = try await appState.authService.acceptInviteAsExistingUser(serverURL: url, token: inviteToken)
+                    guard let key = existingAccountOnThisServer else {
+                        errorMessage = "sign in to this server first"
+                        return
+                    }
+                    _ = try await appState.accounts.acceptInviteAsExistingUser(key, token: inviteToken)
                 }
             }
+            appState.signInPrefill = nil
+            await appState.accountsChanged()
             dismiss()
         } catch let error as LumiAPIError {
             errorMessage = describe(error)

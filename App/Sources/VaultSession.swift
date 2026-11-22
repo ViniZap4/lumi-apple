@@ -9,23 +9,36 @@ import LumiKit
 /// from selection until the vault is deselected (or the app exits).
 @MainActor
 final class VaultSession {
-    let vaultID: UUID
+    let vaultID: String
     let rootURL: URL
     private let started: Bool
     private var isClosed = false
 
-    private init(vaultID: UUID, rootURL: URL, started: Bool) {
+    private init(vaultID: String, rootURL: URL, started: Bool) {
         self.vaultID = vaultID
         self.rootURL = rootURL
         self.started = started
     }
 
-    static func open(record: VaultRecord) -> VaultSession? {
-        guard let bookmark = record.bookmarkData else { return nil }
-        guard let resolved = try? Bookmark.decode(bookmark) else { return nil }
-        let url = resolved.url
-        let started = url.startAccessingSecurityScopedResource()
-        return VaultSession(vaultID: record.id, rootURL: url, started: started)
+    /// Open a local book's folder: the security-scoped bookmark when we
+    /// have one, else (macOS, unsandboxed) the `path` from books.yaml —
+    /// e.g. a book the TUI added.
+    static func open(book: Book, bookmark: Data?) -> VaultSession? {
+        if let bookmark, let resolved = try? Bookmark.decode(bookmark) {
+            let url = resolved.url
+            let started = url.startAccessingSecurityScopedResource()
+            return VaultSession(vaultID: book.id, rootURL: url, started: started)
+        }
+        #if os(macOS)
+        if let path = book.path {
+            let url = URL(fileURLWithPath: expandHomeRelative(path), isDirectory: true)
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+                return VaultSession(vaultID: book.id, rootURL: url, started: false)
+            }
+        }
+        #endif
+        return nil
     }
 
     func close() {

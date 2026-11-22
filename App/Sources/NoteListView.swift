@@ -9,7 +9,7 @@ import LumiUI
 /// Vim navigation (j/k/Enter/l/h/g/G) is gated on
 /// `appState.preferences.vimNavigationInList`. macOS-only via onKeyPress.
 struct NoteListView: View {
-    let vault: VaultRecord
+    let vault: Book
     let rootFolder: FolderNode
     @Binding var selectedNoteID: String?
     let onSelect: (NoteEntry) -> Void

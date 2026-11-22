@@ -1,14 +1,21 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import LumiKit
 import LumiUI
 
-/// Modal for creating a new server-side vault. Caller becomes the vault's
-/// Admin. Name is required; slug is optional — when omitted the server
-/// derives one from the name (and bumps with a suffix on collision).
+/// "New book…" (SPEC-LIVROS §5): pick where it lives — a folder on this
+/// device, or one of the signed-in accounts (`POST /api/vaults`, caller
+/// becomes Admin). Name is required; slug is optional — when omitted the
+/// server derives one from the name.
 struct CreateVaultSheet: View {
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
+
+    /// nil = on this device.
+    @State private var destination: AccountKey?
+    @State private var showImporter = false
+    let onAddFolder: (URL) -> Void
 
     @State private var name: String = ""
     @State private var slug: String = ""
@@ -31,7 +38,7 @@ struct CreateVaultSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("new vault")
+                Text("new book")
                     .font(.headline)
                     .foregroundStyle(theme.text)
                 Spacer()
@@ -39,6 +46,25 @@ struct CreateVaultSheet: View {
                     .buttonStyle(.borderless)
             }
 
+            fieldLabel("Where")
+            Picker("Where", selection: $destination) {
+                Text("On this device (folder)").tag(AccountKey?.none)
+                ForEach(appState.accounts.accounts.filter { appState.accounts.state($0.key).isSignedIn }) { acc in
+                    Text(acc.key.description).tag(Optional(acc.key))
+                }
+            }
+            .labelsHidden()
+
+            if destination == nil {
+                Text("choose (or create) a folder; its markdown files become the book.")
+                    .font(.caption)
+                    .foregroundStyle(theme.textDim)
+                HStack {
+                    Spacer()
+                    Button("Choose folder…") { showImporter = true }
+                        .buttonStyle(.borderedProminent)
+                }
+            } else {
             fieldLabel("Name")
             TextField("Work team", text: $name)
                 .textFieldStyle(.roundedBorder)
@@ -76,32 +102,36 @@ struct CreateVaultSheet: View {
                     if isSubmitting {
                         ProgressView().controlSize(.small)
                     } else {
-                        Text("Create Vault")
+                        Text("Create Book")
                     }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(name.isEmpty || isSubmitting)
             }
+            }
         }
         .padding(24)
         .frame(minWidth: 380)
         .background(theme.background)
+        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.folder], allowsMultipleSelection: false) { result in
+            if case let .success(urls) = result, let url = urls.first {
+                onAddFolder(url)
+                dismiss()
+            }
+        }
     }
 
     private func submit() async {
         errorMessage = nil
         isSubmitting = true
         defer { isSubmitting = false }
+        guard let key = destination, let client = appState.accounts.client(for: key) else { return }
         do {
-            let vault = try await appState.remoteVaultsStore.createVault(
-                name: name,
-                slug: slug.isEmpty ? nil : slug
-            )
-            // Auto-select the newly created vault so the user lands on its
-            // detail view straight away.
-            appState.selectedVaultID = nil
-            appState.selectedRemoteVaultID = vault.id
-            await appState.remoteVaultsStore.selectVault(vault.id)
+            let vault = try await client.createVault(name: name, slug: slug.isEmpty ? nil : slug)
+            // Register it as a bound book and open it straight away.
+            if let book = appState.books.addBound(name: vault.name, account: key, vaultID: vault.id) {
+                await appState.selectBook(book)
+            }
             dismiss()
         } catch let error as LumiAPIError {
             errorMessage = describe(error)

@@ -7,7 +7,7 @@ struct RootView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \VaultRecord.lastOpenedAt, order: .reverse) private var vaults: [VaultRecord]
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         @Bindable var bound = appState
@@ -18,13 +18,8 @@ struct RootView: View {
         // single-pane reading experience.
         VStack(spacing: 0) {
             NavigationSplitView(columnVisibility: $bound.columnVisibility) {
-                VaultSidebar(
-                    vaults: vaults,
-                    selectedVaultID: $bound.selectedVaultID,
-                    onAdd: addVault,
-                    onSelect: selectLocalVault
-                )
-                .navigationTitle("Vaults")
+                VaultSidebar(onAdd: addVault)
+                    .navigationTitle("Books")
             } detail: {
                 mainContent
             }
@@ -96,6 +91,9 @@ struct RootView: View {
                 }
             }
             ToolbarItem(placement: .primaryAction) {
+                SyncStatusIndicator()
+            }
+            ToolbarItem(placement: .primaryAction) {
                 ServerMenu()
             }
             ToolbarItem(placement: .primaryAction) {
@@ -125,16 +123,29 @@ struct RootView: View {
                 .environment(appState)
                 .environment(\.theme, theme)
         }
-        .task { await appState.authService.restore() }
-        .onChange(of: appState.authService.currentSession) { _, new in
-            if new != nil {
-                Task { await appState.remoteVaultsStore.refresh() }
-            } else {
-                appState.selectedRemoteVaultID = nil
-                appState.selectedRemoteNoteID = nil
-                appState.remoteVaultsStore.clear()
-            }
+        .sheet(isPresented: $bound.showAddServer) {
+            SignInSheet()
+                .environment(appState)
+                .environment(\.theme, theme)
         }
+        .sheet(isPresented: $bound.showManageBooks) {
+            ManageBooksSheet()
+                .environment(appState)
+                .environment(\.theme, theme)
+        }
+        .sheet(isPresented: $bound.showNewBook) {
+            CreateVaultSheet(onAddFolder: addVault)
+                .environment(appState)
+                .environment(\.theme, theme)
+        }
+        .task { await appState.bootstrapBooks(legacyRecords: legacySnapshots()) }
+        .onChange(of: scenePhase) { _, phase in
+            // Pick up books.yaml edits made by the TUI while we were away.
+            if phase == .active { appState.books.reload() }
+        }
+        .onChange(of: appState.remoteVaultsStore.openNotePhase) { _, _ in appState.publishEditorPhase() }
+        .onChange(of: appState.remoteEditor.isDirty) { _, _ in appState.publishEditorPhase() }
+        .onChange(of: appState.selectedRemoteNoteID) { _, _ in appState.publishEditorPhase() }
     }
 
     @ViewBuilder
@@ -146,13 +157,16 @@ struct RootView: View {
                 vaultRoot: session.rootURL
             )
         } else if let vaultID = appState.selectedVaultID,
-                  let vault = vaults.first(where: { $0.id == vaultID }),
-                  let browser = appState.browserState {
-            TreeBrowserView(
-                state: browser,
-                vaultName: vault.name,
-                onOpen: selectNote
-            )
+                  let book = appState.books.book(vaultID) {
+            if let browser = appState.browserState {
+                TreeBrowserView(
+                    state: browser,
+                    vaultName: book.name,
+                    onOpen: selectNote
+                )
+            } else {
+                BookUnavailableView(book: book)
+            }
         } else if let remoteID = appState.selectedRemoteVaultID,
                   let remote = appState.remoteVaultsStore.vaults.first(where: { $0.id == remoteID }) {
             // Server-vault selected. If a note is also selected (via row
@@ -164,12 +178,24 @@ struct RootView: View {
             } else {
                 RemoteVaultDetailView(vault: remote)
             }
+        } else if appState.selectedRemoteVaultID != nil, let book = appState.openBook {
+            BookUnavailableView(book: book)
         } else {
             EmptyVaultPanel(
-                vaults: vaults,
+                vaults: BookSwitcherOrder.flattened(appState.books.books),
                 onAdd: addVault,
-                onSelect: selectLocalVault
+                onSelect: { book in Task { await appState.selectBook(book) } },
+                onAddServer: { appState.showAddServer = true }
             )
+        }
+    }
+
+    /// VaultRecord rows for the one-shot books.yaml import.
+    private func legacySnapshots() -> [LegacyVaultSnapshot] {
+        let records = (try? modelContext.fetch(FetchDescriptor<VaultRecord>())) ?? []
+        return records.map { record in
+            let path = record.bookmarkData.flatMap { try? Bookmark.decode($0) }?.url.path
+            return LegacyVaultSnapshot(record: record, resolvedPath: path)
         }
     }
 
@@ -179,74 +205,6 @@ struct RootView: View {
         }
         appState.selectedEntry = nil
         appState.selectedNoteID = nil
-    }
-
-    private func selectLocalVault(_ record: VaultRecord) {
-        // Clear any active server-vault selection so the detail panel isn't
-        // dual-bound. This is a no-op when no server selection is active.
-        appState.selectedRemoteVaultID = nil
-        selectVault(record)
-    }
-
-    private func selectVault(_ record: VaultRecord) {
-        appState.selectedNoteID = nil
-        appState.selectedEntry = nil
-        appState.editor.reset()
-
-        guard let session = VaultSession.open(record: record) else {
-            appState.setSession(nil)
-            appState.rootFolder = nil
-            appState.browserState = nil
-            appState.selectedVaultID = nil
-            return
-        }
-        appState.setSession(session)
-        let root = session.rootFolder()
-        appState.rootFolder = root
-        appState.browserState = TreeBrowserState(root: root)
-        appState.selectedVaultID = record.id
-
-        // Snapshot every property we need off the SwiftData model BEFORE
-        // touching `lastOpenedAt`. The setter fires SwiftData's
-        // willChangeValue → fault-in → didChangeValue cycle on the
-        // underlying NSManagedObject; any read of a sibling property on
-        // the same instance during that cycle can race with the fault
-        // handler and throw inside `_PFFaultHandlerLookupRow` (crash
-        // observed in production after F.41 — abort() via
-        // `developerSubmittedBlockToNSManagedObjectContextPerform`
-        // rethrowing the obj-c exception). Snapshotting up-front gives
-        // us a consistent view to hand to the registry without any
-        // further model access.
-        let recordID = record.id
-        let recordName = record.name
-        let recordServerEndpoint = record.serverEndpoint
-        let recordServerAccountID = record.serverAccountID
-        let recordAddedAt = record.addedAt
-        let rootPath = session.rootURL.path
-        let now = Date()
-
-        record.lastOpenedAt = now
-
-        // Defer the registry write to the next main-actor tick so
-        // SwiftData's notification cycle (and any dependent @Query
-        // re-renders in the sidebar) drains before we run I/O.
-        Task { @MainActor in
-            let entry = VaultRegistryEntry(
-                id: recordID,
-                name: recordName,
-                path: encodeHomeRelative(rootPath),
-                server: recordServerEndpoint,
-                account: recordServerAccountID,
-                addedAt: recordAddedAt,
-                lastOpenedAt: now
-            )
-            VaultRegistry.shared.upsert(entry)
-        }
-
-        // Kick the directory walk off the main actor. The browser renders
-        // its loading state until `root.items` populates and `@Observable`
-        // republishes the view.
-        Task { await root.loadIfNeededAsync() }
     }
 
     /// Tell the bottom keybinds bar which set of hints to show based on
@@ -283,35 +241,8 @@ struct RootView: View {
         let started = url.startAccessingSecurityScopedResource()
         defer { if started { url.stopAccessingSecurityScopedResource() } }
         guard let bookmark = try? Bookmark.encode(url: url) else { return }
-        let name = url.lastPathComponent
-        let record = VaultRecord(name: name, bookmarkData: bookmark)
-        modelContext.insert(record)
-        try? modelContext.save()
-
-        // Snapshot the values we need for the registry mirror *before*
-        // calling selectVault — selectVault writes `lastOpenedAt`, which
-        // enters SwiftData's notification cycle, and we don't want
-        // additional reads racing it (see selectVault for the full
-        // explanation of the crash this avoids).
-        let recordID = record.id
-        let recordName = record.name
-        let recordAddedAt = record.addedAt
-        let urlPath = url.path
-
-        Task { @MainActor in
-            let entry = VaultRegistryEntry(
-                id: recordID,
-                name: recordName,
-                path: encodeHomeRelative(urlPath),
-                server: nil,
-                account: nil,
-                addedAt: recordAddedAt,
-                lastOpenedAt: nil
-            )
-            VaultRegistry.shared.upsert(entry)
-        }
-
-        selectVault(record)
+        guard let book = appState.books.addLocal(name: url.lastPathComponent, path: url.path, bookmark: bookmark) else { return }
+        Task { await appState.selectBook(book) }
     }
 }
 

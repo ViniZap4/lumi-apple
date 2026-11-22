@@ -20,7 +20,7 @@ struct LumiApp: App {
         }
     }
 
-    private static let sharedContainer: ModelContainer = {
+    static let sharedContainer: ModelContainer = {
         do {
             return try VaultModelContainer.make()
         } catch {
@@ -44,6 +44,25 @@ struct LumiApp: App {
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { appState.showSettings = true }
                     .keyboardShortcut(",", modifiers: [.command])
+            }
+            // SPEC-LIVROS §5: ⌃⌘1–9 switch books in switcher order,
+            // ⌃⌘0 opens the switcher.
+            CommandMenu("Book") {
+                let shortcutBooks = appState.books.shortcutBooks
+                ForEach(Array(shortcutBooks.enumerated()), id: \.element.id) { index, book in
+                    Button(book.name) { appState.selectBook(number: index + 1) }
+                        .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: [.control, .command])
+                }
+                if !shortcutBooks.isEmpty { Divider() }
+                Button("Switch Book…") {
+                    appState.columnVisibility = .all
+                    appState.showBookSwitcher = true
+                }
+                .keyboardShortcut("0", modifiers: [.control, .command])
+                Button("New Book…") { appState.showNewBook = true }
+                Button("Manage Books…") { appState.showManageBooks = true }
+                Divider()
+                Button("Add Server…") { appState.showAddServer = true }
             }
             // A real top-level "View" menu in the menu bar, so users
             // discover the read/edit toggle without keyboard-shortcut

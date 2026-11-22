@@ -10,12 +10,13 @@ import LumiUI
 /// slot of the NavigationSplitView so it occupies the full window when
 /// the sidebar is hidden (the default).
 struct EmptyVaultPanel: View {
-    let vaults: [VaultRecord]
+    let vaults: [Book]
     let onAdd: (URL) -> Void
-    let onSelect: (VaultRecord) -> Void
+    let onSelect: (Book) -> Void
+    var onAddServer: () -> Void = {}
 
     @State private var showImporter = false
-    @State private var highlightedID: PersistentIdentifier?
+    @State private var highlightedID: String?
     /// Keyboard cursor — index into `vaults`. j/k move it; ⏎ opens.
     /// Tracked separately from `highlightedID` (which mirrors mouse
     /// hover) so the two interaction modes don't fight when the user
@@ -120,10 +121,24 @@ struct EmptyVaultPanel: View {
     @ViewBuilder
     private var emptyState: some View {
         VStack(spacing: 12) {
-            Text("no vault yet")
+            Text("no books yet")
                 .font(.system(.body, design: .monospaced))
                 .foregroundStyle(theme.text)
-            openFolderButton(label: "Open folder…")
+            Text("a book is a separate space of notes — on this device, or synced with one server")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(theme.textDim)
+                .multilineTextAlignment(.center)
+            HStack(spacing: 12) {
+                openFolderButton(label: "New book from folder…")
+                Button {
+                    onAddServer()
+                } label: {
+                    Label("Add server…", systemImage: "server.rack")
+                        .font(.system(.callout, design: .monospaced))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(theme.primary)
+            }
         }
         .padding(.top, 8)
     }
@@ -147,15 +162,15 @@ struct EmptyVaultPanel: View {
     }
 
     @ViewBuilder
-    private func vaultRow(_ vault: VaultRecord, index: Int) -> some View {
-        let isHovered = highlightedID == vault.persistentModelID
+    private func vaultRow(_ vault: Book, index: Int) -> some View {
+        let isHovered = highlightedID == vault.id
         let isCursor = keyboardCursor == index
         let isActive = isHovered || isCursor
         Button {
             onSelect(vault)
         } label: {
             HStack(spacing: 12) {
-                Image(systemName: "folder.fill")
+                Image(systemName: vault.kind == .local ? "folder.fill" : "cloud.fill")
                     .foregroundStyle(theme.accent)
                     .frame(width: 18)
                     .scaleEffect(isActive ? 1.08 : 1.0)
@@ -193,7 +208,7 @@ struct EmptyVaultPanel: View {
         .buttonStyle(.plain)
         .animation(.easeOut(duration: 0.14), value: isActive)
         .onHover { hovering in
-            highlightedID = hovering ? vault.persistentModelID : nil
+            highlightedID = hovering ? vault.id : nil
             // Mouse hover wins — sync the keyboard cursor so a follow-up
             // ⏎ opens the row the user is pointing at.
             if hovering {

@@ -86,8 +86,8 @@ struct RemoteVaultDetailView: View {
 
     /// `vault.manage` capability check against the current session's member row.
     private var canManageVault: Bool {
-        guard let session = appState.authService.currentSession else { return false }
-        let me = appState.remoteVaultsStore.members.first { $0.username == session.user.username }
+        guard let account = appState.activeAccount else { return false }
+        let me = appState.remoteVaultsStore.members.first { $0.username == account.username }
         guard let caps = me?.capabilities else { return false }
         return caps.contains { $0 == "*" || $0 == "vault.*" || $0 == "vault.manage" }
     }
@@ -109,15 +109,15 @@ struct RemoteVaultDetailView: View {
     /// the transfer action — the server rejects non-owners with 403, so we
     /// don't offer the menu item at all.
     private var isOwner: Bool {
-        guard let session = appState.authService.currentSession,
+        guard let account = appState.activeAccount,
               let ownerUserID else { return false }
-        return UUID(uuidString: session.user.id) == ownerUserID
+        return UUID(uuidString: account.userID) == ownerUserID
     }
 
     /// `vault.export` capability check — gates "Send a Copy…".
     private var canExportVault: Bool {
-        guard let session = appState.authService.currentSession else { return false }
-        let me = appState.remoteVaultsStore.members.first { $0.username == session.user.username }
+        guard let account = appState.activeAccount else { return false }
+        let me = appState.remoteVaultsStore.members.first { $0.username == account.username }
         guard let caps = me?.capabilities else { return false }
         return caps.contains { $0 == "*" || $0 == "vault.*" || $0 == "vault.export" }
     }
@@ -130,7 +130,11 @@ struct RemoteVaultDetailView: View {
             return
         }
         do {
-            _ = try await appState.remoteVaultsStore.renameVault(vaultID: vault.id, name: trimmed)
+            let renamed = try await appState.remoteVaultsStore.renameVault(vaultID: vault.id, name: trimmed)
+            // Rename is for everyone (vault.manage); the book name is a cache.
+            if let book = appState.books.book(vaultID: vault.id.uuidString.lowercased()) {
+                appState.books.updateCachedName(book.id, to: renamed.name)
+            }
             isEditingName = false
         } catch let error as LumiAPIError {
             manageError = describeManage(error)
@@ -143,6 +147,10 @@ struct RemoteVaultDetailView: View {
         manageError = nil
         do {
             try await appState.remoteVaultsStore.deleteVault(vaultID: vault.id)
+            if let book = appState.books.book(vaultID: vault.id.uuidString.lowercased()) {
+                appState.books.remove(book.id)
+                appState.sync.forgetBook(book.id)
+            }
             // The store clears selectedVaultID; mirror to AppState so the
             // detail panel switches back to EmptyVaultPanel.
             appState.selectedRemoteVaultID = nil
@@ -207,8 +215,8 @@ struct RemoteVaultDetailView: View {
 
     /// `audit.read` capability check against the current session's member row.
     private var canReadAudit: Bool {
-        guard let session = appState.authService.currentSession else { return false }
-        let me = appState.remoteVaultsStore.members.first { $0.username == session.user.username }
+        guard let account = appState.activeAccount else { return false }
+        let me = appState.remoteVaultsStore.members.first { $0.username == account.username }
         guard let caps = me?.capabilities else { return false }
         return caps.contains { $0 == "*" || $0 == "audit.*" || $0 == "audit.read" || $0 == "vault.*" }
     }
@@ -319,8 +327,8 @@ struct RemoteVaultDetailView: View {
     /// `members.invite` capability is owned by the current session's member
     /// row. We look it up against the vault's member list.
     private var canCreateInvites: Bool {
-        guard let session = appState.authService.currentSession else { return false }
-        let me = appState.remoteVaultsStore.members.first { $0.username == session.user.username }
+        guard let account = appState.activeAccount else { return false }
+        let me = appState.remoteVaultsStore.members.first { $0.username == account.username }
         guard let caps = me?.capabilities else { return false }
         return caps.contains { $0 == "*" || $0 == "members.*" || $0 == "members.invite" || $0 == "vault.*" }
     }
@@ -686,8 +694,8 @@ struct RemoteVaultDetailView: View {
 
     /// `note.read` capability check against the current session's member row.
     private var canReadNotes: Bool {
-        guard let session = appState.authService.currentSession else { return false }
-        let me = appState.remoteVaultsStore.members.first { $0.username == session.user.username }
+        guard let account = appState.activeAccount else { return false }
+        let me = appState.remoteVaultsStore.members.first { $0.username == account.username }
         guard let caps = me?.capabilities else { return false }
         return caps.contains { $0 == "*" || $0 == "note.*" || $0 == "note.read" || $0 == "vault.*" }
     }
@@ -695,16 +703,16 @@ struct RemoteVaultDetailView: View {
     /// `note.create` capability check (slice 4b). Mirrors the note.read /
     /// note.write checks elsewhere.
     private var canCreateNotes: Bool {
-        guard let session = appState.authService.currentSession else { return false }
-        let me = appState.remoteVaultsStore.members.first { $0.username == session.user.username }
+        guard let account = appState.activeAccount else { return false }
+        let me = appState.remoteVaultsStore.members.first { $0.username == account.username }
         guard let caps = me?.capabilities else { return false }
         return caps.contains { $0 == "*" || $0 == "note.*" || $0 == "note.create" || $0 == "vault.*" }
     }
 
     /// `note.delete` capability check (slice 4b).
     private var canDeleteNotes: Bool {
-        guard let session = appState.authService.currentSession else { return false }
-        let me = appState.remoteVaultsStore.members.first { $0.username == session.user.username }
+        guard let account = appState.activeAccount else { return false }
+        let me = appState.remoteVaultsStore.members.first { $0.username == account.username }
         guard let caps = me?.capabilities else { return false }
         return caps.contains { $0 == "*" || $0 == "note.*" || $0 == "note.delete" || $0 == "vault.*" }
     }

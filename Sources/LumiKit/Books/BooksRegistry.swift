@@ -231,6 +231,26 @@ public final class BooksRegistry {
         }
     }
 
+    /// "Religar": attach a server vault id to an incomplete bound book.
+    @discardableResult
+    public func relink(_ id: String, to account: AccountKey, vaultID: UUID) -> Bool {
+        let vid = vaultID.uuidString.lowercased()
+        guard book(vaultID: vid) == nil || book(vaultID: vid)?.id == id else { return false }
+        let ok = mutate { books in
+            guard let i = books.firstIndex(where: { $0.id == id }) else { return }
+            books[i].kind = .bound
+            books[i].serverURL = account.serverURL
+            books[i].account = account.username
+            books[i].vaultID = vid
+        }
+        if ok {
+            var pending = pendingSlugs
+            pending[id] = nil
+            pendingSlugs = pending
+        }
+        return ok
+    }
+
     public func setActive(_ id: String) {
         setActiveID(id)
         mutate { books in
