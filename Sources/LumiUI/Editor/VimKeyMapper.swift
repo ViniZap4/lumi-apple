@@ -50,6 +50,9 @@ enum VimKeyMapper {
     #endif
 
     #if canImport(UIKit)
+    /// `UIKey` is main-actor isolated; key presses are delivered on the
+    /// main thread, so the mapper is too.
+    @MainActor
     static func map(key: UIKey, mode: VimMode) -> VimInput? {
         let inCommandLine = mode.commandLinePrefix != nil
         switch key.keyCode {
