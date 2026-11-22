@@ -2,141 +2,275 @@ import Testing
 import Foundation
 @testable import LumiKit
 
-/// Serialized because yrs (the Rust runtime under YSwift) panics with
-/// `ExclusiveAcqFailed(BorrowMutError)` when multiple tests open
-/// transactions concurrently — the UniFFI bridge doesn't isolate the
-/// borrow checker per-Doc cleanly under swift-testing's default
-/// parallel runner.
-@Suite("LumiCRDT — Phase H slice 1", .serialized)
-struct LumiCRDTTests {
+#if canImport(YSwift)
 
-    @Test("empty doc reads empty text")
-    func emptyDoc() async {
-        let crdt = LumiCRDT()
-        let text = await crdt.text()
-        #expect(text == "")
+/// Every test touching yrs lives under this one serialized parent:
+/// separate suites run in parallel and yrs panics on concurrent
+/// transactions across docs.
+@Suite("yrs", .serialized)
+enum YrsSerial {}
+
+/// Test helpers mirroring the spec's §9 setup.
+enum Replica {
+    /// The server's `InitFromText`: a doc that inserted `text` under its
+    /// own clientID.
+    static func server(_ text: String = "hello world") -> LumiCRDT {
+        let s = LumiCRDT()
+        s.applyLocal([TextEdit(location: 0, length: 0, replacement: text)])
+        return s
     }
 
-    @Test("seed parameter installs initial body")
-    func seedInitialBody() async {
-        let crdt = LumiCRDT(seed: "hello world")
-        let text = await crdt.text()
-        #expect(text == "hello world")
+    /// An empty client that joined and synced with `server`.
+    static func joined(_ server: LumiCRDT) throws -> LumiCRDT {
+        let c = LumiCRDT()
+        try c.applyRemote(update: server.encodeDiff(againstStateVector: c.stateVector()))
+        return c
     }
 
-    @Test("setText replaces the entire body")
-    func setTextReplaces() async {
-        let crdt = LumiCRDT(seed: "old contents")
-        await crdt.setText("brand new")
-        #expect(await crdt.text() == "brand new")
-        await crdt.setText("")
-        #expect(await crdt.text() == "")
+    /// Full two-way state exchange.
+    static func sync(_ a: LumiCRDT, _ b: LumiCRDT) throws {
+        let toB = try a.encodeDiff(againstStateVector: b.stateVector())
+        let toA = try b.encodeDiff(againstStateVector: a.stateVector())
+        try b.applyRemote(update: toB)
+        try a.applyRemote(update: toA)
     }
 
-    /// Core CRDT round-trip: doc A makes edits, encodes its full state
-    /// as an update, doc B applies it. B must converge to the same text.
-    @Test("encodeStateAsUpdate → apply round-trips text between docs")
-    func fullStateRoundTrip() async throws {
-        let docA = LumiCRDT()
-        let docB = LumiCRDT()
+    static func ins(_ at: Int, _ s: String) -> [TextEdit] { [TextEdit(location: at, length: 0, replacement: s)] }
+    static func del(_ at: Int, _ n: Int) -> [TextEdit] { [TextEdit(location: at, length: n, replacement: "")] }
+}
 
-        await docA.setText("Hello from A")
-        let update = await docA.encodeStateAsUpdate()
-        #expect(!update.isEmpty)
-
-        try await docB.apply(update: update)
-        #expect(await docB.text() == "Hello from A")
-    }
-
-    /// Incremental diff: A has text X, B has text Y. A sends its state
-    /// vector to B, B replies with a diff against that vector; A
-    /// applies it. Result: A converges to the merged state (B's edits
-    /// woven in on top of A's).
-    @Test("encodeDiff(againstStateVector:) lets two docs converge incrementally")
-    func incrementalDiffConverges() async throws {
-        let docA = LumiCRDT()
-        let docB = LumiCRDT()
-
-        // Initial sync: A has "Hello"; B starts empty, pulls A's state.
-        await docA.setText("Hello")
-        let initial = await docA.encodeStateAsUpdate()
-        try await docB.apply(update: initial)
-        #expect(await docB.text() == "Hello")
-
-        // B independently appends " world"; A wants the new chars only.
-        // Note: we use setText here rather than a fine-grained insert
-        // because setText is the only public mutation in slice 1. The
-        // important invariant is that A *converges* to the same text,
-        // not that the wire payload is minimal.
-        await docB.setText("Hello world")
-
-        let svA = await docA.stateVector()
-        #expect(!svA.isEmpty)
-        let diff = try await docB.encodeDiff(againstStateVector: svA)
-
-        try await docA.apply(update: diff)
-        #expect(await docA.text() == "Hello world")
-    }
-
-    /// State vector against itself: the diff must apply without
-    /// changing the doc (no-op), even after multiple sync rounds.
-    @Test("encodeDiff against own state vector is a no-op apply")
-    func selfDiffIsNoOp() async throws {
-        let crdt = LumiCRDT(seed: "stable")
-        let sv = await crdt.stateVector()
-        let diff = try await crdt.encodeDiff(againstStateVector: sv)
-        // Empty diff is also acceptable; what matters is that applying
-        // it doesn't corrupt the text.
-        try await crdt.apply(update: diff)
-        #expect(await crdt.text() == "stable")
-    }
-
-    /// Empty state vector means "the peer has nothing" — diff should
-    /// produce the full state.
-    @Test("encodeDiff with empty state vector yields the full state")
-    func diffAgainstEmptyVectorIsFullState() async throws {
-        let docA = LumiCRDT(seed: "complete text")
-        let fullState = await docA.encodeStateAsUpdate()
-        let diffAgainstEmpty = try await docA.encodeDiff(againstStateVector: Data())
-
-        // Both payloads should bring a fresh peer to the same text.
-        let recv1 = LumiCRDT()
-        try await recv1.apply(update: fullState)
-        #expect(await recv1.text() == "complete text")
-
-        let recv2 = LumiCRDT()
-        try await recv2.apply(update: diffAgainstEmpty)
-        #expect(await recv2.text() == "complete text")
-    }
-
-    /// Malformed update bytes must throw (not crash, not silently
-    /// no-op). lib0-v1 has a length-prefixed format; arbitrary
-    /// garbage will fail to decode.
-    @Test("apply rejects malformed update bytes with a throw")
-    func malformedUpdateThrows() async {
-        let crdt = LumiCRDT()
-        let garbage = Data([0xff, 0xff, 0xff, 0xff, 0x00])
-        await #expect(throws: (any Error).self) {
-            try await crdt.apply(update: garbage)
+extension YrsSerial {
+    @Suite("LumiCRDT — replica + protocol vectors (§9)")
+    struct LumiCRDTTests {
+        @Test("a new replica is empty and uses the shared `content` root")
+        func emptyReplica() {
+            let c = LumiCRDT()
+            #expect(c.text == "")
+            #expect(c.length == 0)
+            #expect(LumiCRDT.textName == "content")
         }
-        // Doc still functions after the failed apply.
-        #expect(await crdt.text() == "")
-    }
 
-    /// Independent text channels in different docs don't cross-talk
-    /// when the `textName` differs. Confirms our keying matches the
-    /// server's domain shape.
-    @Test("different textName isolates channels")
-    func differentTextNameIsolates() async throws {
-        let docA = LumiCRDT(textName: "body", seed: "body content")
-        let docB = LumiCRDT(textName: "presence")
+        @Test("V1: an empty client syncs to the server text; server unchanged")
+        func v1() throws {
+            let s = Replica.server()
+            let c = try Replica.joined(s)
+            #expect(c.text == "hello world")
+            try Replica.sync(s, c)
+            #expect(s.text == "hello world")
+        }
 
-        let update = await docA.encodeStateAsUpdate()
-        try await docB.apply(update: update)
+        @Test("V2: seeding before sync duplicates (why the API has no seed)")
+        func v2() throws {
+            let s = Replica.server()
+            let c = LumiCRDT()
+            c.applyLocal(Replica.ins(0, "hello world")) // the forbidden seed
+            try Replica.sync(s, c)
+            #expect(c.text == "hello worldhello world")
+            #expect(s.text == c.text)
+        }
 
-        // docB has a 'presence' channel; the 'body' channel update
-        // landed but reading 'presence' (its named channel) shows
-        // empty because no data flowed there.
-        #expect(await docB.text() == "")
+        @Test("V3: concurrent inserts at different places")
+        func v3() throws {
+            let s = Replica.server()
+            let a = try Replica.joined(s), b = try Replica.joined(s)
+            a.applyLocal(Replica.ins(5, " brave"))
+            b.applyLocal(Replica.ins(11, "!"))
+            try Replica.sync(a, b)
+            #expect(a.text == "hello brave world!")
+            #expect(b.text == a.text)
+        }
+
+        @Test("V4: concurrent inserts at the same index converge deterministically")
+        func v4() throws {
+            let s = Replica.server()
+            let a = try Replica.joined(s), b = try Replica.joined(s)
+            a.applyLocal(Replica.ins(5, "A"))
+            b.applyLocal(Replica.ins(5, "B"))
+            try Replica.sync(a, b)
+            // yswift assigns random clientIDs; the lower one goes left.
+            #expect(["helloAB world", "helloBA world"].contains(a.text))
+            #expect(b.text == a.text)
+        }
+
+        @Test("V5: a concurrent insert inside a deleted range survives")
+        func v5() throws {
+            let s = Replica.server()
+            let a = try Replica.joined(s), b = try Replica.joined(s)
+            a.applyLocal(Replica.del(5, 6))
+            b.applyLocal(Replica.ins(8, "X"))
+            try Replica.sync(a, b)
+            #expect(a.text == "helloX")
+            #expect(b.text == "helloX")
+        }
+
+        @Test("V6: delete-all/insert-all displaces a concurrent insert; V6b ranged ops keep it")
+        func v6() throws {
+            let s = Replica.server()
+            var a = try Replica.joined(s), b = try Replica.joined(s)
+            a.applyLocal([TextEdit(location: 0, length: 11, replacement: "hello brave world")])
+            b.applyLocal(Replica.ins(5, "X"))
+            try Replica.sync(a, b)
+            #expect(a.text == "Xhello brave world")
+
+            a = try Replica.joined(s); b = try Replica.joined(s)
+            let (edit, _) = a.replaceText(with: "hello brave world")
+            // Prefix-maximal hunk: insert "brave " after "hello ".
+            #expect(edit == TextEdit(location: 6, length: 0, replacement: "brave "))
+            b.applyLocal(Replica.ins(5, "X"))
+            try Replica.sync(a, b)
+            #expect(a.text == "helloX brave world")
+            #expect(b.text == a.text)
+        }
+
+        @Test("V7: delete-all/insert-all resurrects a delete; V7b ranged ops respect it")
+        func v7() throws {
+            let s = Replica.server()
+            var a = try Replica.joined(s), b = try Replica.joined(s)
+            a.applyLocal([TextEdit(location: 0, length: 11, replacement: "hello world!")])
+            b.applyLocal(Replica.del(0, 6))
+            try Replica.sync(a, b)
+            #expect(a.text == "hello world!")
+
+            a = try Replica.joined(s); b = try Replica.joined(s)
+            a.replaceText(with: "hello world!")
+            b.applyLocal(Replica.del(0, 6))
+            try Replica.sync(a, b)
+            #expect(a.text == "world!")
+            #expect(b.text == "world!")
+        }
+
+        @Test("V8: fresh-doc refetch duplicates; merging the snapshot state into the kept doc does not")
+        func v8() throws {
+            let s = Replica.server()
+            let fresh = LumiCRDT()
+            fresh.applyLocal(Replica.ins(0, "hello world!"))
+            try Replica.sync(s, fresh)
+            #expect(fresh.text == "hello world!hello world")
+
+            let s2 = Replica.server()
+            let kept = try Replica.joined(s2)
+            kept.applyLocal(Replica.ins(11, "!"))
+            // Pull-to-refresh: merge the REST `state` into the same doc.
+            let edits = try kept.applyRemote(update: s2.encodeStateAsUpdate())
+            #expect(edits.isEmpty)
+            #expect(kept.text == "hello world!")
+        }
+
+        @Test("V11: offline edits merge both ways on reconnect with the same doc")
+        func v11() throws {
+            let s = Replica.server()
+            let c = try Replica.joined(s)
+            c.applyLocal(Replica.ins(11, "?"))   // offline
+            s.applyLocal(Replica.ins(0, "> "))   // meanwhile on the server
+            try Replica.sync(s, c)               // Step1/Step2 both ways
+            #expect(c.text == "> hello world?")
+            #expect(s.text == "> hello world?")
+        }
+
+        @Test("V13: replaying the same update applies once")
+        func v13() throws {
+            let s = Replica.server()
+            let c = try Replica.joined(s)
+            let u = s.applyLocal(Replica.ins(0, "x")).update
+            #expect(try c.applyRemote(update: u) == Replica.ins(0, "x"))
+            #expect(try c.applyRemote(update: u).isEmpty)
+            #expect(c.text == "xhello world")
+        }
+
+        @Test("local updates carry exactly the transaction's ops (inserts and deletes)")
+        func localUpdate() throws {
+            let s = Replica.server()
+            let c = try Replica.joined(s)
+            let u1 = c.applyLocal(Replica.ins(5, ",")).update
+            let u2 = c.applyLocal(Replica.del(0, 1)).update
+            #expect(!u1.isEmpty && !u2.isEmpty)
+            #expect(try s.applyRemote(update: u1) == Replica.ins(5, ","))
+            #expect(try s.applyRemote(update: u2) == Replica.del(0, 1))
+            #expect(s.text == "ello, world")
+        }
+
+        @Test("remote deltas are UTF-16 ranged edits")
+        func utf16Deltas() throws {
+            let s = Replica.server("a😀b")
+            let c = try Replica.joined(s)
+            let u = s.applyLocal(Replica.ins(3, "Z")).update // after the pair
+            #expect(try c.applyRemote(update: u) == Replica.ins(3, "Z"))
+            #expect(c.text == "a😀Zb")
+        }
+
+        @Test("out-of-range local edits are refused, never crash yrs")
+        func outOfRange() {
+            let c = Replica.server("abc")
+            let r = c.applyLocal(Replica.del(2, 5))
+            #expect(!r.applied)
+            #expect(c.text == "abc")
+        }
+
+        @Test("V12 via replaceText: the surrogate pair is replaced whole")
+        func v12() throws {
+            let s = Replica.server("a😀b")
+            let c = try Replica.joined(s)
+            let (edit, update) = c.replaceText(with: "a😁b")
+            #expect(edit == TextEdit(location: 1, length: 2, replacement: "😁"))
+            try s.applyRemote(update: update)
+            #expect(s.text == "a😁b")
+            #expect(s.length == 4)
+        }
+
+        @Test("undo reverts only this user's group, never a peer's concurrent edit")
+        func undoKeepsPeerEdits() throws {
+            let s = Replica.server()
+            let c = try Replica.joined(s)
+            c.breakUndoGroup()
+            try s.applyRemote(update: c.applyLocal(Replica.ins(11, "!")).update)
+            try s.applyRemote(update: c.applyLocal(Replica.ins(12, "!")).update)
+            // A peer edit lands afterwards.
+            let peer = s.applyLocal(Replica.ins(0, "> ")).update
+            #expect(try c.applyRemote(update: peer) == Replica.ins(0, "> "))
+            c.breakUndoGroup()
+            let undo = try #require(c.undo())
+            #expect(c.text == "> hello world")
+            #expect(TextEdit.apply(undo.edits, to: "> hello world!!") == "> hello world")
+            // The undo travels to the server as an update.
+            try s.applyRemote(update: undo.update)
+            #expect(s.text == "> hello world")
+            let redo = try #require(c.redo())
+            #expect(c.text == "> hello world!!")
+            try s.applyRemote(update: redo.update)
+            #expect(s.text == "> hello world!!")
+        }
+
+        @Test("undo groups follow breakUndoGroup boundaries")
+        func undoGroups() {
+            let c = Replica.server("")
+            c.breakUndoGroup()
+            c.applyLocal(Replica.ins(0, "one"))
+            c.breakUndoGroup()
+            c.applyLocal(Replica.ins(3, " two"))
+            c.applyLocal(Replica.ins(7, " three"))
+            c.breakUndoGroup()
+            _ = c.undo()
+            #expect(c.text == "one")
+            _ = c.undo()
+            #expect(c.text == "")
+            #expect(c.undo() == nil)
+        }
+
+        @Test("initialiseFromFile only writes into an empty replica")
+        func initFromFile() throws {
+            let c = LumiCRDT()
+            #expect(c.initialiseFromFile("body") != nil)
+            #expect(c.text == "body")
+            #expect(c.initialiseFromFile("again") == nil)
+        }
+
+        @Test("malformed updates throw and leave the doc intact")
+        func malformed() throws {
+            let c = Replica.server("abc")
+            #expect(throws: (any Error).self) { try c.applyRemote(update: Data([0xFF, 0xFF, 0xFF])) }
+            #expect(c.text == "abc")
+        }
     }
 }
+
+#endif

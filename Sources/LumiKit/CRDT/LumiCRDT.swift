@@ -1,118 +1,133 @@
 import Foundation
+import Synchronization
+
+/// Outcome of a local edit applied to the replica.
+public struct LocalEditResult: Sendable, Equatable {
+    /// lib0-v1 update carrying exactly this transaction's ops. Empty when
+    /// the edits were no-ops.
+    public let update: Data
+    /// False when an edit was out of bounds — the editor and the replica
+    /// disagree and the editor must resync from `text` (should never
+    /// happen; guarded so a bug cannot crash yrs with a panic).
+    public let applied: Bool
+}
+
+/// Outcome of a remote update / undo / redo applied to the replica.
+public struct ReplicaChange: Sendable, Equatable {
+    /// Sequential ranged edits to replay on the editor (UTF-16).
+    public let edits: [TextEdit]
+    /// lib0-v1 update to send to peers. Empty for remote updates (they
+    /// are never echoed); the undo/redo ops for undo/redo.
+    public let update: Data
+}
 
 #if canImport(YSwift)
 @preconcurrency import YSwift
 
-/// Actor wrapper around a single Yjs document for the Apple client's
-/// open note. Owns one `YText` keyed by `textName` (default "body") —
-/// matching the server's `domain.NoteCRDT` shape so updates round-trip
-/// untranslated.
+/// One Yjs replica of a server note: a single root `Y.Text` named
+/// `content` (CRDT-CLIENT-PROTOCOL §1 "Doc layout").
 ///
-/// Phase H slice 1 lays down the binding only: callers can apply
-/// server-sent updates, encode their own state, and read the current
-/// text. Slice H.2 will plumb WS `.syncUpdate` events into `apply`,
-/// and H.3 will switch the commit path from POSTing a full body to
-/// POSTing a raw Yjs update (computed via `encodeDiff`).
+/// Rules enforced by the API shape:
+/// - **Never seed** (§0 rule 1): there is no initializer taking text. A
+///   new replica is empty and learns the body from the server's
+///   SyncStep2. The only way to write text without a sync is
+///   `initialiseFromFile`, an explicit user action (§2.2.5).
+/// - **Ranged ops only** (§3): `applyLocal` takes ranged edits; the
+///   whole-text path `replaceText` diffs against the *current* Y.Text in
+///   the same transaction.
+/// - Remote updates come back as ranged `TextEdit`s mapped from the
+///   yrs delta (§4.2) so the editor can replay them in place.
 ///
-/// Why an `actor`: `YDocument` already serialises every transaction
-/// onto its own `DispatchQueue` *and* fails a `dispatchPrecondition`
-/// if a transaction is opened from within another. Putting our
-/// outer-edge calls on an actor means Swift 6's strict-concurrency
-/// checker sees a single isolation domain instead of a free-floating
-/// reference, and `@preconcurrency import YSwift` confines the
-/// non-Sendable surface (YDocument / YrsTransaction) to this file.
-public actor LumiCRDT {
-    /// The underlying YSwift document. Held as a private property so
-    /// no caller can reach the inner DispatchQueue directly — every
-    /// operation goes through the actor's async API.
-    private let doc: YDocument
-    /// The shared `YText` we manage. Cached at init time because
-    /// calling `doc.getOrCreateText(named:)` inside a `transactSync`
-    /// closure opens an inner transaction → yrs panics with
-    /// `ExclusiveAcqFailed(BorrowMutError)`. Match yswift's own
-    /// tests: grab the YText outside, use it inside.
-    private let ytext: YText
-    /// Name of the shared `YText` we manage. Matches the server's
-    /// canonical key so wire updates land in the same shared type on
-    /// both sides.
-    public let textName: String
+/// Isolation: a plain non-`Sendable` class. It is owned by exactly one
+/// `NoteSyncSession` on the main actor, which serialises local edits and
+/// remote applies so the editor buffer and the replica always move in
+/// lockstep (§3.2 "remote updates must not interleave between the read
+/// and the write"). yswift runs each transaction synchronously on its
+/// own queue; yrs work for a keystroke is microseconds.
+public final class LumiCRDT {
+    public static let isSupported = true
+    /// Root text name shared with the server (`crdt.rootBranchName`) and
+    /// the web client (`doc.getText('content')`).
+    public static let textName = "content"
 
-    /// Build a fresh, empty Y.Doc with one named text channel.
-    /// Pass `seed` to install an initial body; the seeded text counts
-    /// as a CRDT insertion at the current actor's clock origin (so a
-    /// subsequent diff against a remote peer's state vector will
-    /// include it).
-    public init(textName: String = "body", seed: String = "") {
+    /// Origin of local editor transactions — the only origin the undo
+    /// manager tracks (§6, §8).
+    static let editorOrigin = makeOrigin("lumi:editor")
+    static let remoteOrigin = makeOrigin("lumi:remote")
+    static let initOrigin = makeOrigin("lumi:init-from-file")
+
+    private let doc: YDocument
+    private let ytext: YText
+    private let collector = DeltaCollector()
+    private var textSubscription: YSubscription?
+    private let undoManager: YUndoManager<UndoMeta>
+    private var undoSubscription: YSubscription?
+    /// Number of undo-stack items each vim change group produced
+    /// (yrs merges edits closer than 500 ms into one item, and a long
+    /// insert session can span several items).
+    private var undoGroups: [Int] = []
+    private var redoGroups: [Int] = []
+    private var groupOpen = false
+    private let itemsAdded = ItemCounter()
+
+    public init() {
         let doc = YDocument()
-        let ytext = doc.getOrCreateText(named: textName)
-        if !seed.isEmpty {
-            doc.transactSync { txn in
-                ytext.insert(seed, at: 0, in: txn)
-            }
-        }
+        let ytext = doc.getOrCreateText(named: Self.textName)
         self.doc = doc
         self.ytext = ytext
-        self.textName = textName
-    }
-
-    // MARK: - Wire-facing
-
-    /// Apply a raw Yjs update (lib0-v1 encoded bytes). The update may
-    /// originate from a `POST .../diff` response, a WS `SyncUpdate`
-    /// frame, or any other peer; the CRDT merges it idempotently. A
-    /// malformed payload throws; well-formed updates that the doc
-    /// already has the changes for are a no-op.
-    public func apply(update: Data) throws {
-        let doc = self.doc
-        // YSwift's transactSync closure is non-throwing — capture any
-        // error via a Result and rethrow after the queue hop.
-        let result: Result<Void, Error> = doc.transactSync { txn in
-            do {
-                try txn.transactionApplyUpdate(update: Array(update))
-                return .success(())
-            } catch {
-                return .failure(error)
-            }
+        self.undoManager = doc.undoManager(trackedRefs: [ytext])
+        undoManager.addOrigin(Self.editorOrigin)
+        let collector = self.collector
+        textSubscription = ytext.observe { changes in
+            collector.record(changes)
         }
-        try result.get()
+        let counter = itemsAdded
+        undoSubscription = undoManager.observeAdded { event, meta in
+            // Counted only across local transactions (reset before,
+            // read after), so the event kind — which yswift 0.2.1
+            // reports inverted — does not matter.
+            _ = event
+            counter.value.withLock { $0 += 1 }
+            return meta
+        }
     }
 
-    /// Compute the current state vector. Sent to a peer in
-    /// `SyncStep1` so the peer can compute a minimal diff to send
-    /// back. lib0-v1 encoded.
+    deinit {
+        textSubscription?.cancel()
+        undoSubscription?.cancel()
+    }
+
+    // MARK: - Reading
+
+    /// Current text of the replica.
+    public var text: String {
+        let ytext = self.ytext
+        return doc.transactSync { txn in ytext.getString(in: txn) }
+    }
+
+    /// UTF-16 length of the replica text.
+    public var length: Int {
+        let ytext = self.ytext
+        return Int(doc.transactSync { txn in ytext.length(in: txn) })
+    }
+
+    /// lib0-v1 state vector (SyncStep1 body).
     public func stateVector() -> Data {
-        let doc = self.doc
-        return doc.transactSync { txn in
-            Data(txn.transactionStateVector())
-        }
+        doc.transactSync { txn in Data(txn.transactionStateVector()) }
     }
 
-    /// Encode the document's full state as a single update. Suitable
-    /// for `SyncStep2` reply to a peer whose state vector is empty
-    /// (i.e. brand-new doc on the other end). lib0-v1 encoded.
+    /// Full state as one update.
     public func encodeStateAsUpdate() -> Data {
-        let doc = self.doc
-        return doc.transactSync { txn in
-            Data(txn.transactionEncodeStateAsUpdate())
-        }
+        doc.transactSync { txn in Data(txn.transactionEncodeStateAsUpdate()) }
     }
 
-    /// Compute a diff update against `remoteStateVector`. Suitable
-    /// for `SyncStep2` reply when the remote announced their state
-    /// vector in `SyncStep1`. Empty `remoteStateVector` behaves like
-    /// `encodeStateAsUpdate()` — yrs's `encodeDiffV1` rejects an
-    /// empty byte buffer (it expects a valid lib0-v1 state vector,
-    /// not "nothing"), so we route the empty case to the full-state
-    /// encoder. lib0-v1 encoded.
+    /// Diff against a peer's state vector (SyncStep2 body). An empty
+    /// vector yields the full state.
     public func encodeDiff(againstStateVector remote: Data) throws -> Data {
-        if remote.isEmpty {
-            return encodeStateAsUpdate()
-        }
-        let doc = self.doc
+        if remote.isEmpty { return encodeStateAsUpdate() }
         let result: Result<Data, Error> = doc.transactSync { txn in
             do {
-                let bytes = try txn.transactionEncodeStateAsUpdateFromSv(stateVector: Array(remote))
-                return .success(Data(bytes))
+                return .success(Data(try txn.transactionEncodeStateAsUpdateFromSv(stateVector: Array(remote))))
             } catch {
                 return .failure(error)
             }
@@ -120,130 +135,235 @@ public actor LumiCRDT {
         return try result.get()
     }
 
-    // MARK: - Text content
+    // MARK: - Remote
 
-    /// Current contents of the managed `YText`. Returns the empty
-    /// string when nothing has been inserted yet.
-    public func text() -> String {
-        let doc = self.doc
+    /// Merge a peer update (SyncStep2 / Update frame, REST snapshot
+    /// `state`). Idempotent. Returns the resulting change as ranged
+    /// edits for the editor; empty when nothing changed (V13).
+    @discardableResult
+    public func applyRemote(update: Data) throws -> [TextEdit] {
+        guard !update.isEmpty else { return [] }
+        collector.begin()
+        let result: Result<Void, Error> = doc.transactSync(origin: Self.remoteOrigin) { txn in
+            do {
+                try txn.transactionApplyUpdate(update: Array(update))
+                return .success(())
+            } catch {
+                return .failure(error)
+            }
+        }
+        let edits = collector.end()
+        try result.get()
+        return edits
+    }
+
+    // MARK: - Local
+
+    /// Apply sequential ranged edits from the editor in **one**
+    /// transaction tagged `lumi:editor` and return the update to send.
+    @discardableResult
+    public func applyLocal(_ edits: [TextEdit]) -> LocalEditResult {
+        let live = edits.filter { !$0.isNoOp }
+        guard !live.isEmpty else { return LocalEditResult(update: Data(), applied: true) }
+        noteLocalChange()
         let ytext = self.ytext
-        return doc.transactSync { txn in
-            ytext.getString(in: txn)
+        defer { attributeAddedItems() }
+        return doc.transactSync(origin: Self.editorOrigin) { txn in
+            var length = Int(ytext.length(in: txn))
+            for e in live {
+                guard e.location >= 0, e.length >= 0, e.location + e.length <= length else {
+                    return LocalEditResult(update: Data(txn.transactionEncodeUpdate()), applied: false)
+                }
+                if e.length > 0 {
+                    ytext.removeRange(start: UInt32(e.location), length: UInt32(e.length), in: txn)
+                }
+                if !e.replacement.isEmpty {
+                    ytext.insert(e.replacement, at: UInt32(e.location), in: txn)
+                }
+                length += e.delta
+            }
+            return LocalEditResult(update: Data(txn.transactionEncodeUpdate()), applied: true)
         }
     }
 
-    /// Make the managed text equal `newText` with the smallest single
-    /// contiguous edit: the common prefix and suffix are kept, and only
-    /// the differing middle is removed and re-inserted (one `removeRange`
-    /// plus one `insert`, in a single transaction so observers see one
-    /// change event). Unchanged text produces no ops at all.
-    ///
-    /// Previously this deleted and re-inserted the whole body, which
-    /// tombstoned the entire document on every save and turned any
-    /// concurrent edit from another peer into a duplicate/clobber on
-    /// merge. A ranged edit keeps untouched regions' CRDT identity, so
-    /// concurrent edits in other regions merge cleanly. It is still a
-    /// coarse diff — one changed range per call — which the upcoming
-    /// sync-layer rewrite will replace with per-keystroke ops.
-    public func setText(_ newText: String) {
-        let doc = self.doc
+    /// Whole-text path (§3.2): diff `newText` against the **current**
+    /// replica text and apply the single ranged edit in the same
+    /// transaction. Never delete-all + insert-all (V6/V7).
+    @discardableResult
+    public func replaceText(with newText: String) -> (edit: TextEdit?, update: Data) {
+        noteLocalChange()
         let ytext = self.ytext
-        doc.transactSync { txn in
+        defer { attributeAddedItems() }
+        return doc.transactSync(origin: Self.editorOrigin) { txn in
             let current = ytext.getString(in: txn)
-            guard let edit = LumiCRDT.rangedEdit(from: current, to: newText) else { return }
-            if edit.deleteLength > 0 {
-                ytext.removeRange(start: UInt32(edit.start), length: UInt32(edit.deleteLength), in: txn)
+            guard let edit = TextDiff.edit(from: current, to: newText) else { return (nil, Data()) }
+            if edit.length > 0 {
+                ytext.removeRange(start: UInt32(edit.location), length: UInt32(edit.length), in: txn)
             }
-            if !edit.insert.isEmpty {
-                ytext.insert(edit.insert, at: UInt32(edit.start), in: txn)
+            if !edit.replacement.isEmpty {
+                ytext.insert(edit.replacement, at: UInt32(edit.location), in: txn)
             }
+            return (edit, Data(txn.transactionEncodeUpdate()))
         }
+    }
+
+    /// Legacy-note recovery (§2.2.5): insert the REST body into an empty,
+    /// synced replica. Explicit user action only. Returns nil when the
+    /// replica is not empty.
+    public func initialiseFromFile(_ body: String) -> Data? {
+        let ytext = self.ytext
+        return doc.transactSync(origin: Self.initOrigin) { txn -> Data? in
+            guard ytext.length(in: txn) == 0, !body.isEmpty else { return nil }
+            ytext.insert(body, at: 0, in: txn)
+            return Data(txn.transactionEncodeUpdate())
+        }
+    }
+
+    // MARK: - Undo (§8)
+
+    /// Close the current undo group: the next local edit starts a new
+    /// one. The editor calls this at every vim change boundary.
+    public func breakUndoGroup() {
+        groupOpen = false
+    }
+
+    public var canUndo: Bool { undoGroups.contains { $0 > 0 } }
+    public var canRedo: Bool { !redoGroups.isEmpty }
+
+    /// Undo this user's last change group as CRDT ops (never reverts a
+    /// peer's edit). Returns the editor edits + the update to send.
+    public func undo() -> ReplicaChange? {
+        while let last = undoGroups.last, last == 0 { undoGroups.removeLast() }
+        guard let items = undoGroups.popLast() else { return nil }
+        groupOpen = false
+        let change = runUndo(items: items) { try $0.undo() }
+        redoGroups.append(items)
+        return change
+    }
+
+    public func redo() -> ReplicaChange? {
+        guard let items = redoGroups.popLast() else { return nil }
+        groupOpen = false
+        let change = runUndo(items: items) { try $0.redo() }
+        undoGroups.append(items)
+        return change
+    }
+
+    private func runUndo(items: Int, _ step: (YUndoManager<UndoMeta>) throws -> Bool) -> ReplicaChange {
+        let before = stateVector()
+        collector.begin()
+        for _ in 0..<items {
+            _ = try? step(undoManager)
+        }
+        let edits = collector.end()
+        // A pure deletion does not advance the state vector; the diff
+        // still carries the full delete set, so peers receive it.
+        let update = (try? encodeDiff(againstStateVector: before)) ?? Data()
+        itemsAdded.value.withLock { $0 = 0 }
+        return ReplicaChange(edits: edits, update: update)
+    }
+
+    /// Bookkeeping before a local transaction: open a new undo group
+    /// (forcing yrs to start a new stack item) when the previous one was
+    /// closed.
+    private func noteLocalChange() {
+        itemsAdded.value.withLock { $0 = 0 }
+        if !groupOpen {
+            undoManager.wrap()
+            undoGroups.append(0)
+            redoGroups.removeAll()
+            groupOpen = true
+        }
+    }
+
+    /// After a local transaction committed: attribute the stack items it
+    /// created to the open group.
+    private func attributeAddedItems() {
+        let n = itemsAdded.value.withLock { v -> Int in
+            defer { v = 0 }
+            return v
+        }
+        guard n > 0, !undoGroups.isEmpty else { return }
+        undoGroups[undoGroups.count - 1] += n
+    }
+
+    private static func makeOrigin(_ name: String) -> Origin {
+        // yswift 0.2.1 keeps `Origin.init(String)` internal; `Origin` is
+        // Codable over its byte payload, so decode it from JSON.
+        let json = try! JSONSerialization.data(withJSONObject: ["origin": Array(name.utf8).map(Int.init)])
+        return try! JSONDecoder().decode(Origin.self, from: json)
     }
 }
 
-extension LumiCRDT {
-    /// `true` on platforms where the yrs binding is linked.
-    public static let isSupported = true
+/// Shared counter of yrs undo-stack items added (observer → replica).
+final class ItemCounter: Sendable {
+    let value = Mutex(0)
+}
 
-    /// Factory used by callers that must degrade gracefully on platforms
-    /// without the binding (visionOS). Always non-nil here.
-    public static func makeIfSupported(textName: String = "body") -> LumiCRDT? {
-        LumiCRDT(textName: textName)
+/// Opaque per-stack-item metadata required by yswift's generic undo
+/// manager. Unused.
+final class UndoMeta {}
+
+/// Collects the editor edits yrs reports while a remote apply / undo is
+/// running. The observer fires on yswift's transaction queue *while* the
+/// main actor is blocked in `transactSync` (or inside the undo call), so
+/// the lock is uncontended; it exists for the checker. Several
+/// transactions (multi-item undo) concatenate: sequential edit lists
+/// compose by concatenation.
+final class DeltaCollector: Sendable {
+    private struct State {
+        var capturing = false
+        var edits: [TextEdit] = []
+    }
+    private let state = Mutex(State())
+
+    func begin() {
+        state.withLock { $0 = State(capturing: true, edits: []) }
+    }
+
+    func end() -> [TextEdit] {
+        state.withLock { s in
+            let out = s.edits
+            s = State()
+            return out
+        }
+    }
+
+    /// yswift hands inserted chunks over JSON-encoded (`"\"x\""`):
+    /// decode the JSON string. Non-string embeds never occur in a
+    /// markdown Y.Text; they would decode to an empty insert.
+    static func decodeInsert(_ raw: String) -> String {
+        guard raw.hasPrefix("\"") else { return raw }
+        let data = Data(raw.utf8)
+        if let s = try? JSONDecoder().decode(String.self, from: data) { return s }
+        return raw
+    }
+
+    func record(_ changes: [YTextChange]) {
+        let deltas: [TextDelta] = changes.map { change in
+            switch change {
+            case let .inserted(value, _): return .insert(Self.decodeInsert(value))
+            case let .deleted(n): return .delete(Int(n))
+            case let .retained(n, _): return .retain(Int(n))
+            }
+        }
+        state.withLock { s in
+            guard s.capturing else { return }
+            s.edits += TextDelta.edits(from: deltas)
+        }
     }
 }
 
 #else
 
-/// Stub for platforms where yswift has no binary slice (visionOS). It can
-/// never be instantiated — `makeIfSupported()` returns nil — so every
-/// `LumiCRDT?` in the app stays nil and the save path falls back to the
-/// text-diff endpoint (`applyNoteDiff`), and live sync uses the
-/// snapshot's state vector. The API surface mirrors the real actor so
-/// call sites compile unchanged.
-public actor LumiCRDT {
+/// visionOS: yswift ships no visionOS slice. The type exists so call
+/// sites compile; `isSupported` is false and nothing constructs it —
+/// `NoteSyncSession` is unavailable and server notes use the REST
+/// 3-way `/diff {text, base_state}` path (`RemoteEditorState`).
+public final class LumiCRDT {
     public static let isSupported = false
-
-    public static func makeIfSupported(textName: String = "body") -> LumiCRDT? { nil }
-
-    public let textName: String
-
-    private init(textName: String) { self.textName = textName }
-
-    private static func unreachable() -> Never {
-        preconditionFailure("LumiCRDT is unavailable on this platform")
-    }
-
-    public func apply(update: Data) throws { Self.unreachable() }
-    public func stateVector() -> Data { Self.unreachable() }
-    public func encodeStateAsUpdate() -> Data { Self.unreachable() }
-    public func encodeDiff(againstStateVector remote: Data) throws -> Data { Self.unreachable() }
-    public func text() -> String { Self.unreachable() }
-    public func setText(_ newText: String) { Self.unreachable() }
+    public static let textName = "content"
+    private init() {}
 }
 
 #endif
-
-// MARK: - Ranged diff (platform-neutral, pure)
-
-extension LumiCRDT {
-    /// A single contiguous replacement, in UTF-16 code units — the
-    /// offset kind YSwift configures its documents with
-    /// (`OffsetKind::Utf16`), matching Yjs/JS string indexing.
-    struct RangedEdit: Equatable, Sendable {
-        /// UTF-16 offset where the edit starts.
-        var start: Int
-        /// UTF-16 code units to remove at `start`.
-        var deleteLength: Int
-        /// Text inserted at `start` after the removal.
-        var insert: String
-    }
-
-    /// Smallest single edit turning `old` into `new`: strip the common
-    /// prefix, then the common suffix (never overlapping the prefix), and
-    /// replace what's left. Comparison is by exact Unicode scalar — not
-    /// `Character`, whose `==` uses canonical equivalence and would treat
-    /// "é" and "e\u{301}" as equal even though their UTF-16 lengths
-    /// differ — so the range never splits a surrogate pair and the result
-    /// reproduces `new` exactly. Offsets are converted to UTF-16. Returns
-    /// nil when the strings are identical.
-    static func rangedEdit(from old: String, to new: String) -> RangedEdit? {
-        let a = Array(old.unicodeScalars)
-        let b = Array(new.unicodeScalars)
-        if a == b { return nil }
-        var prefix = 0
-        let maxPrefix = min(a.count, b.count)
-        while prefix < maxPrefix, a[prefix] == b[prefix] {
-            prefix += 1
-        }
-        var suffix = 0
-        let maxSuffix = min(a.count, b.count) - prefix
-        while suffix < maxSuffix, a[a.count - 1 - suffix] == b[b.count - 1 - suffix] {
-            suffix += 1
-        }
-        let start = a[0..<prefix].reduce(0) { $0 + $1.utf16.count }
-        let deleteLength = a[prefix..<(a.count - suffix)].reduce(0) { $0 + $1.utf16.count }
-        var insert = String.UnicodeScalarView()
-        insert.append(contentsOf: b[prefix..<(b.count - suffix)])
-        return RangedEdit(start: start, deleteLength: deleteLength, insert: String(insert))
-    }
-}
