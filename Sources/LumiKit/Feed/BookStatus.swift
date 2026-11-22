@@ -101,9 +101,9 @@ public let bookStatusErrorThreshold = 3
 /// Não ligado → Precisa entrar → Erro → Offline → Sincronizando →
 /// Somente leitura → Atualizado.
 ///
-/// `feed == .disabled` (server without `/api/events`) is not "Offline":
-/// the book degrades to REST-only and is judged by REST health, catch-up
-/// and the editor.
+/// `feed == .disabled` (server without `/api/events`) counts as Offline,
+/// matching the shared web/TUI case table (`bookstatus.cases.json`); the
+/// details popover explains the server lacks the feed.
 public func bookStatus(
     book: BookStatusBook,
     accountFeed: AccountFeedState?,
@@ -129,8 +129,8 @@ public func bookStatus(
 
     if case .network = restHealth { return .offline }
     switch accountFeed {
-    case .open, .disabled: break
-    case .none, .connecting, .backoff, .authDead: return .offline
+    case .open: break
+    case .none, .connecting, .backoff, .authDead, .disabled: return .offline
     }
 
     let behind = catchUp.head.map { $0 > catchUp.cursor } ?? false

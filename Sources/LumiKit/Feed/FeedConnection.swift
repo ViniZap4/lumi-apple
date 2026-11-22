@@ -10,7 +10,7 @@ public enum AccountFeedState: Sendable, Equatable {
     /// 401 or `session.ended`: stopped until the user signs in again.
     case authDead
     /// Server has no `/api/events` (pre-feed server). Re-probed slowly;
-    /// status degrades to REST-only instead of "Offline".
+    /// books show Offline (shared case table) with an explanation.
     case disabled
 
     public var isConnected: Bool { self == .open }
@@ -138,7 +138,9 @@ public actor FeedConnection {
                 attempt = 0
                 await pause(config.disabledRetry)
             case .reconnect(let afterMs):
+                // Planned server restart / max lifetime: "connecting", not a failure.
                 attempt = 0
+                emit(.state(.connecting))
                 await pause(.milliseconds(afterMs + config.reconnectJitterMs()))
             case .failed(let retryAfter, let gotHello):
                 if gotHello { attempt = 0 }
