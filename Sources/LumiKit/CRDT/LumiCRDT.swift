@@ -132,26 +132,30 @@ public actor LumiCRDT {
         }
     }
 
-    /// Replace the entire body. Used for "seed editor from a server
-    /// snapshot" flows where the prior CRDT history isn't preserved
-    /// — H.2 will replace this with a `apply(update:)` of the
-    /// server's encoded state so concurrent edits don't get wiped.
-    /// Kept here so H.1 callers can still drive the editor through
-    /// the actor.
+    /// Make the managed text equal `newText` with the smallest single
+    /// contiguous edit: the common prefix and suffix are kept, and only
+    /// the differing middle is removed and re-inserted (one `removeRange`
+    /// plus one `insert`, in a single transaction so observers see one
+    /// change event). Unchanged text produces no ops at all.
     ///
-    /// Removes the current text and inserts `newText` at offset 0.
-    /// Both ops happen in a single transaction so observers see
-    /// exactly one change event.
+    /// Previously this deleted and re-inserted the whole body, which
+    /// tombstoned the entire document on every save and turned any
+    /// concurrent edit from another peer into a duplicate/clobber on
+    /// merge. A ranged edit keeps untouched regions' CRDT identity, so
+    /// concurrent edits in other regions merge cleanly. It is still a
+    /// coarse diff — one changed range per call — which the upcoming
+    /// sync-layer rewrite will replace with per-keystroke ops.
     public func setText(_ newText: String) {
         let doc = self.doc
         let ytext = self.ytext
         doc.transactSync { txn in
-            let currentLen = ytext.length(in: txn)
-            if currentLen > 0 {
-                ytext.removeRange(start: 0, length: currentLen, in: txn)
+            let current = ytext.getString(in: txn)
+            guard let edit = LumiCRDT.rangedEdit(from: current, to: newText) else { return }
+            if edit.deleteLength > 0 {
+                ytext.removeRange(start: UInt32(edit.start), length: UInt32(edit.deleteLength), in: txn)
             }
-            if !newText.isEmpty {
-                ytext.insert(newText, at: 0, in: txn)
+            if !edit.insert.isEmpty {
+                ytext.insert(edit.insert, at: UInt32(edit.start), in: txn)
             }
         }
     }
@@ -198,3 +202,48 @@ public actor LumiCRDT {
 }
 
 #endif
+
+// MARK: - Ranged diff (platform-neutral, pure)
+
+extension LumiCRDT {
+    /// A single contiguous replacement, in UTF-16 code units — the
+    /// offset kind YSwift configures its documents with
+    /// (`OffsetKind::Utf16`), matching Yjs/JS string indexing.
+    struct RangedEdit: Equatable, Sendable {
+        /// UTF-16 offset where the edit starts.
+        var start: Int
+        /// UTF-16 code units to remove at `start`.
+        var deleteLength: Int
+        /// Text inserted at `start` after the removal.
+        var insert: String
+    }
+
+    /// Smallest single edit turning `old` into `new`: strip the common
+    /// prefix, then the common suffix (never overlapping the prefix), and
+    /// replace what's left. Comparison is by exact Unicode scalar — not
+    /// `Character`, whose `==` uses canonical equivalence and would treat
+    /// "é" and "e\u{301}" as equal even though their UTF-16 lengths
+    /// differ — so the range never splits a surrogate pair and the result
+    /// reproduces `new` exactly. Offsets are converted to UTF-16. Returns
+    /// nil when the strings are identical.
+    static func rangedEdit(from old: String, to new: String) -> RangedEdit? {
+        let a = Array(old.unicodeScalars)
+        let b = Array(new.unicodeScalars)
+        if a == b { return nil }
+        var prefix = 0
+        let maxPrefix = min(a.count, b.count)
+        while prefix < maxPrefix, a[prefix] == b[prefix] {
+            prefix += 1
+        }
+        var suffix = 0
+        let maxSuffix = min(a.count, b.count) - prefix
+        while suffix < maxSuffix, a[a.count - 1 - suffix] == b[b.count - 1 - suffix] {
+            suffix += 1
+        }
+        let start = a[0..<prefix].reduce(0) { $0 + $1.utf16.count }
+        let deleteLength = a[prefix..<(a.count - suffix)].reduce(0) { $0 + $1.utf16.count }
+        var insert = String.UnicodeScalarView()
+        insert.append(contentsOf: b[prefix..<(b.count - suffix)])
+        return RangedEdit(start: start, deleteLength: deleteLength, insert: String(insert))
+    }
+}
