@@ -66,7 +66,7 @@ public extension VaultRecord {
 /// Default ModelContainer factory. Apps and previews share this so the schema
 /// stays in one place.
 public enum VaultModelContainer {
-    public static let schema = Schema([VaultRecord.self])
+    public static let schema = Schema([VaultRecord.self, BookBookmark.self])
 
     @MainActor
     public static func make(inMemory: Bool = false) throws -> ModelContainer {

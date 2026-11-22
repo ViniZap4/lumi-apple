@@ -11,8 +11,9 @@ import Foundation
 ///
 ///   ~/.config/lumi/config.yaml   — TUI prefs only (editor, themes, …)
 ///   ~/.config/lumi/apple.yaml    — Apple client prefs only (this client)
-///   ~/.config/lumi/vaults.yaml   — shared vault registry (Apple writes; TUI
-///                                  Phase 5 will read)
+///   ~/.config/lumi/vaults.yaml   — legacy vault registry (read-only import
+///                                  source for books.yaml; left for old clients)
+///   ~/.config/lumi/books.yaml    — shared book registry (Apple + TUI)
 ///   ~/.config/lumi/servers.yaml  — shared server accounts (future; see SPEC)
 ///   ~/.config/lumi/themes/       — TUI custom themes (future Apple use)
 ///
@@ -26,6 +27,12 @@ public enum ConfigPaths {
 
     public static var apple: URL {
         directory.appendingPathComponent("apple.yaml", isDirectory: false)
+    }
+
+    /// Shared book registry (SPEC-LIVROS §2.3), byte-compatible with the TUI.
+    /// On iOS / visionOS this resolves inside the app container.
+    public static var books: URL {
+        directory.appendingPathComponent("books.yaml", isDirectory: false)
     }
 
     public static var vaults: URL {
