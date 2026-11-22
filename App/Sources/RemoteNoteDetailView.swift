@@ -527,18 +527,19 @@ struct RemoteNoteDetailView: View {
         let client = appState.authService.apiClient
         // Prefer the CRDT-aware commit path (Phase H slice 3) when an
         // open-note CRDT is live; fall back to the text-diff path if
-        // not (rare — would only happen if the store hasn't armed a
-        // CRDT yet, e.g. saveViaDiff fired before loadOpenNote finished).
+        // not (store hasn't armed a CRDT yet, or the platform has no
+        // yrs binding).
         let crdt = store.openNoteCRDT
+        // `beginSave` captures vault/note/text synchronously, so a
+        // caller (close()) may reset the editor right after this.
+        guard let save = editor.beginSave(via: client, crdt: crdt) else { return }
+        let vaultID = vault.id
         Task {
-            if let snapshot = await editor.saveViaDiff(via: client, crdt: crdt) {
-                // Mirror the post-merge snapshot into the store so future
-                // re-opens of this view don't refetch.
-                store.setOpenNoteSnapshot(snapshot)
-                // The list row's `updated_at` reflects the body change.
-                // The snapshot doesn't carry created_at / title, so we
-                // splice them onto the existing row in place.
-                store.bumpNoteUpdatedAt(noteID: snapshot.id, path: snapshot.path)
+            if let snapshot = await save.value {
+                // Mirror the post-merge snapshot into the store (only if
+                // the note is still open) and bump the list row's
+                // `updated_at`.
+                store.recordSavedSnapshot(snapshot, vaultID: vaultID)
             }
         }
     }
@@ -546,8 +547,8 @@ struct RemoteNoteDetailView: View {
     private func close() {
         // Auto-save dirty edits on back, matching the local-vault
         // `closeNote()` behavior. We don't block on completion — the user
-        // can return to the vault detail immediately; the PATCH completes
-        // in the background and a failure surfaces on the next open.
+        // can return to the vault detail immediately; the commit
+        // completes in the background.
         if appState.remoteEditor.isDirty, canEditNotes {
             requestSave()
         }

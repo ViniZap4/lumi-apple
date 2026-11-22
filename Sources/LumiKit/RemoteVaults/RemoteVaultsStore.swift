@@ -299,6 +299,19 @@ public final class RemoteVaultsStore {
         openNoteSnapshot = snapshot
     }
 
+    /// Fold the result of a successful editor save into the caches.
+    /// Safe to call after the note was closed or the user navigated
+    /// elsewhere (the close/Esc auto-save path): the open-note snapshot is
+    /// only replaced when that same note is still open in `vaultID`, and
+    /// the list row is only bumped when the listed vault is `vaultID`.
+    public func recordSavedSnapshot(_ snapshot: RemoteNoteSnapshot, vaultID: UUID) {
+        guard selectedVaultID == vaultID else { return }
+        if openNoteSnapshot?.id == snapshot.id {
+            openNoteSnapshot = snapshot
+        }
+        bumpNoteUpdatedAt(noteID: snapshot.id, path: snapshot.path)
+    }
+
     /// Clear the currently-open server note. UI calls this when the user
     /// navigates back to the vault detail view. Also tears down the WS
     /// sync subscription if one is active.

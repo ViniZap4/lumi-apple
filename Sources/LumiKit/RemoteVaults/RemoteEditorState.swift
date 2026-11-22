@@ -1,6 +1,5 @@
 import Foundation
 import Observation
-import LumiKit
 
 /// Tracks the open server-note's load/edit/save lifecycle. Sibling of the
 /// local-vault `EditorState`; same dirty / save-status shape, but commits
@@ -23,10 +22,13 @@ import LumiKit
 /// status carrying the server's text so the user can review and resave.
 /// The server currently treats `base_clock` as advisory; once it ships
 /// strict-conflict enforcement this plumbing activates automatically.
+///
+/// Lives in LumiKit (not the App target) so the save lifecycle is unit
+/// testable. Uses Observation only — no SwiftUI.
 @Observable
 @MainActor
-final class RemoteEditorState {
-    enum Status: Sendable, Equatable {
+public final class RemoteEditorState {
+    public enum Status: Sendable, Equatable {
         case idle
         case loaded
         case saving
@@ -39,27 +41,29 @@ final class RemoteEditorState {
         case conflict(serverText: String)
     }
 
-    private(set) var noteID: String?
-    private(set) var vaultID: UUID?
+    public private(set) var noteID: String?
+    public private(set) var vaultID: UUID?
     /// Vault-relative path as reported by the server. Useful for chrome
     /// (breadcrumbs) and for future "rename" support.
-    private(set) var path: String?
+    public private(set) var path: String?
 
     /// Base64-encoded lib0-v1 state vector. Carried back to the server as
     /// `base_clock` on the next diff. Advisory in server slice 2.2 but
     /// load-bearing once 4c's strict-conflict mode lands.
-    private(set) var vectorClock: String?
+    public private(set) var vectorClock: String?
 
-    var originalText: String = ""
-    var currentText: String = ""
+    public var originalText: String = ""
+    public var currentText: String = ""
 
-    private(set) var status: Status = .idle
+    public private(set) var status: Status = .idle
 
-    var isDirty: Bool { currentText != originalText }
+    public var isDirty: Bool { currentText != originalText }
+
+    public init() {}
 
     /// Seed the editor from a freshly-fetched snapshot. Replaces any
     /// prior state (text + clock), regardless of dirty.
-    func load(_ snapshot: RemoteNoteSnapshot, vaultID: UUID) {
+    public func load(_ snapshot: RemoteNoteSnapshot, vaultID: UUID) {
         self.noteID = snapshot.id
         self.vaultID = vaultID
         self.path = snapshot.path
@@ -72,7 +76,7 @@ final class RemoteEditorState {
     /// Seed the editor for a fresh-create case where no server snapshot
     /// exists yet (first save will happen with `base_clock` nil). The
     /// server's first applyDiff response populates `vectorClock`.
-    func loadFresh(vaultID: UUID, noteID: String, path: String) {
+    public func loadFresh(vaultID: UUID, noteID: String, path: String) {
         self.noteID = noteID
         self.vaultID = vaultID
         self.path = path
@@ -82,102 +86,155 @@ final class RemoteEditorState {
         self.status = .loaded
     }
 
-    /// CRDT-aware save: POSTs the current text + last-known clock to the
-    /// server's diff endpoint, receives the post-merge snapshot, and
-    /// accepts it as the new baseline (both `originalText` and
-    /// `currentText`). Returns the new snapshot on success so the caller
-    /// can refresh its `RemoteVaultsStore` caches.
-    ///
-    /// Accepting the merge into `currentText` means a concurrent edit
-    /// from another client lands on screen the moment the user saves —
-    /// not ideal UX, but the user's in-flight edits already round-tripped
-    /// to the server in this same call, and the CRDT merged them
-    /// non-destructively. Slice 4e (WS Yjs) will make concurrent edits
-    /// visible live so this doesn't surface as a jump-on-save.
-    @discardableResult
-    func saveViaDiff(via client: LumiAPIClient, crdt: LumiCRDT? = nil) async -> RemoteNoteSnapshot? {
+    /// Everything a commit needs, captured synchronously from the editor
+    /// at the moment the user asked to save. Holding this (instead of
+    /// re-reading editor properties after an `await`) is what lets a
+    /// close/Esc path call `reset()` right after kicking off the save.
+    public struct SaveRequest: Sendable, Equatable {
+        public let vaultID: UUID
+        public let noteID: String
+        public let text: String
+        public let baseClock: String?
+
+        public init(vaultID: UUID, noteID: String, text: String, baseClock: String?) {
+            self.vaultID = vaultID
+            self.noteID = noteID
+            self.text = text
+            self.baseClock = baseClock
+        }
+    }
+
+    /// Snapshot the current binding + text. nil when not bound to a note.
+    public func makeSaveRequest() -> SaveRequest? {
         guard let vaultID, let noteID else { return nil }
-        status = .saving
+        return SaveRequest(vaultID: vaultID, noteID: noteID, text: currentText, baseClock: vectorClock)
+    }
+
+    /// Capture-then-commit in one main-actor step. The request is
+    /// captured synchronously before this returns, so callers may
+    /// `reset()` / switch notes immediately afterwards without losing
+    /// the save (the bug where close/Esc spawned `Task { saveViaDiff }`
+    /// and then reset the editor, making the task's guard fail).
+    /// Returns nil when the editor isn't bound to a note.
+    @discardableResult
+    public func beginSave(
+        via client: LumiAPIClient,
+        crdt: LumiCRDT? = nil
+    ) -> Task<RemoteNoteSnapshot?, Never>? {
+        guard let request = makeSaveRequest() else { return nil }
+        return Task { @MainActor in
+            await self.commit(request, via: client, crdt: crdt)
+        }
+    }
+
+    /// Convenience: capture now and await the commit.
+    @discardableResult
+    public func saveViaDiff(via client: LumiAPIClient, crdt: LumiCRDT? = nil) async -> RemoteNoteSnapshot? {
+        guard let request = makeSaveRequest() else { return nil }
+        return await commit(request, via: client, crdt: crdt)
+    }
+
+    /// CRDT-aware commit of a captured `request`. With a `crdt`, encodes
+    /// the edit as a Yjs update locally and POSTs raw bytes; otherwise
+    /// POSTs the text + base clock and lets the server diff. Returns the
+    /// post-merge snapshot on success regardless of whether the editor is
+    /// still showing that note, so the caller can refresh caches.
+    ///
+    /// Editor state is only touched if the editor is still bound to the
+    /// request's (vault, note) when the response lands:
+    /// - the server's merged text becomes the new baseline
+    ///   (`originalText`, `vectorClock`, `path`);
+    /// - `currentText` adopts the merged text only if the user hasn't
+    ///   typed since the request was captured. Text typed during the
+    ///   round-trip is kept, and stays dirty against the new baseline.
+    @discardableResult
+    public func commit(
+        _ request: SaveRequest,
+        via client: LumiAPIClient,
+        crdt: LumiCRDT? = nil
+    ) async -> RemoteNoteSnapshot? {
+        if isBound(to: request) { status = .saving }
         do {
             let merged: RemoteNoteSnapshot
             if let crdt {
-                // Phase H slice 3: encode the user's edit as a Yjs update
-                // locally and POST raw bytes. The CRDT's pre-edit state
-                // vector captures "everything the server told us about";
+                // Phase H slice 3: the CRDT's pre-edit state vector
+                // captures "everything the server told us about";
                 // applying setText then encoding against that SV yields
                 // exactly the user's delta.
                 let svBefore = await crdt.stateVector()
-                await crdt.setText(currentText)
+                await crdt.setText(request.text)
                 let update = try await crdt.encodeDiff(againstStateVector: svBefore)
                 merged = try await client.applyNoteUpdate(
-                    vaultID: vaultID,
-                    noteID: noteID,
+                    vaultID: request.vaultID,
+                    noteID: request.noteID,
                     update: update,
                     origin: "apple-diff"
                 )
             } else {
                 merged = try await client.applyNoteDiff(
-                    vaultID: vaultID,
-                    noteID: noteID,
-                    baseClock: vectorClock,
-                    text: currentText,
+                    vaultID: request.vaultID,
+                    noteID: request.noteID,
+                    baseClock: request.baseClock,
+                    text: request.text,
                     origin: "apple-diff"
                 )
             }
-            // Accept the server's post-merge view as the new baseline.
-            // currentText is also overwritten — concurrent edits from
-            // another client land on screen the moment we save, but the
-            // user's edits already round-tripped non-destructively
-            // through the CRDT.
+            guard isBound(to: request) else { return merged }
             originalText = merged.text
-            currentText = merged.text
+            if currentText == request.text {
+                currentText = merged.text
+            }
             vectorClock = merged.vectorClock
             path = merged.path
             status = .saved(at: Date())
             return merged
         } catch let error as LumiAPIError {
+            guard isBound(to: request) else { return nil }
             // Strict-conflict: server rejected our diff because our
             // base_clock was stale. Refetch the latest snapshot, restore
             // the baseline from it, and *preserve* the user's currentText
-            // so their edits survive. The next save will diff against
-            // the fresh clock. Slice 4c.
+            // so their edits survive. Slice 4c.
             if error.isApplyDiffConflict {
-                await handleStrictConflict(via: client, vaultID: vaultID, noteID: noteID)
+                await handleStrictConflict(via: client, request: request)
                 return nil
             }
             status = .error(message: describe(error))
             return nil
         } catch {
+            guard isBound(to: request) else { return nil }
             status = .error(message: error.localizedDescription)
             return nil
         }
+    }
+
+    private func isBound(to request: SaveRequest) -> Bool {
+        isBound(toVaultID: request.vaultID, noteID: request.noteID)
     }
 
     /// Refetch the snapshot, install it as the new baseline, and leave
     /// `currentText` alone. Sets `status = .conflict(serverText:)`. If
     /// the refetch itself fails, fall back to a plain `.error` so the
     /// user at least sees something actionable.
-    private func handleStrictConflict(
-        via client: LumiAPIClient,
-        vaultID: UUID,
-        noteID: String
-    ) async {
+    private func handleStrictConflict(via client: LumiAPIClient, request: SaveRequest) async {
         do {
-            let fresh = try await client.getNoteSnapshot(vaultID: vaultID, noteID: noteID)
+            let fresh = try await client.getNoteSnapshot(vaultID: request.vaultID, noteID: request.noteID)
+            guard isBound(to: request) else { return }
             originalText = fresh.text
             vectorClock = fresh.vectorClock
             path = fresh.path
             // Intentionally leave currentText untouched.
             status = .conflict(serverText: fresh.text)
         } catch let error as LumiAPIError {
+            guard isBound(to: request) else { return }
             status = .error(message: describe(error))
         } catch {
+            guard isBound(to: request) else { return }
             status = .error(message: error.localizedDescription)
         }
     }
 
     /// Discard in-memory edits, restoring the loaded baseline.
-    func discard() {
+    public func discard() {
         currentText = originalText
         if case .error = status { status = .loaded }
         if case .conflict = status { status = .loaded }
@@ -185,7 +242,7 @@ final class RemoteEditorState {
 
     /// Drop all editor state. Call when the open note changes or the
     /// session is signed out.
-    func reset() {
+    public func reset() {
         noteID = nil
         vaultID = nil
         path = nil
@@ -198,7 +255,7 @@ final class RemoteEditorState {
     /// `true` when the editor is currently bound to the given (vault,
     /// noteID) pair. Used by the host to decide whether `load` is
     /// necessary or the existing state is already valid.
-    func isBound(toVaultID v: UUID, noteID n: String) -> Bool {
+    public func isBound(toVaultID v: UUID, noteID n: String) -> Bool {
         vaultID == v && noteID == n
     }
 
