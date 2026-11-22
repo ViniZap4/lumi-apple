@@ -22,12 +22,6 @@ final class LineNumberRulerView: NSRulerView {
         didSet { needsDisplay = true }
     }
 
-    /// Cached observers torn down on dealloc / clientView swap. Marked
-    /// `nonisolated(unsafe)` so the non-isolated `deinit` can release
-    /// the tokens. Observers are only mutated from the main actor
-    /// (in `attach(to:scrollView:)`).
-    nonisolated(unsafe) private var observers: [NSObjectProtocol] = []
-
     init(scrollView: NSScrollView, textView: NSTextView) {
         super.init(scrollView: scrollView, orientation: .verticalRuler)
         clientView = textView
@@ -39,45 +33,32 @@ final class LineNumberRulerView: NSRulerView {
         fatalError("init(coder:) not implemented")
     }
 
-    deinit {
-        // Notification observers retain `self`; release them before the
-        // ruler is deallocated.
-        for token in observers {
-            NotificationCenter.default.removeObserver(token)
-        }
-    }
-
+    /// Selector-based observers: the `@objc` handler inherits NSView's
+    /// main-actor isolation (all four notifications are posted on the
+    /// main thread by AppKit), and NotificationCenter drops selector
+    /// observers automatically when the ruler deallocates — so there's
+    /// no token array for a nonisolated `deinit` to touch and no
+    /// `@Sendable` block reaching into main-actor state.
     private func attach(to textView: NSTextView, scrollView: NSScrollView) {
         let center = NotificationCenter.default
+        let redraw = #selector(setNeedsRedraw(_:))
         // Selection changes — needed for current-line highlight and for
         // recalculating relative offsets without waiting for a SwiftUI
         // diff to run `updateNSView`.
-        observers.append(center.addObserver(
-            forName: NSTextView.didChangeSelectionNotification,
-            object: textView,
-            queue: .main
-        ) { [weak self] _ in self?.needsDisplay = true })
+        center.addObserver(self, selector: redraw, name: NSTextView.didChangeSelectionNotification, object: textView)
         // Any text change → recount lines.
-        observers.append(center.addObserver(
-            forName: NSText.didChangeNotification,
-            object: textView,
-            queue: .main
-        ) { [weak self] _ in self?.needsDisplay = true })
+        center.addObserver(self, selector: redraw, name: NSText.didChangeNotification, object: textView)
         // Scrolls inside the clip view shift our bounds; AppKit redraws
         // automatically on bounds change but only if posts are enabled.
         scrollView.contentView.postsBoundsChangedNotifications = true
-        observers.append(center.addObserver(
-            forName: NSView.boundsDidChangeNotification,
-            object: scrollView.contentView,
-            queue: .main
-        ) { [weak self] _ in self?.needsDisplay = true })
+        center.addObserver(self, selector: redraw, name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
         // Font size / wrap width changes alter every line's Y.
         textView.postsFrameChangedNotifications = true
-        observers.append(center.addObserver(
-            forName: NSView.frameDidChangeNotification,
-            object: textView,
-            queue: .main
-        ) { [weak self] _ in self?.needsDisplay = true })
+        center.addObserver(self, selector: redraw, name: NSView.frameDidChangeNotification, object: textView)
+    }
+
+    @objc private func setNeedsRedraw(_ note: Notification) {
+        needsDisplay = true
     }
 
     override func drawHashMarksAndLabels(in rect: NSRect) {

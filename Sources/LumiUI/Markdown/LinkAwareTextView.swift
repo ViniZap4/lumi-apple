@@ -69,6 +69,9 @@ public struct LinkAwareTextView: View {
     }
 
     public var body: some View {
+        // Resolved here, on the main actor, because the alignment-guide
+        // closure below is `@Sendable` and can't read view state.
+        let baselineFromTop = firstLineBaselineFromTop
         LinkAwareNSTextViewRepresentable(
             attributed: attributed,
             fontSize: fontSize,
@@ -104,7 +107,7 @@ public struct LinkAwareTextView: View {
         // `ListBlockView`'s row layout — aligns its marker glyph with
         // our first line.
         .alignmentGuide(.firstTextBaseline) { _ in
-            firstLineBaselineFromTop
+            baselineFromTop
         }
         // Publish the link's on-screen rect (in the reader's named
         // coordinate space) via a PreferenceKey. The tooltip itself

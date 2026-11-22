@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 /// `URLSessionWebSocketTask`-backed subscription to a lumi-server v2 note's
 /// live-sync channel (`WSS /api/vaults/:vault/notes/:id/sync`).
@@ -14,12 +15,13 @@ import Foundation
 /// because browsers cannot set custom headers on WebSocket upgrades. We
 /// use the same path everywhere — the token is appended to the URL.
 ///
-/// **Threading contract:** `start(stateVector:)` and `stop()` must be
-/// called from a single actor (typically `@MainActor` via the store).
-/// The detached read loop captures the `URLSessionWebSocketTask` by value
-/// and feeds events through the `AsyncStream` continuation (thread-safe
-/// per `AsyncStream.Continuation` docs).
-public final class NoteSyncClient: @unchecked Sendable {
+/// **Threading:** the only mutable state (the socket task and the receive
+/// loop task) lives in a `Mutex`, so `start`, `stop`, `send` and `deinit`
+/// are safe from any isolation domain and the type is checked `Sendable`
+/// (no `@unchecked`). The detached read loop captures the
+/// `URLSessionWebSocketTask` by value and feeds events through the
+/// `AsyncStream` continuation (thread-safe per its docs).
+public final class NoteSyncClient: Sendable {
     /// Event surface delivered via the `events` AsyncStream.
     public enum Event: Sendable, Equatable {
         /// WebSocket handshake succeeded; we're subscribed and SyncStep1
@@ -75,11 +77,14 @@ public final class NoteSyncClient: @unchecked Sendable {
     private let continuation: AsyncStream<Event>.Continuation
     public let events: AsyncStream<Event>
 
-    /// Mutable state — owned by the calling actor (start/stop contract).
-    /// Reads from inside the detached receive loop are avoided by
-    /// capturing the task into the Task closure on creation.
-    private var task: URLSessionWebSocketTask?
-    private var receiveTask: Task<Void, Never>?
+    /// Connection state. Guarded by `connection`; the detached receive
+    /// loop never reads it (it captures the socket task on creation).
+    private struct Connection {
+        var task: URLSessionWebSocketTask?
+        var receiveTask: Task<Void, Never>?
+    }
+
+    private let connection = Mutex(Connection())
 
     public init(
         baseURL: URL,
@@ -103,8 +108,10 @@ public final class NoteSyncClient: @unchecked Sendable {
     }
 
     deinit {
-        receiveTask?.cancel()
-        task?.cancel(with: .normalClosure, reason: nil)
+        connection.withLock { c in
+            c.receiveTask?.cancel()
+            c.task?.cancel(with: .normalClosure, reason: nil)
+        }
         continuation.finish()
     }
 
@@ -143,32 +150,37 @@ public final class NoteSyncClient: @unchecked Sendable {
     /// (pass empty Data if unknown — the server will reply with the full
     /// state on Step2).
     public func start(stateVector: Data) {
-        guard task == nil else { return }
-        guard let url = wsURL() else {
-            continuation.yield(.closed(reason: "invalid server URL"))
-            return
-        }
-        let req = URLRequest(url: url)
-        let newTask = session.webSocketTask(with: req)
-        task = newTask
-        newTask.resume()
-
-        let step1 = YProtocol.encodeSyncStep1(stateVector: stateVector)
+        let url = wsURL()
+        let session = self.session
         let cont = continuation
-        newTask.send(.data(step1)) { err in
-            if let err {
-                cont.yield(.closed(reason: "send step1: \(err.localizedDescription)"))
-            } else {
-                cont.yield(.opened)
-            }
-        }
-
-        // Capture task + continuation by value so the detached loop never
-        // touches `self` — no actor-isolation question, no race against
-        // a concurrent `stop()` that nils them on the calling actor.
         let myAttempt = attempt
-        receiveTask = Task.detached { [newTask, cont, myAttempt] in
-            await Self.runReceiveLoop(task: newTask, continuation: cont, attempt: myAttempt)
+        // Check-and-set under the lock so concurrent `start`/`stop` calls
+        // can't open two sockets or leak a receive loop.
+        let invalidURL: Bool = connection.withLock { c in
+            guard c.task == nil else { return false }
+            guard let url else { return true }
+            let newTask = session.webSocketTask(with: URLRequest(url: url))
+            c.task = newTask
+            newTask.resume()
+
+            let step1 = YProtocol.encodeSyncStep1(stateVector: stateVector)
+            newTask.send(.data(step1)) { err in
+                if let err {
+                    cont.yield(.closed(reason: "send step1: \(err.localizedDescription)"))
+                } else {
+                    cont.yield(.opened)
+                }
+            }
+
+            // Capture task + continuation by value so the detached loop
+            // never touches `self`.
+            c.receiveTask = Task.detached { [newTask, cont, myAttempt] in
+                await Self.runReceiveLoop(task: newTask, continuation: cont, attempt: myAttempt)
+            }
+            return false
+        }
+        if invalidURL {
+            continuation.yield(.closed(reason: "invalid server URL"))
         }
     }
 
@@ -178,7 +190,7 @@ public final class NoteSyncClient: @unchecked Sendable {
     /// in lumi we send JSON-encoded `PresenceState`. No-op when the
     /// connection isn't open. Phase H slice 4.
     public func send(awareness payload: Data) {
-        guard let task else { return }
+        guard let task = connection.withLock({ $0.task }) else { return }
         let frame = YProtocol.encodeAwareness(payload)
         task.send(.data(frame)) { _ in
             // Best-effort. A failure here is the same shape as any other
@@ -187,14 +199,15 @@ public final class NoteSyncClient: @unchecked Sendable {
         }
     }
 
-    /// Tear down the connection. Idempotent. Caller must invoke from the
-    /// same actor as `start()` (no internal serialization).
+    /// Tear down the connection. Idempotent and safe from any actor.
     public func stop() {
-        receiveTask?.cancel()
-        receiveTask = nil
-        // 1000 = normal closure
-        task?.cancel(with: .normalClosure, reason: nil)
-        task = nil
+        connection.withLock { c in
+            c.receiveTask?.cancel()
+            c.receiveTask = nil
+            // 1000 = normal closure
+            c.task?.cancel(with: .normalClosure, reason: nil)
+            c.task = nil
+        }
     }
 
     // MARK: - Receive loop
