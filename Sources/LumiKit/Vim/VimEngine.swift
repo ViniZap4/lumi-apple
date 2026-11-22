@@ -76,6 +76,13 @@ public enum VimEngine {
         }
     }
 
+    /// True when no command is in flight in normal mode (no count,
+    /// operator, register, mark, find…). Hosts use it to know when a
+    /// key like `u` is a complete command.
+    public static func isIdleNormal(_ state: VimState) -> Bool {
+        isFreshNormal(state)
+    }
+
     private static func isFreshNormal(_ state: VimState) -> Bool {
         state.mode == .normal &&
             state.pendingOperator == nil &&
@@ -149,6 +156,9 @@ public enum VimEngine {
             // outside command-line, so these shouldn't fire here in practice;
             // ignore defensively if they do.
             return Result(state: state, buffer: buffer)
+
+        case let .arrow(direction):
+            return handleNormalCharacter(direction.motionCharacter, state: state, buffer: buffer)
 
         case let .character(char):
             return handleNormalCharacter(char, state: state, buffer: buffer)
@@ -539,6 +549,10 @@ public enum VimEngine {
             return finalizeMacroRecording(state: state, buffer: buffer)
         }
 
+        if case let .arrow(direction) = input {
+            return handleVisual(input: .character(direction.motionCharacter), state: state, buffer: buffer)
+        }
+
         switch input {
         case .escape:
             state.mode = .normal
@@ -556,7 +570,7 @@ public enum VimEngine {
             state.pendingCount = nil
             return clamp(state: state, buffer: buffer)
 
-        case .tab, .controlR, .controlD, .controlU, .historyPrev, .historyNext:
+        case .tab, .controlR, .controlD, .controlU, .historyPrev, .historyNext, .arrow:
             return Result(state: state, buffer: buffer)
 
         case let .character(char):
@@ -1139,6 +1153,15 @@ public enum VimEngine {
         case .historyNext:
             return walkHistory(forward: true, prefix: prefix, currentBuffer: currentBuffer, state: state, buffer: buffer)
 
+        case .arrow(.up):
+            return walkHistory(forward: false, prefix: prefix, currentBuffer: currentBuffer, state: state, buffer: buffer)
+
+        case .arrow(.down):
+            return walkHistory(forward: true, prefix: prefix, currentBuffer: currentBuffer, state: state, buffer: buffer)
+
+        case .arrow(.left), .arrow(.right):
+            return Result(state: state, buffer: buffer)
+
         case let .character(char):
             var newBuffer = currentBuffer
             newBuffer.append(char)
@@ -1498,6 +1521,22 @@ public enum VimEngine {
 
         case .historyPrev, .historyNext:
             state.insertModeLastWasJ = false
+            return Result(state: state, buffer: buffer)
+
+        case let .arrow(direction):
+            state.insertModeLastWasJ = false
+            let line = buffer.cursorLine
+            switch direction {
+            case .left:
+                if buffer.cursor > buffer.lineStart(of: line) { buffer.cursor -= 1 }
+            case .right:
+                if buffer.cursor < buffer.lineEnd(of: line) { buffer.cursor += 1 }
+            case .up, .down:
+                let target = direction == .up ? line - 1 : line + 1
+                guard target >= 0, target < buffer.lineCount else { break }
+                let column = buffer.cursor - buffer.lineStart(of: line)
+                buffer.cursor = buffer.lineStart(of: target) + min(column, buffer.lineLength(of: target))
+            }
             return Result(state: state, buffer: buffer)
         }
     }

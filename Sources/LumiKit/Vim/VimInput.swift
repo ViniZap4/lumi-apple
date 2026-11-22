@@ -39,4 +39,24 @@ public enum VimInput: Sendable, Hashable {
     /// Down arrow while in command-line mode — step toward newer entries
     /// (eventually restoring the user's typed draft).
     case historyNext
+
+    /// An arrow key. Normal/visual: the `h`/`j`/`k`/`l` motion. Insert:
+    /// moves the cursor without typing (previously the bridge turned
+    /// arrows into literal `hjkl`, which *typed* them in insert mode).
+    /// Command-line: up/down walk history.
+    case arrow(ArrowDirection)
+}
+
+public enum ArrowDirection: Sendable, Hashable {
+    case left, right, up, down
+
+    /// The equivalent normal-mode motion key.
+    public var motionCharacter: Character {
+        switch self {
+        case .left: return "h"
+        case .right: return "l"
+        case .up: return "k"
+        case .down: return "j"
+        }
+    }
 }
