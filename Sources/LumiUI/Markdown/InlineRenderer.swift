@@ -5,6 +5,30 @@ import LumiKit
 /// `Text`. SwiftUI handles tap-to-open for `.link` attributes natively, so
 /// link click handling is free.
 public enum InlineRenderer {
+    /// Memoised `render`. SwiftUI re-evaluates `body` far more often than
+    /// the inline tree changes; building an `AttributedString` each time
+    /// was measurable on long previews. Keyed by tree + theme, bounded.
+    @MainActor
+    public static func cachedRender(_ nodes: [InlineNode], theme: ThemeTokens) -> AttributedString {
+        let key = RenderKey(nodes: nodes, theme: theme)
+        if let hit = renderCache[key] { return hit }
+        let made = render(nodes, theme: theme)
+        if renderCache.count >= renderCacheCapacity { renderCache.removeAll(keepingCapacity: true) }
+        renderCache[key] = made
+        return made
+    }
+
+    private struct RenderKey: Hashable {
+        let nodes: [InlineNode]
+        let theme: ThemeTokens
+    }
+
+    @MainActor private static var renderCache: [RenderKey: AttributedString] = [:]
+    private static let renderCacheCapacity = 2_048
+
+    @MainActor static var cachedRenderCount: Int { renderCache.count }
+    @MainActor static func clearRenderCache() { renderCache.removeAll() }
+
     public static func render(_ nodes: [InlineNode], theme: ThemeTokens) -> AttributedString {
         var out = AttributedString()
         for node in nodes {

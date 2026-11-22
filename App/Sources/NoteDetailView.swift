@@ -302,34 +302,23 @@ private struct MountFader<Content: View>: View {
     }
 }
 
-/// macOS-focused scroll container that supports `j` / `k` keyboard scrolling
-/// when the host enables it via preferences. iOS falls back to a plain
-/// ScrollView with no key intercept (tap/drag/scroll wheel still work
-/// everywhere).
-///
-/// Key handling lives at the SwiftUI level (`.onKeyPress`) — earlier
-/// attempts to intercept inside `NSScrollView.keyDown` failed because the
-/// hosted SwiftUI subtree grabs first-responder for itself, so the scroll
-/// view never sees the key event. Going through SwiftUI's focus model
-/// works regardless.
+/// Read-mode container. `MarkdownReader` is its own (TextKit) scroll
+/// view, so this no longer wraps it in another one; it just hands the
+/// reader's scroll view to the keyboard scroll coordinator (macOS
+/// `ReadKeyMonitor` → `ReadModeCoordinator`) and, on iOS / visionOS,
+/// tells the reader whether hardware-keyboard j/k scrolling is enabled.
 struct ReadModeScroll<Content: View>: View {
     let jkEnabled: Bool
     @ViewBuilder let content: () -> Content
     @Environment(AppState.self) private var appState
 
     var body: some View {
-        #if os(macOS)
-        // The scroll coordinator lives on AppState so the App-init
-        // NSEvent monitor (registered before SwiftUI builds its
-        // sidebar / list typeahead monitors) has a stable handle to
-        // call into. Without that, SwiftUI's own keyDown monitor for
-        // List typeahead would fire first when the sidebar held
-        // focus, beep on "no matching item", and only then yield to
-        // our monitor.
-        NativeScrollHost(coordinator: appState.readCoordinator, content: content)
-        #else
-        ScrollView { content() }
-        #endif
+        let coordinator = appState.readCoordinator
+        content()
+            .environment(\.markdownScrollViewSink, MarkdownScrollViewSink { scrollView in
+                coordinator.attach(scrollView: scrollView)
+            })
+            .environment(\.markdownKeyboardScrolling, jkEnabled)
     }
 }
 
@@ -559,6 +548,14 @@ struct NativeScrollHost<Content: View>: NSViewRepresentable {
 
     func makeCoordinator() -> ReadModeCoordinator { coordinator }
 
+    /// An `NSHostingController` is a fresh SwiftUI root that inherits no
+    /// environment from this representable, so forward the values the
+    /// hosted markdown reads — without this the preview pane rendered
+    /// light themes with the default dark tokens.
+    private func hostedRoot(_ context: Context) -> AnyView {
+        AnyView(content().environment(\.theme, context.environment.theme))
+    }
+
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
@@ -579,7 +576,7 @@ struct NativeScrollHost<Content: View>: NSViewRepresentable {
         scroll.automaticallyAdjustsContentInsets = false
         scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
 
-        let host = NSHostingController(rootView: AnyView(content()))
+        let host = NSHostingController(rootView: hostedRoot(context))
         host.view.translatesAutoresizingMaskIntoConstraints = false
         context.coordinator.host = host
         context.coordinator.scrollView = scroll
@@ -616,7 +613,7 @@ struct NativeScrollHost<Content: View>: NSViewRepresentable {
         // `self.coordinator` directly which, when body re-runs, is a
         // fresh unwired Coordinator that hasn't been bound to any
         // hosting controller.
-        context.coordinator.host?.rootView = AnyView(content())
+        context.coordinator.host?.rootView = hostedRoot(context)
         // Document height may have changed (different note, font scale,
         // width). Re-anchor the velocity target on the current offset so
         // a stale target doesn't fling us past the new content bounds.
@@ -632,6 +629,27 @@ struct NativeScrollHost<Content: View>: NSViewRepresentable {
 final class ReadModeCoordinator {
         var host: NSHostingController<AnyView>?
         weak var scrollView: NSScrollView?
+        private weak var observedScrollView: NSScrollView?
+        private var liveScrollObserver: NSObjectProtocol?
+
+        /// Adopt a scroll view owned by someone else (the TextKit read
+        /// pane). Idempotent per scroll view; native trackpad / wheel
+        /// scrolling still cancels the keyboard glide like it does for
+        /// `NativeScrollHost`.
+        func attach(scrollView newScrollView: NSScrollView) {
+            scrollView = newScrollView
+            targetY = newScrollView.contentView.bounds.origin.y
+            guard observedScrollView !== newScrollView else { return }
+            if let liveScrollObserver { NotificationCenter.default.removeObserver(liveScrollObserver) }
+            observedScrollView = newScrollView
+            liveScrollObserver = NotificationCenter.default.addObserver(
+                forName: NSScrollView.willStartLiveScrollNotification,
+                object: newScrollView,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.stopTickerForExternalScroll() }
+            }
+        }
 
         /// Where we want to be (vertical offset of the clip view's origin).
         /// `glide` adds to this; `tick` slides the actual offset toward it.
@@ -807,6 +825,7 @@ struct NativeScrollHost<Content: View>: View {
 final class ReadModeCoordinator {
     enum Edge { case top, bottom }
 
+    func attach(scrollView: UIScrollView) {}
     func scroll(by dy: CGFloat, animated: Bool = true) {}
     func glide(by dy: CGFloat) {}
     func syncTargetWithCurrent() {}
