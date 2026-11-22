@@ -26,7 +26,16 @@ let package = Package(
             name: "LumiKit",
             dependencies: [
                 .product(name: "Markdown", package: "swift-markdown"),
-                .product(name: "YSwift", package: "yswift")
+                // yswift's prebuilt yniffiFFI.xcframework ships only
+                // ios / ios-simulator / macos slices — no visionOS. Link
+                // it only where a slice exists; LumiCRDT compiles to an
+                // unavailable stub elsewhere (see LumiCRDT.isSupported)
+                // and callers fall back to the text-diff save path.
+                .product(
+                    name: "YSwift",
+                    package: "yswift",
+                    condition: .when(platforms: [.macOS, .iOS, .macCatalyst])
+                )
             ],
             path: "Sources/LumiKit"
         ),

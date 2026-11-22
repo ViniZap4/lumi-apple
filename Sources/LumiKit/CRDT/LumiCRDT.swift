@@ -1,4 +1,6 @@
 import Foundation
+
+#if canImport(YSwift)
 @preconcurrency import YSwift
 
 /// Actor wrapper around a single Yjs document for the Apple client's
@@ -154,3 +156,45 @@ public actor LumiCRDT {
         }
     }
 }
+
+extension LumiCRDT {
+    /// `true` on platforms where the yrs binding is linked.
+    public static let isSupported = true
+
+    /// Factory used by callers that must degrade gracefully on platforms
+    /// without the binding (visionOS). Always non-nil here.
+    public static func makeIfSupported(textName: String = "body") -> LumiCRDT? {
+        LumiCRDT(textName: textName)
+    }
+}
+
+#else
+
+/// Stub for platforms where yswift has no binary slice (visionOS). It can
+/// never be instantiated — `makeIfSupported()` returns nil — so every
+/// `LumiCRDT?` in the app stays nil and the save path falls back to the
+/// text-diff endpoint (`applyNoteDiff`), and live sync uses the
+/// snapshot's state vector. The API surface mirrors the real actor so
+/// call sites compile unchanged.
+public actor LumiCRDT {
+    public static let isSupported = false
+
+    public static func makeIfSupported(textName: String = "body") -> LumiCRDT? { nil }
+
+    public let textName: String
+
+    private init(textName: String) { self.textName = textName }
+
+    private static func unreachable() -> Never {
+        preconditionFailure("LumiCRDT is unavailable on this platform")
+    }
+
+    public func apply(update: Data) throws { Self.unreachable() }
+    public func stateVector() -> Data { Self.unreachable() }
+    public func encodeStateAsUpdate() -> Data { Self.unreachable() }
+    public func encodeDiff(againstStateVector remote: Data) throws -> Data { Self.unreachable() }
+    public func text() -> String { Self.unreachable() }
+    public func setText(_ newText: String) { Self.unreachable() }
+}
+
+#endif

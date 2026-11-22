@@ -273,7 +273,11 @@ struct VimTextViewBridge: UIViewRepresentable {
         }
         textView.commandLineBar = cmdBar
 
+        // visionOS has no soft-keyboard accessory views
+        // (`inputAccessoryView` is unavailable there).
+        #if !os(visionOS)
         textView.inputAccessoryView = bar
+        #endif
         return textView
     }
 
@@ -302,15 +306,19 @@ struct VimTextViewBridge: UIViewRepresentable {
         if case let .commandLine(prefix, buffer) = controller.state.mode {
             view.commandLineBar?.prefix = prefix
             view.commandLineBar?.buffer = buffer
+            #if !os(visionOS)
             if view.inputAccessoryView !== view.commandLineBar {
                 view.inputAccessoryView = view.commandLineBar
                 view.reloadInputViews()
             }
+            #endif
         } else {
+            #if !os(visionOS)
             if view.inputAccessoryView !== view.accessoryBar {
                 view.inputAccessoryView = view.accessoryBar
                 view.reloadInputViews()
             }
+            #endif
         }
     }
 }

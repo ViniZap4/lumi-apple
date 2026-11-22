@@ -278,7 +278,9 @@ public final class RemoteVaultsStore {
             // openNoteLiveText stays nil until the first apply lands —
             // the host falls back to snapshot.text for the initial
             // render.
-            openNoteCRDT = LumiCRDT()
+            // nil on platforms without the yrs binding (visionOS):
+            // saves then use the text-diff endpoint instead.
+            openNoteCRDT = LumiCRDT.makeIfSupported()
             openNoteLiveText = nil
         } catch {
             openNoteSnapshot = nil
