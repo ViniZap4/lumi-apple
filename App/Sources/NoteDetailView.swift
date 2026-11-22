@@ -780,6 +780,36 @@ final class ReadModeCoordinator {
         glide(by: target - current)
     }
 }
+#else
+
+/// Non-macOS stand-in for the AppKit `NativeScrollHost`: a plain SwiftUI
+/// `ScrollView`. The keyboard-driven glide/scroll API of
+/// `ReadModeCoordinator` has no consumer on iOS/visionOS (there is no
+/// `ReadKeyMonitor` there — touch / hardware-keyboard scrolling is the
+/// system's), so the coordinator below is a no-op that only exists so
+/// shared call sites (`AppState.readCoordinator`, the tree preview pane)
+/// compile unguarded.
+struct NativeScrollHost<Content: View>: View {
+    let coordinator: ReadModeCoordinator
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        ScrollView { content() }
+    }
+}
+
+@MainActor
+final class ReadModeCoordinator {
+    enum Edge { case top, bottom }
+
+    func scroll(by dy: CGFloat, animated: Bool = true) {}
+    func glide(by dy: CGFloat) {}
+    func syncTargetWithCurrent() {}
+    func stopTickerForExternalScroll() {}
+    func scrollHalfPage(direction sign: CGFloat) {}
+    func scrollFullPage(direction sign: CGFloat) {}
+    func scrollTo(_ edge: Edge) {}
+}
 #endif
 
 private struct VimModeBadge: View {

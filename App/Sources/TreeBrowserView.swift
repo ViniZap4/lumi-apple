@@ -351,8 +351,12 @@ struct TreeBrowserView: View {
             appState.setSession(nil)
         }
     }
+    #endif
 
     // MARK: - File operations
+    //
+    // Cross-platform: the sheet / alerts that call these are attached to
+    // `body` unconditionally. Only the keyboard driver above is macOS-only.
 
     private func itemURL(_ item: FolderNode.Item) -> URL {
         switch item {
@@ -446,7 +450,6 @@ struct TreeBrowserView: View {
         case .note(let n): return n.url.standardizedFileURL == url.standardizedFileURL
         }
     }
-    #endif
 }
 
 // MARK: - Column container
