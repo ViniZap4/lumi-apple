@@ -1,5 +1,6 @@
 import SwiftUI
 import LumiKit
+import LumiUI
 
 /// Read-only overview of a server-hosted vault: name + slug, member list with
 /// roles, role list with capabilities, invite management for users with

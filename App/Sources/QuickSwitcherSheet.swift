@@ -1,5 +1,6 @@
 import SwiftUI
 import LumiKit
+import LumiUI
 
 /// Floating note picker (⌘O). Two surfaces in one view:
 ///

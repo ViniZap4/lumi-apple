@@ -1,5 +1,6 @@
 import SwiftUI
 import LumiKit
+import LumiUI
 
 /// Modal form for SPEC-V3 "share a copy": forks the vault's current state
 /// into a brand-new vault owned by another user on the same server. The

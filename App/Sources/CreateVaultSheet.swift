@@ -1,5 +1,6 @@
 import SwiftUI
 import LumiKit
+import LumiUI
 
 /// Modal for creating a new server-side vault. Caller becomes the vault's
 /// Admin. Name is required; slug is optional — when omitted the server

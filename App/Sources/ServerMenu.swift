@@ -1,5 +1,6 @@
 import SwiftUI
 import LumiKit
+import LumiUI
 
 /// Toolbar entry point for server sign-in. When signed out, opens a sheet
 /// with the sign-in form. When signed in, shows a menu with the current user

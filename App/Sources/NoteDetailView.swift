@@ -654,7 +654,11 @@ final class ReadModeCoordinator {
                     ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
                     clip.animator().setBoundsOrigin(NSPoint(x: current.x, y: nextY))
                 } completionHandler: { [weak view] in
-                    view?.reflectScrolledClipView(clip)
+                    // AppKit runs the completion handler on the main
+                    // thread; assert that rather than hopping.
+                    MainActor.assumeIsolated {
+                        view?.reflectScrolledClipView(clip)
+                    }
                 }
             } else {
                 clip.setBoundsOrigin(NSPoint(x: current.x, y: nextY))
@@ -685,11 +689,12 @@ final class ReadModeCoordinator {
 
         private func startTickerIfNeeded() {
             guard ticker == nil else { return }
-            // Timer callback is non-sendable; bounce onto the main actor
-            // before touching coordinator state. Capture `self` weakly so
-            // a dropped view tears the loop down.
-            let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { _ in
-                Task { @MainActor [weak self] in
+            // The timer is scheduled on RunLoop.main, so its callback runs
+            // on the main thread: assert main-actor isolation instead of
+            // hopping through a Task (which added a frame of latency).
+            // Capture `self` weakly so a dropped view tears the loop down.
+            let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
                     self?.tick()
                 }
             }

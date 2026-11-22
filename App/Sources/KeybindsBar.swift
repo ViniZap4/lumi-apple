@@ -1,5 +1,6 @@
 import SwiftUI
 import LumiKit
+import LumiUI
 
 /// Contextual key-hint strip pinned at the bottom of the window — same
 /// idea as TUI's status bar / web's footer. Lists the full set of

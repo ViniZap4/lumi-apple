@@ -1,5 +1,6 @@
 import SwiftUI
 import LumiKit
+import LumiUI
 
 /// Modal for creating a new note in a server-hosted vault. Title is the only
 /// required field — the server slugifies it to derive the note id, and the

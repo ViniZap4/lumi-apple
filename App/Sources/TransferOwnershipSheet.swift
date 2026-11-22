@@ -1,5 +1,6 @@
 import SwiftUI
 import LumiKit
+import LumiUI
 
 /// Modal form for handing a vault to another member (SPEC-V3 ownership).
 /// Owner-only — the caller gates presentation on `isOwner`; the server

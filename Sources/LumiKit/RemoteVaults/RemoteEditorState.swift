@@ -224,12 +224,10 @@ public final class RemoteEditorState {
             path = fresh.path
             // Intentionally leave currentText untouched.
             status = .conflict(serverText: fresh.text)
-        } catch let error as LumiAPIError {
+        } catch {
+            // `getNoteSnapshot` throws typed `LumiAPIError`.
             guard isBound(to: request) else { return }
             status = .error(message: describe(error))
-        } catch {
-            guard isBound(to: request) else { return }
-            status = .error(message: error.localizedDescription)
         }
     }
 
