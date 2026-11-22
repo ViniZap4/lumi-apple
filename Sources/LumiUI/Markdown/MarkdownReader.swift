@@ -1,9 +1,12 @@
 import SwiftUI
 import LumiKit
 
-/// The reading-pane wrapper used to display a parsed markdown document with
-/// title, tags, comfortable measure, stagger cascade, link tooltips, and a
-/// yank-flash overlay. Lives in LumiUI so both the local-vault
+/// The reading pane: parses the note (off the main actor, cached by
+/// mtime) and renders title, tags and body through one TextKit 2
+/// document view with a centred reading column, themed link tooltips,
+/// cross-paragraph selection and a yank-flash overlay. The reader is
+/// its own scroll view; hosts that drive keyboard scrolling receive it
+/// through `\.markdownScrollViewSink`. Lives in LumiUI so both the local-vault
 /// `NoteDetailView` and the server-vault `RemoteNoteDetailView` render
 /// through the same pipeline.
 ///
@@ -37,6 +40,9 @@ public struct MarkdownReader: View {
 
     public let scale: Double
     public let fontFamily: MarkdownFontFamily
+    /// Kept for API compatibility. The TextKit reader renders the note
+    /// as one text flow, so there is no per-block stagger; hosts animate
+    /// note switches themselves (`NoteDetailView`'s `.transition`).
     public let contentAnimations: Bool
     public let readingWidth: CGFloat
 
@@ -87,68 +93,25 @@ public struct MarkdownReader: View {
         self.yankFlashTrigger = yankFlashTrigger
     }
 
+    private var style: MarkdownRenderStyle {
+        MarkdownRenderStyle(theme: theme, scale: scale, fontFamily: fontFamily)
+    }
+
     public var body: some View {
-        VStack(alignment: .leading, spacing: 22 * scale) {
-            StaggeredBlock(index: 0) {
-                VStack(alignment: .leading, spacing: 10 * scale) {
-                    Text(title)
-                        .font(.system(size: 34 * scale, weight: .bold, design: .default))
-                        .foregroundStyle(theme.primary)
-                        .lineSpacing(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if !tags.isEmpty {
-                        HStack(spacing: 6) {
-                            ForEach(tags, id: \.self) { tag in
-                                MarkdownReaderTagChip(tag: tag)
-                            }
-                        }
-                    }
-                }
-                .padding(.bottom, 4)
-            }
-
-            StaggeredBlock(index: 1) {
-                Rectangle()
-                    .fill(theme.border)
-                    .frame(height: 0.5)
-                    .padding(.bottom, 2)
-            }
-
-            if let parsed {
-                // Auto-disable stagger when block count exceeds the threshold —
-                // continuous fire-on-materialise during scroll is both visually
-                // noisy and expensive on large docs.
-                let useStagger = contentAnimations
-                    && parsed.blocks.count <= largeMarkdownBlockThreshold
-                MarkdownView(parsed, indexOffset: 2)
-                    .environment(\.markdownScale, scale)
-                    .environment(\.markdownFontFamily, fontFamily)
-                    .environment(\.markdownStagger, useStagger)
-            } else {
-                Text("loading…")
-                    .font(.system(.callout, design: .monospaced))
-                    .foregroundStyle(theme.textDim)
-            }
-        }
-        .environment(\.markdownStagger, contentAnimations)
+        // One TextKit 2 document view renders title, tags and body as a
+        // single attributed string (see `MarkdownDocumentView`). Until the
+        // first parse lands the header renders alone, so opening a note
+        // never flashes an empty pane.
+        MarkdownDocumentView(
+            header: MarkdownHeader(title: title, tags: tags),
+            document: parsed ?? Self.emptyDocument,
+            style: style,
+            readingWidth: readingWidth
+        )
         .environment(\.markdownVaultRoot, vaultRoot)
-        // Intercept link taps for SwiftUI Text-based renderers. NSTextView
-        // path uses `markdownLinkAction` below — both reuse the same
-        // closure so the routing logic stays in one place.
-        .environment(\.openURL, OpenURLAction { url in
-            if let onInAppLink, onInAppLink(url) {
-                return .handled
-            }
-            return .systemAction
-        })
         .environment(\.markdownLinkAction, MarkdownLinkAction { url in
             onInAppLink?(url) ?? false
         })
-        .padding(.horizontal, 48)
-        .padding(.top, 32)
-        .padding(.bottom, 40)
-        .frame(maxWidth: readingWidth, alignment: .leading)
-        .frame(maxWidth: .infinity, alignment: .center)
         // Yank-flash overlay. Non-interactive so it doesn't swallow
         // selection-drags or clicks. Animates opacity → 0 on every change
         // of `yankFlashTrigger`.
@@ -160,22 +123,6 @@ public struct MarkdownReader: View {
                     .allowsHitTesting(false)
                     .animation(.easeOut(duration: 0.45), value: yankFlashOpacity)
             }
-        }
-        // Coordinate space that `LinkAwareTextView` converts its local
-        // link rect into. The tooltip overlay below shares the same space.
-        .coordinateSpace(name: linkTooltipReaderCoordinateSpace)
-        // Global link-tooltip overlay. Each `LinkAwareTextView` publishes
-        // the hovered link's rect through `LinkHoverAnchorPreferenceKey`;
-        // this overlay reads that rect and places the themed bubble just
-        // below the link. Sibling of the LazyVStack child tree so the
-        // bubble's appearance can't cascade back into per-block layout
-        // passes (which would nudge the link away from the cursor on
-        // hover — the bug the F.54→F.56 series chased).
-        .overlayPreferenceValue(LinkHoverAnchorPreferenceKey.self) { value in
-            GeometryReader { proxy in
-                MarkdownReaderLinkTooltipOverlay(hover: value, maxWidth: proxy.size.width)
-            }
-            .allowsHitTesting(false)
         }
         .onAppear { reparseIfNeeded() }
         .onChange(of: text) { _, _ in reparseIfNeeded() }
@@ -191,6 +138,8 @@ public struct MarkdownReader: View {
             }
         }
     }
+
+    private static let emptyDocument = MarkdownDocument(blocks: [])
 
     // MARK: - Parsing
 
@@ -211,12 +160,10 @@ public struct MarkdownReader: View {
             return
         }
 
-        // Always async — the parse plus its follow-up LazyVStack
-        // materialisation (WKWebView spawns per math paragraph,
-        // NSTextView setup per link paragraph) blocks the main thread
-        // for tens to a couple hundred milliseconds otherwise. Off-loading
-        // keeps the link-click itself responsive; old content stays on
-        // screen during the parse.
+        // Always async — parsing a large note takes tens of milliseconds
+        // (~100 ms for 5k lines); off-loading keeps the link click that
+        // opened it responsive. Old content stays on screen meanwhile, and
+        // when the parse lands only the blocks that changed are re-rendered.
         let snapshot = text
         let resolveBase = baseURL
         let cacheURL = noteURL
@@ -242,75 +189,5 @@ public struct MarkdownReader: View {
         guard url.isFileURL else { return nil }
         return (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
             .contentModificationDate
-    }
-}
-
-// MARK: - Private chrome (file-internal so other LumiUI files don't pick
-// them up — these are MarkdownReader implementation details, not a
-// general-purpose component surface.)
-
-private struct MarkdownReaderTagChip: View {
-    let tag: String
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "number")
-                .font(.system(size: 9, weight: .semibold))
-                .opacity(0.7)
-            Text(tag)
-                .font(.system(.caption, design: .rounded).weight(.medium))
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(
-            Capsule()
-                .fill(theme.accent.opacity(0.12))
-        )
-        .overlay(
-            Capsule().stroke(theme.accent.opacity(0.25), lineWidth: 0.5)
-        )
-        .foregroundStyle(theme.accent)
-    }
-}
-
-/// Renders the active link-hover tooltip as a global overlay above the
-/// reader's content. Reads the `LinkHoverAnchorPreferenceKey` value that
-/// `LinkAwareTextView` publishes (forwarded into the `hover` prop from
-/// the MarkdownReader's `.overlayPreferenceValue` builder).
-///
-/// We take the preference value as a prop rather than reading it via
-/// `.onPreferenceChange` here because the overlay is a sibling of the
-/// LinkAwareTextView's published preference — only the
-/// `.overlayPreferenceValue` builder on the underlying view can see it.
-/// Mirroring into `@State` via `.onChange` gives the SwiftUI `.transition`
-/// modifier identity changes to animate against, so the bubble fades +
-/// scales in / out cleanly when hover starts and ends.
-private struct MarkdownReaderLinkTooltipOverlay: View {
-    let hover: LinkHoverAnchor?
-    let maxWidth: CGFloat
-    @State private var displayed: LinkHoverAnchor?
-
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            Color.clear
-            if let displayed {
-                LinkTooltipBubble(label: displayed.label)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .offset(
-                        x: max(0, min(max(0, maxWidth - linkTooltipMaxWidth), displayed.linkRect.minX)),
-                        y: displayed.linkRect.maxY + 8
-                    )
-                    .transition(
-                        .opacity.combined(with: .scale(scale: 0.94, anchor: .topLeading))
-                    )
-            }
-        }
-        .onAppear { displayed = hover }
-        .onChange(of: hover) { _, new in
-            withAnimation(.easeOut(duration: 0.16)) {
-                displayed = new
-            }
-        }
     }
 }

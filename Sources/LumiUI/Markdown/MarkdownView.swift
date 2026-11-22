@@ -21,7 +21,7 @@ public struct MarkdownStaggerKey: EnvironmentKey {
 }
 
 /// Vault root URL for the active note. Threaded through the renderer
-/// so leaf views (currently `LinkAwareTextView`'s tooltip resolver)
+/// so leaf views (the read pane's link tooltip resolver)
 /// can produce vault-relative paths for in-vault `file://` links —
 /// `./subfolder/note.md` rather than `/Users/…/Notes/myvault/subfolder/note.md`.
 /// Optional because the renderer also runs in non-vault contexts
@@ -141,9 +141,17 @@ func markdownBodyFont(size: CGFloat, weight: Font.Weight, family: MarkdownFontFa
     }
 }
 
-/// Top-level markdown renderer. Consumes a `MarkdownDocument` and lays out
-/// blocks vertically. Links open via the system handler; media gets dispatched
-/// to dedicated views (video player, PDF viewer, embed).
+/// SwiftUI markdown renderer for *secondary* surfaces — the tree
+/// browser's preview pane and embedded (`![](note.md)`) notes. The read
+/// pane itself uses the TextKit `MarkdownDocumentView` via
+/// `MarkdownReader`.
+///
+/// Blocks are keyed by `MarkdownBlockID` (content hash + occurrence), not
+/// by position: inserting a block no longer re-binds every later block's
+/// `@State` (KaTeX / Mermaid render results, media players) to the wrong
+/// content. A plain `VStack` is used deliberately — these surfaces are
+/// either hosted outside a SwiftUI `ScrollView` (where `LazyVStack` was
+/// eager anyway) or short.
 public struct MarkdownView: View {
     public let document: MarkdownDocument
     /// Where this document's block indices sit in the surrounding
@@ -159,26 +167,27 @@ public struct MarkdownView: View {
     }
 
     public var body: some View {
-        // `LazyVStack` only materialises blocks as they enter the scroll
-        // viewport, which is the single biggest perf win for large
-        // notes. Every paragraph-with-math spawns a WKWebView and every
-        // paragraph-with-link spawns an NSTextView; eagerly creating
-        // hundreds of those (the old VStack path) ran the read-pane
-        // open into seconds for a math-heavy notebook. With the lazy
-        // path each of those native hosts is created on first scroll
-        // into view and never created at all for blocks the user
-        // never sees.
-        //
-        // The wrapping NSScrollView (NativeScrollHost) supplies the
-        // viewport that `LazyVStack` needs to do its lazy enumeration.
-        LazyVStack(alignment: .leading, spacing: 14 * scale) {
-            ForEach(Array(document.blocks.enumerated()), id: \.offset) { index, block in
-                StaggeredBlock(index: index + indexOffset) {
-                    BlockView(block: block)
+        VStack(alignment: .leading, spacing: 14 * scale) {
+            ForEach(IdentifiedBlock.list(document.blocks)) { item in
+                StaggeredBlock(index: item.index + indexOffset) {
+                    BlockView(block: item.block)
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A block paired with its stable identity, for `ForEach`.
+struct IdentifiedBlock: Identifiable {
+    let id: MarkdownBlockID
+    let index: Int
+    let block: MarkdownBlock
+
+    static func list(_ blocks: [MarkdownBlock]) -> [IdentifiedBlock] {
+        zip(MarkdownBlockIdentity.ids(for: blocks), blocks).enumerated().map { index, pair in
+            IdentifiedBlock(id: pair.0, index: index, block: pair.1)
+        }
     }
 }
 
@@ -270,9 +279,7 @@ struct BlockView: View {
         case let .paragraph(inline):
             // Routing logic for paragraphs:
             //   - math present → KaTeXParagraphView (WKWebView)
-            //   - link present (no math) → LinkAwareTextView (NSTextView)
-            //     for native pointing-hand cursor + synchronous click
-            //   - pure prose → SwiftUI Text (cheapest path)
+            //   - otherwise → SwiftUI Text (links via `openURL`)
             if InlineRenderer.containsMath(inline) {
                 KaTeXParagraphView(inline: inline)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -314,52 +321,19 @@ struct BlockView: View {
         }
     }
 
-    /// Heading dispatch when no inline math is present. macOS uses the
-    /// NSTextView-backed LinkAwareTextView when any link sits in the
-    /// inline tree (so the pointing-hand cursor + click are native and
-    /// reliable); pure-text headings stay on SwiftUI Text.
+    /// Heading without inline math. Links are clickable through the
+    /// `openURL` environment action; the pointing-hand cursor applies on
+    /// macOS when the heading contains a link.
     @ViewBuilder
     private func headingView(level: Int, inline: [InlineNode]) -> some View {
-        let attributed = InlineRenderer.render(inline, theme: theme)
-        let baseSize = headingSize(level)
-        #if canImport(AppKit) && !targetEnvironment(macCatalyst)
-        if InlineRenderer.containsLink(inline) {
-            LinkAwareTextView(
-                attributed: attributed,
-                fontSize: baseSize * scale,
-                fontWeight: .semibold,
-                lineSpacing: 2
-            )
-            .padding(.top, (level <= 2 ? 8 : 4) * scale)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            plainHeading(level: level, attributed: attributed)
-        }
-        #else
-        plainHeading(level: level, attributed: attributed)
-        #endif
+        plainHeading(level: level, attributed: InlineRenderer.cachedRender(inline, theme: theme))
+            .pointingHandIfContainsLink(inline)
     }
 
-    /// Paragraph dispatch when no inline math is present. Mirror of
-    /// `headingView` but with body typography.
     @ViewBuilder
     private func paragraphView(inline: [InlineNode]) -> some View {
-        let attributed = InlineRenderer.render(inline, theme: theme)
-        #if canImport(AppKit) && !targetEnvironment(macCatalyst)
-        if InlineRenderer.containsLink(inline) {
-            LinkAwareTextView(
-                attributed: attributed,
-                fontSize: 15 * scale,
-                fontWeight: .regular,
-                lineSpacing: 3 * scale
-            )
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            plainParagraph(attributed: attributed)
-        }
-        #else
-        plainParagraph(attributed: attributed)
-        #endif
+        plainParagraph(attributed: InlineRenderer.cachedRender(inline, theme: theme))
+            .pointingHandIfContainsLink(inline)
     }
 
     @ViewBuilder
@@ -463,8 +437,8 @@ struct BlockQuoteView: View {
         // the blockquote far off-screen. Switching to an overlay anchors
         // the bar's height to the content VStack instead.
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                BlockView(block: block)
+            ForEach(IdentifiedBlock.list(blocks)) { item in
+                BlockView(block: item.block)
                     .opacity(0.82)
             }
         }
@@ -491,14 +465,32 @@ struct ListBlockView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(items.enumerated()), id: \.offset) { index, item in
+            ForEach(IdentifiedListItem.list(items)) { row in
                 ListRowView(
-                    item: item,
-                    index: index,
+                    item: row.item,
+                    index: row.index,
                     ordered: ordered,
                     start: start
                 )
             }
+        }
+    }
+}
+
+/// A list item paired with a stable identity (content hash +
+/// occurrence, same scheme as blocks).
+struct IdentifiedListItem: Identifiable {
+    let id: MarkdownBlockID
+    let index: Int
+    let item: ListItemContent
+
+    static func list(_ items: [ListItemContent]) -> [IdentifiedListItem] {
+        var seen: [Int: Int] = [:]
+        return items.enumerated().map { index, item in
+            let hash = item.hashValue
+            let occurrence = seen[hash, default: 0]
+            seen[hash] = occurrence + 1
+            return IdentifiedListItem(id: MarkdownBlockID(contentHash: hash, occurrence: occurrence), index: index, item: item)
         }
     }
 }
@@ -520,8 +512,8 @@ private struct ListRowView: View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             markerView()
             VStack(alignment: .leading, spacing: 6) {
-                ForEach(Array(item.blocks.enumerated()), id: \.offset) { _, block in
-                    BlockView(block: block)
+                ForEach(IdentifiedBlock.list(item.blocks)) { child in
+                    BlockView(block: child.block)
                 }
             }
         }

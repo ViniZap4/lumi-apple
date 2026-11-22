@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 
 // Platform-neutral pieces of the link-hover tooltip pipeline. The
 // producer (`LinkAwareTextView`) is AppKit-only because it needs an
@@ -104,3 +105,53 @@ public struct LinkHoverAnchorPreferenceKey: PreferenceKey {
 /// link rects into reader-space rects so the global tooltip overlay
 /// has the right (x, y) to render at.
 public let linkTooltipReaderCoordinateSpace = "lumi.markdownReader"
+
+/// Display label for a link's hover tooltip. In-vault `file://` URLs
+/// become vault-relative (`./sub/note.md`), other local paths collapse
+/// `$HOME` to `~/`, everything else shows its absolute string. Pure so
+/// it is unit-testable; the text views call it with the hovered link's
+/// `.link` attribute value (a `URL` or, for unparseable destinations, a
+/// `String`).
+public enum LinkTooltipLabel {
+    public static func label(for raw: Any, vaultRoot: URL?, home: String = NSHomeDirectory()) -> String? {
+        if let url = raw as? URL {
+            return label(forURL: url, fallback: url.absoluteString, vaultRoot: vaultRoot, home: home)
+        }
+        if let str = raw as? String {
+            if let url = URL(string: str) {
+                return label(forURL: url, fallback: str, vaultRoot: vaultRoot, home: home)
+            }
+            return prettify(str, vaultRoot: vaultRoot, home: home)
+        }
+        return nil
+    }
+
+    private static func label(forURL url: URL, fallback: String, vaultRoot: URL?, home: String) -> String {
+        let scheme = url.scheme?.lowercased() ?? ""
+        if url.isFileURL || scheme == "file" {
+            return prettify(url.path.isEmpty ? fallback : url.path, vaultRoot: vaultRoot, home: home)
+        }
+        if scheme.isEmpty {
+            return prettify(fallback, vaultRoot: vaultRoot, home: home)
+        }
+        return url.absoluteString
+    }
+
+    private static func prettify(_ raw: String, vaultRoot: URL?, home: String) -> String {
+        var path = raw
+        if path.hasPrefix("file://") {
+            path = String(path.dropFirst("file://".count))
+            if let decoded = path.removingPercentEncoding { path = decoded }
+        }
+        if let vaultRoot {
+            let vaultPath = vaultRoot.standardizedFileURL.path
+            let prefix = vaultPath.hasSuffix("/") ? vaultPath : vaultPath + "/"
+            if path == vaultPath { return "./" }
+            if path.hasPrefix(prefix) { return "./" + String(path.dropFirst(prefix.count)) }
+        }
+        if path.hasPrefix(home + "/") {
+            return "~/" + String(path.dropFirst(home.count + 1))
+        }
+        return path
+    }
+}
