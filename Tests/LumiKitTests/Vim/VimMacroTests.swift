@@ -83,6 +83,46 @@ struct VimMacroTests {
         #expect(buffer.text == "hello")
     }
 
+    @Test("self-recursive macro runs exactly macroDepthLimit levels, iteratively")
+    func recursionDepthBound() {
+        // `x@a` deletes one char then re-invokes itself. Each nesting level
+        // performs one `x`; the (limit+1)-th `@a` aborts the playback. Before
+        // playback was made iterative, a handful of levels overflowed the
+        // 512 KB cooperative-thread stack (SIGBUS).
+        let limit = VimEngine.macroDepthLimit
+        var state = VimState.initial
+        state.macros["a"] = [.character("x"), .character("@"), .character("a")]
+        let text = String(repeating: "z", count: limit + 50)
+        var buffer = TextBuffer(text: text, cursor: 0)
+        for input: VimInput in [.character("@"), .character("a")] {
+            let r = VimEngine.handle(input, state: state, buffer: buffer)
+            state = r.state
+            buffer = r.buffer
+        }
+        #expect(buffer.text.count == 50)
+        #expect(state.macroDepth == 0)
+        #expect(state.isPlayingMacro == false)
+        #expect(state.macroSteps.isEmpty)
+    }
+
+    @Test("nested macro runs inline before the rest of the outer macro")
+    func nestedOrdering() {
+        // b = [x], a = [@b, i, Z, ⎋]: @a deletes first char, then inserts Z.
+        var state = VimState.initial
+        state.macros["b"] = [.character("x")]
+        state.macros["a"] = [.character("@"), .character("b"), .character("i"), .character("Z"), .escape]
+        var buffer = TextBuffer(text: "abc", cursor: 0)
+        for input: VimInput in [.character("2"), .character("@"), .character("a")] {
+            let r = VimEngine.handle(input, state: state, buffer: buffer)
+            state = r.state
+            buffer = r.buffer
+        }
+        // pass 1: "bc" -> "Zbc" (cursor on Z after ⎋); pass 2: x → "bc" → "Zbc"
+        #expect(buffer.text == "Zbc")
+        #expect(state.macroDepth == 0)
+        #expect(state.isPlayingMacro == false)
+    }
+
     @Test("dot replays the last change inside a macro, not the macro")
     func dotInsideMacro() {
         // qadwq records dw. After playback, the most recent change is dw,

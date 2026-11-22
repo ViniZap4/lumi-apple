@@ -102,6 +102,18 @@ public struct VimState: Sendable, Hashable {
     public var macroDepth: Int
     /// Last successfully invoked macro name. Used by `@@`.
     public var lastPlayedMacro: Character?
+    /// Pending macro playback steps, stored as a stack (next step is the
+    /// last element). Only non-empty while a playback is draining; nested
+    /// `@x` invocations push onto it instead of recursing. Engine-internal.
+    var macroSteps: [MacroStep] = []
+
+    /// One unit of scheduled macro playback.
+    enum MacroStep: Sendable, Hashable {
+        /// Feed this input through `VimEngine.handle`.
+        case input(VimInput)
+        /// One nested macro invocation finished — decrement `macroDepth`.
+        case end
+    }
 
     public var history: VimHistory
 

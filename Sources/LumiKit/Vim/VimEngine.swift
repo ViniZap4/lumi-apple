@@ -739,11 +739,14 @@ public enum VimEngine {
 
     // MARK: Macros
 
-    /// Depth limit for nested macro playback. Each level adds several Swift
-    /// call frames (handle → dispatch → handleNormalCharacter → playMacro)
-    /// plus a copy of `VimState` (which now carries dictionaries), so we keep
-    /// this small.
-    private static let macroDepthLimit = 5
+    /// Depth limit for nested macro playback (`@a` inside macro `a`, or
+    /// mutually recursive macros). Playback is iterative — nested `@x`
+    /// invocations push their inputs onto `VimState.macroSteps` instead of
+    /// recursing through `handle` — so this bound no longer protects the
+    /// call stack; it only terminates runaway recursion. When the limit is
+    /// hit the whole playback aborts (vim aborts a macro on error the same
+    /// way), which is what the recursive-macro idiom relies on.
+    static let macroDepthLimit = 100
 
     private static func finalizeMacroRecording(state inState: VimState, buffer inBuffer: TextBuffer) -> Result {
         var state = inState
@@ -768,37 +771,61 @@ public enum VimEngine {
         buffer inBuffer: TextBuffer
     ) -> Result {
         var state = inState
-        var buffer = inBuffer
         guard let inputs = state.macros[name], !inputs.isEmpty else {
             // Even an empty/nonexistent macro records as the last-played name
             // so `@@` works after a missed name.
             state.lastPlayedMacro = name
-            return Result(state: state, buffer: buffer)
-        }
-        if state.macroDepth >= macroDepthLimit {
-            return Result(state: state, buffer: buffer)
+            return Result(state: state, buffer: inBuffer)
         }
         state.lastPlayedMacro = name
-        state.macroDepth += 1
-        state.isPlayingMacro = true
 
+        // Build the steps for this invocation: `count` copies of the inputs
+        // followed by an end marker that pops one nesting level. Stored
+        // reversed so the drain loop can `popLast()` in O(1).
         let times = max(1, count)
-        var lastEffect: VimEffect?
+        var steps: [VimState.MacroStep] = [.end]
+        steps.reserveCapacity(inputs.count * times + 1)
         for _ in 0..<times {
-            for input in inputs {
+            for input in inputs.reversed() {
+                steps.append(.input(input))
+            }
+        }
+
+        if state.isPlayingMacro {
+            // Nested invocation from inside an active playback: don't
+            // recurse. Schedule the inputs ahead of whatever the outer
+            // macro still has left; the outermost drain loop runs them.
+            guard state.macroDepth < macroDepthLimit else {
+                // Runaway recursion: abort the entire playback.
+                state.macroSteps = []
+                return Result(state: state, buffer: inBuffer)
+            }
+            state.macroDepth += 1
+            state.macroSteps.append(contentsOf: steps)
+            return Result(state: state, buffer: inBuffer)
+        }
+
+        // Outermost invocation: drain the step stack iteratively. Each step
+        // costs exactly one `handle` frame regardless of nesting depth.
+        var buffer = inBuffer
+        state.isPlayingMacro = true
+        state.macroDepth = 1
+        state.macroSteps = steps
+        var lastEffect: VimEffect?
+        while let step = state.macroSteps.popLast() {
+            switch step {
+            case .end:
+                state.macroDepth = max(0, state.macroDepth - 1)
+            case let .input(input):
                 let r = handle(input, state: state, buffer: buffer)
                 state = r.state
                 buffer = r.buffer
                 if let e = r.effect { lastEffect = e }
-                if state.macroDepth >= macroDepthLimit { break }
             }
-            if state.macroDepth >= macroDepthLimit { break }
         }
-
-        state.macroDepth = max(0, state.macroDepth - 1)
-        if state.macroDepth == 0 {
-            state.isPlayingMacro = false
-        }
+        state.macroSteps = []
+        state.macroDepth = 0
+        state.isPlayingMacro = false
         return Result(state: state, buffer: buffer, effect: lastEffect)
     }
 
