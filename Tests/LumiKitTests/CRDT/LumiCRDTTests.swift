@@ -145,7 +145,8 @@ extension YrsSerial {
             let fresh = LumiCRDT()
             fresh.applyLocal(Replica.ins(0, "hello world!"))
             try Replica.sync(s, fresh)
-            #expect(fresh.text == "hello world!hello world")
+            // Order depends on the random clientIDs; the body is doubled.
+            #expect(["hello world!hello world", "hello worldhello world!"].contains(fresh.text))
 
             let s2 = Replica.server()
             let kept = try Replica.joined(s2)

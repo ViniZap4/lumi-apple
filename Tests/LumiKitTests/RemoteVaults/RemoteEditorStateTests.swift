@@ -69,7 +69,7 @@ extension LumiAPIClientVaultTests {
         let client = await makeEditorClient()
         let editor = RemoteEditorState()
         editor.load(
-            RemoteNoteSnapshot(id: "note-1", path: "note-1.md", text: "body", vectorClock: "b2xk"),
+            RemoteNoteSnapshot(id: "note-1", path: "note-1.md", text: "body", vectorClock: "b2xk", state: "c3RhdGU="),
             vaultID: editorVaultID
         )
         editor.currentText = "edited body"
@@ -83,6 +83,9 @@ extension LumiAPIClientVaultTests {
         #expect(sentPath.value == "/api/vaults/3f2504e0-4f89-11d3-9a0c-0305e82c3301/notes/note-1/diff")
         #expect(sentBody.value.contains("edited body"))
         #expect(sentBody.value.contains("b2xk"))
+        // 3-way: the base state travels with the text (§7.2, V9b).
+        #expect(sentBody.value.contains("\"base_state\":\"c3RhdGU=\""))
+        #expect(sentBody.value.contains("\"origin\":\"apple\""))
         // The completed save must not resurrect state on the reset editor.
         #expect(editor.noteID == nil)
         #expect(editor.currentText == "")
@@ -102,9 +105,11 @@ extension LumiAPIClientVaultTests {
         let entered = Box(false)
         let release = DispatchSemaphore(value: 0)
         MockURLProtocol.setHandler { request in
-            entered.value = true
-            // Hold the response until the test has typed more text.
-            _ = release.wait(timeout: .now() + 5)
+            if !entered.value {
+                entered.value = true
+                // Hold the /diff response until the test has typed more.
+                _ = release.wait(timeout: .now() + 5)
+            }
             return snapshotResponse(request, text: "hello", clock: "bmV3")
         }
         let client = await makeEditorClient()
@@ -152,5 +157,28 @@ extension LumiAPIClientVaultTests {
         #expect(editor.currentText == "mine + theirs")
         #expect(editor.originalText == "mine + theirs")
         #expect(!editor.isDirty)
+    }
+
+    @Test("409 base_required keeps the user's text and refetches the baseline")
+    @MainActor
+    func remoteEditorBaseRequired() async throws {
+        MockURLProtocol.setHandler { request in
+            if request.url?.path.hasSuffix("/diff") == true {
+                let r = HTTPURLResponse(url: request.url!, statusCode: 409, httpVersion: nil, headerFields: nil)!
+                return (r, Data(#"{"error":"base_required"}"#.utf8))
+            }
+            return snapshotResponse(request, text: "server text", clock: "c3Y=")
+        }
+        let client = await makeEditorClient()
+        let editor = RemoteEditorState()
+        editor.load(
+            RemoteNoteSnapshot(id: "note-1", path: "note-1.md", text: "base", vectorClock: "b2xk"),
+            vaultID: editorVaultID
+        )
+        editor.currentText = "my edit"
+        _ = await editor.saveViaDiff(via: client)
+        #expect(editor.currentText == "my edit")
+        #expect(editor.originalText == "server text")
+        #expect(editor.status == .conflict(serverText: "server text"))
     }
 }

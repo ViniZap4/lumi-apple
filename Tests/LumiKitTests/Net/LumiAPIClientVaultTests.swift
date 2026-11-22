@@ -1781,18 +1781,15 @@ struct LumiAPIClientVaultTests {
         #expect(store.lastError == nil)
     }
 
-    // MARK: - Phase H slice 2 — live CRDT updates
+    // MARK: - Wave 3 — REST snapshot never builds a replica
 
-    /// loadOpenNote installs a fresh empty CRDT and leaves openNoteLiveText nil
-    /// (the snapshot's `text` drives the initial render; live text only
-    /// updates once a WS frame applies cleanly).
-    @Test("loadOpenNote arms an empty CRDT; openNoteLiveText starts nil")
+    @Test("loadOpenNote only fetches the preview snapshot (with state); no session, no replica")
     @MainActor
-    func loadOpenNoteArmsCRDT() async {
+    func loadOpenNoteIsPreviewOnly() async {
         let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
         MockURLProtocol.setHandler { request in
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            let body = #"{"id":"hello","path":"hello.md","text":"initial body","vector_clock":"AAAA"}"#.data(using: .utf8)!
+            let body = #"{"id":"hello","path":"hello.md","text":"initial body","vector_clock":"AAAA","state":"AAA="}"#.data(using: .utf8)!
             return (response, body)
         }
         let config = URLSessionConfiguration.ephemeral
@@ -1803,179 +1800,29 @@ struct LumiAPIClientVaultTests {
         let store = RemoteVaultsStore(client: client)
         await store.loadOpenNote(vaultID: vaultID, noteID: "hello")
         #expect(store.openNoteSnapshot?.text == "initial body")
-        // Live text stays nil until the WS feeds a real update.
-        #expect(store.openNoteLiveText == nil)
-    }
-
-    /// End-to-end of the H.2 plumbing: a peer LumiCRDT produces an update,
-    /// we feed it through `applyLiveUpdate`, and `openNoteLiveText`
-    /// reflects the peer's text.
-    @Test("applyLiveUpdate merges a peer's Yjs update into openNoteLiveText")
-    @MainActor
-    func applyLiveUpdateMergesPeerText() async throws {
-        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
-        MockURLProtocol.setHandler { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            let body = #"{"id":"hello","path":"hello.md","text":"","vector_clock":"AAAA"}"#.data(using: .utf8)!
-            return (response, body)
-        }
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [MockURLProtocol.self]
-        let client = LumiAPIClient(session: URLSession(configuration: config))
-        await client.setBaseURL(baseURL)
-        await client.setToken("tok")
-        let store = RemoteVaultsStore(client: client)
-        await store.loadOpenNote(vaultID: vaultID, noteID: "hello")
-
-        // Peer Y.Doc on another "client" makes an edit and exports the
-        // full state. This is what the server would fan out via
-        // SyncStep2 on subscribe (or SyncUpdate after the fact).
-        let peer = LumiCRDT()
-        await peer.setText("live from peer")
-        let payload = await peer.encodeStateAsUpdate()
-
-        await store.applyLiveUpdate(payload)
-        #expect(store.openNoteLiveText == "live from peer")
-    }
-
-    /// Malformed update bytes don't tear down the store — `openNoteLiveText`
-    /// keeps its prior known-good value. The next valid frame will
-    /// overwrite it.
-    @Test("applyLiveUpdate tolerates malformed payloads without clobbering live text")
-    @MainActor
-    func applyLiveUpdateTolerant() async throws {
-        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
-        MockURLProtocol.setHandler { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            let body = #"{"id":"hello","path":"hello.md","text":"","vector_clock":"AAAA"}"#.data(using: .utf8)!
-            return (response, body)
-        }
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [MockURLProtocol.self]
-        let client = LumiAPIClient(session: URLSession(configuration: config))
-        await client.setBaseURL(baseURL)
-        await client.setToken("tok")
-        let store = RemoteVaultsStore(client: client)
-        await store.loadOpenNote(vaultID: vaultID, noteID: "hello")
-
-        // Seed with one good update.
-        let peer = LumiCRDT()
-        await peer.setText("good baseline")
-        await store.applyLiveUpdate(peer.encodeStateAsUpdate())
-        #expect(store.openNoteLiveText == "good baseline")
-
-        // Empty payload is a no-op.
-        await store.applyLiveUpdate(Data())
-        #expect(store.openNoteLiveText == "good baseline")
-
-        // Garbage bytes: the apply throws internally; live text stays.
-        await store.applyLiveUpdate(Data([0xff, 0xff, 0xff, 0xff, 0x00]))
-        #expect(store.openNoteLiveText == "good baseline")
-    }
-
-    // MARK: - Phase H slice 4 — presence
-
-    /// An incoming awareness payload (JSON-encoded PresenceState) lands
-    /// in `openNotePresence`. Frames from our own clientID get filtered.
-    @Test("applyPresenceFrame upserts peers and filters self-echo")
-    @MainActor
-    func presenceFrameUpserts() async throws {
-        let store = RemoteVaultsStore(client: LumiAPIClient())
-        // Register our own presence so the self-echo filter has something
-        // to match against. (We're not subscribing — testing the helper
-        // directly, which is internal.)
-        let mine = PresenceState.make(
-            clientID: UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!,
-            username: "me",
-            displayName: "Me"
-        )
-        // applyPresenceFrame consults `ownPresence`; we can't set that
-        // directly without subscribing, but the filter is bypassed when
-        // clientIDs differ. The self-echo behavior is locked in the
-        // "filters our own clientID" test below.
-
-        let alice = PresenceState.make(
-            clientID: UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!,
-            username: "alice",
-            displayName: "Alice"
-        )
-        let bob = PresenceState.make(
-            clientID: UUID(uuidString: "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC")!,
-            username: "bob",
-            displayName: "Bob"
-        )
-
-        store.applyPresenceFrame(try alice.encoded())
-        store.applyPresenceFrame(try bob.encoded())
-        #expect(store.openNotePresence.count == 2)
-        let usernames = store.openNotePresence.map(\.username).sorted()
-        #expect(usernames == ["alice", "bob"])
-
-        // Re-applying alice with a new display name upserts the same
-        // clientID rather than duplicating.
-        let aliceRenamed = PresenceState(
-            clientID: alice.clientID,
-            username: "alice",
-            displayName: "Alice (away)",
-            color: alice.color
-        )
-        store.applyPresenceFrame(try aliceRenamed.encoded())
-        #expect(store.openNotePresence.count == 2)
-        let aliceRow = store.openNotePresence.first { $0.username == "alice" }!
-        #expect(aliceRow.displayName == "Alice (away)")
-
-        _ = mine
-    }
-
-    @Test("applyPresenceFrame silently ignores malformed JSON")
-    @MainActor
-    func presenceFrameTolerant() async {
-        let store = RemoteVaultsStore(client: LumiAPIClient())
-        store.applyPresenceFrame(Data([0x00, 0x01, 0x02]))
-        store.applyPresenceFrame(#"{"wrong":"shape"}"#.data(using: .utf8)!)
-        #expect(store.openNotePresence.isEmpty)
-    }
-
-    /// Pin the heartbeat cadence against canonical y-protocols
-    /// awareness (`outdatedTimeout = 30s`, refresh at half). A faster
-    /// heartbeat wastes bandwidth; a slower one risks peers evicting
-    /// us between sends. Locking the value at the type level catches
-    /// accidental drift.
-    @Test("presenceHeartbeatSeconds matches canonical y-protocols cadence")
-    @MainActor
-    func presenceHeartbeatCadence() {
-        #expect(RemoteVaultsStore.presenceHeartbeatSeconds == 15)
-    }
-
-    /// closeOpenNote nukes the CRDT + live text so a re-open starts fresh.
-    @Test("closeOpenNote clears CRDT + openNoteLiveText")
-    @MainActor
-    func closeOpenNoteClearsCRDT() async throws {
-        let vaultID = UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!
-        MockURLProtocol.setHandler { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            let body = #"{"id":"hello","path":"hello.md","text":"","vector_clock":"AAAA"}"#.data(using: .utf8)!
-            return (response, body)
-        }
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [MockURLProtocol.self]
-        let client = LumiAPIClient(session: URLSession(configuration: config))
-        await client.setBaseURL(baseURL)
-        await client.setToken("tok")
-        let store = RemoteVaultsStore(client: client)
-        await store.loadOpenNote(vaultID: vaultID, noteID: "hello")
-
-        let peer = LumiCRDT()
-        await peer.setText("something")
-        await store.applyLiveUpdate(peer.encodeStateAsUpdate())
-        #expect(store.openNoteLiveText == "something")
-
+        #expect(store.openNoteSnapshot?.stateData == Data([0, 0]))
+        #expect(store.openSession == nil)
+        #expect(store.openNotePhase == .closed)
         store.closeOpenNote()
-        #expect(store.openNoteLiveText == nil)
+        #expect(store.openNoteSnapshot == nil)
+    }
 
-        // After close, a stray update gets dropped (no CRDT to apply against).
-        await store.applyLiveUpdate(peer.encodeStateAsUpdate())
-        #expect(store.openNoteLiveText == nil)
+    @Test("createWSTicket POSTs to …/ws-ticket and decodes {ticket, expires_at}")
+    func createWSTicket() async throws {
+        let seen = LockedBox<String?>(nil)
+        MockURLProtocol.setHandler { request in
+            seen.set("\(request.httpMethod ?? "") \(request.url?.path ?? "")")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(#"{"ticket":"tk-9","expires_at":"2026-11-22T10:00:30Z"}"#.utf8))
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = LumiAPIClient(session: URLSession(configuration: config))
+        await client.setBaseURL(baseURL)
+        await client.setToken("tok")
+        let t = try await client.createWSTicket(vaultID: UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301")!, noteID: "n 1")
+        #expect(t.ticket == "tk-9")
+        #expect(seen.get() == "POST /api/vaults/3f2504e0-4f89-11d3-9a0c-0305e82c3301/notes/n 1/ws-ticket")
     }
 
     // MARK: - Ownership + share-a-copy (SPEC-V3)
@@ -2393,3 +2240,12 @@ struct LumiAPIClientVaultTests {
     }
 }
 
+
+/// Lock-protected box shared between the URL-loading thread and a test.
+final class LockedBox<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: T
+    init(_ value: T) { self.value = value }
+    func get() -> T { lock.lock(); defer { lock.unlock() }; return value }
+    func set(_ v: T) { lock.lock(); value = v; lock.unlock() }
+}

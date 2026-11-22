@@ -1,6 +1,27 @@
 import Foundation
 import Observation
 
+#if canImport(YSwift)
+/// The live session type of the open note.
+public typealias OpenNoteSession = NoteSyncSession
+#else
+/// visionOS: no local CRDT; server notes use the REST 3-way path.
+public typealias OpenNoteSession = UnavailableNoteSession
+
+/// Placeholder so `openSession` keeps one type on every platform. Never
+/// instantiated.
+@MainActor
+public final class UnavailableNoteSession {
+    public var phase: EditorSnapshot.Phase { .closed }
+    public var reconnectStatus: ReconnectStatus? { nil }
+    public var peers: [PeerPresence] { [] }
+    public var noteID: String { "" }
+    public var hasPendingLocalChanges: Bool { false }
+    public func destroy() {}
+    private init() {}
+}
+#endif
+
 /// Coordinates server-vault state for the UI. Holds the list of vaults the
 /// signed-in user belongs to plus the members/roles of whichever vault the
 /// user has selected. Network failures are surfaced as `lastError`; transient
@@ -35,117 +56,19 @@ public final class RemoteVaultsStore {
     /// successful subsequent load or on `closeOpenNote`.
     public private(set) var openNoteError: LumiAPIError?
 
-    /// True when the WS sync subscription has flagged that a remote update
-    /// landed since the host last refreshed. Reset by
-    /// `acknowledgeRemoteUpdate()` (typically called by the host after a
-    /// `loadOpenNote` refetch settles the screen). Slice 4e.
-    public private(set) var hasRemoteUpdate: Bool = false
+    /// The live CRDT session of the open server note
+    /// (CRDT-CLIENT-PROTOCOL §2): one replica per open note, kept for
+    /// the whole time the note stays open — reconnects reuse it, refetches
+    /// merge into it. Destroyed when the note closes or another opens.
+    /// nil when no note is open or the platform has no local CRDT
+    /// (visionOS → REST 3-way `/diff`, see `RemoteEditorState`).
+    public private(set) var openSession: OpenNoteSession?
 
-    /// Non-nil when the store is currently waiting out a backoff before
-    /// re-subscribing the WS sync channel. Hosts render this as a small
-    /// "reconnecting in Ns…" hint above the editor; nil means the WS is
-    /// either connected (`.opened` cleared it) or the host stopped
-    /// subscribing (`unsubscribeFromOpenNote` cleared it). Slice 4f.2.
-    public private(set) var reconnectStatus: ReconnectStatus?
-    /// Active WS sync client; nil when no note is open or the host is
-    /// running in REST-only mode.
-    @ObservationIgnored private var syncClient: NoteSyncClient?
-    /// Task pumping `syncClient.events` onto the main actor. Cancelled by
-    /// `unsubscribeFromOpenNote()`.
-    @ObservationIgnored private var syncEventsTask: Task<Void, Never>?
-    /// Pending reconnect Task created in response to a `.willReconnect`
-    /// event. Cancelled by `unsubscribeFromOpenNote()` so an explicit
-    /// stop never gets undone by a delayed wake-up. Slice 4f.
-    @ObservationIgnored private var syncReconnectTask: Task<Void, Never>?
-    /// (vaultID, noteID) of whatever note the WS client is currently
-    /// subscribed to. Recorded so the reconnect path knows what to
-    /// re-subscribe to without the host having to re-issue. Cleared by
-    /// `unsubscribeFromOpenNote()`. Slice 4f.
-    @ObservationIgnored private var syncOpenNoteKey: (vaultID: UUID, noteID: String)?
-    /// Wall-clock instant at which the WS most recently received an
-    /// `.opened` event. Used by `decideReconnect` to detect a long-
-    /// lived connection that drops — the next failure is then treated
-    /// as a fresh curve (attempt 1) instead of inheriting the prior
-    /// backoff state. Cleared on `.willReconnect` (consumed for the
-    /// decision) and on `unsubscribeFromOpenNote()`. Slice 4f.1.
-    @ObservationIgnored private var syncOpenedAt: Date?
-    /// Max consecutive transient-close reconnect attempts before we give
-    /// up. With 1s base + 2^n growth capped at 32s, 8 attempts ≈ 2.5
-    /// minutes of trying — beyond that the server is presumably down or
-    /// the network is gone for good, and silently retrying forever just
-    /// burns battery. The host can re-arm by re-opening the note.
-    private static let maxReconnectAttempts: Int = 8
-    /// Connections that survive at least this many seconds before a
-    /// transient close are considered "stabilised" — the next drop
-    /// starts a fresh backoff curve instead of continuing the prior
-    /// one. Tuned for "user moved off coffee shop wifi for a minute
-    /// after typing for half an hour" — not for "server is flapping".
-    /// Slice 4f.1.
-    public static let reconnectStabilitySeconds: TimeInterval = 30
+    /// "Reconnecting in Ns…" while the live socket waits out a backoff.
+    public var reconnectStatus: ReconnectStatus? { openSession?.reconnectStatus }
 
-    /// CRDT mirroring the server's state for the currently-open note.
-    /// Lifecycle is bound to (loadOpenNote → subscribeToOpenNote →
-    /// closeOpenNote): fresh on every open, populated by the first
-    /// SyncStep2 the server replies with, kept up-to-date by
-    /// subsequent SyncUpdate frames. nil when no note is open.
-    /// Phase H slice 2. Exposed read-only (slice 3) so the editor's
-    /// commit path can encode a diff against the local CRDT's state.
-    @ObservationIgnored public private(set) var openNoteCRDT: LumiCRDT?
-
-    /// Latest text the open-note CRDT holds. Updated after each
-    /// successfully-applied WS update (`.syncStep2` / `.syncUpdate`).
-    /// Hosts observe this to merge live edits into the editor when
-    /// the user isn't dirty; nil means no update has arrived yet.
-    /// Phase H slice 2.
-    public private(set) var openNoteLiveText: String?
-
-    /// Other peers currently subscribed to the open note, sorted by
-    /// clientID for a stable rendering order. Phase H slice 4. The
-    /// local user's own presence is broadcast on subscribe but is
-    /// NOT included in this list — `openNotePresence` is "everyone
-    /// else viewing".
-    public private(set) var openNotePresence: [PresenceState] = []
-
-    /// Our own presence broadcast on the awareness channel for the
-    /// open note. Echoed back from the server but filtered out of
-    /// `openNotePresence` via `clientID`. Set by `subscribeToOpenNote`
-    /// when the caller passes a non-nil `presence`. Phase H slice 4.
-    @ObservationIgnored private var ownPresence: PresenceState?
-
-    /// Peer-keyed presence map populated by incoming awareness frames.
-    /// Republished as the sorted `openNotePresence` whenever it
-    /// changes. Phase H slice 4.
-    @ObservationIgnored private var presenceByClient: [UUID: PresenceState] = [:]
-
-    /// Last time we received a heartbeat from each peer. Used by
-    /// `cullStalePresence` to evict peers whose heartbeats stopped
-    /// arriving — the server emits an explicit leave frame on a clean
-    /// disconnect, but a hard network drop never reaches the server,
-    /// so the TTL is the only safety net. Post-H follow-up.
-    @ObservationIgnored private var presenceLastSeen: [UUID: Date] = [:]
-
-    /// Background Task that re-broadcasts `ownPresence` every
-    /// `presenceHeartbeatSeconds` while a WS subscription is alive.
-    /// Without this, a peer who joined the room *after* our initial
-    /// broadcast wouldn't see us (the server only relays; it doesn't
-    /// keep state). Matches canonical y-protocols cadence
-    /// (`outdatedTimeout / 2 = 15s`) — peers locally evict us at
-    /// `outdatedTimeout = 30s`, so a 15s heartbeat keeps us alive
-    /// with margin. Cancelled by `unsubscribeFromOpenNote()`.
-    @ObservationIgnored private var presenceHeartbeatTask: Task<Void, Never>?
-
-    /// Canonical y-protocols Awareness outdatedTimeout is 30s; we
-    /// re-broadcast at half that so peers always have a fresh stamp
-    /// before they'd evict us. Public so tests can pin the contract.
-    public static let presenceHeartbeatSeconds: TimeInterval = 15
-
-    /// Drop a peer if we haven't seen a heartbeat from them for this
-    /// long. 3× heartbeat (= 45s) tolerates a single missed broadcast
-    /// without flickering the UI, but evicts within a sensible window
-    /// after a hard disconnect that never reached the server's
-    /// explicit-leave path. Public so tests can pin the contract.
-    /// Post-H follow-up.
-    public static let presenceStaleSeconds: TimeInterval = 45
+    /// Peers on the open note (y-protocols awareness; excludes us).
+    public var openNotePresence: [PeerPresence] { openSession?.peers ?? [] }
 
     public private(set) var isLoading: Bool = false
     public private(set) var lastError: LumiAPIError?
@@ -173,7 +96,11 @@ public final class RemoteVaultsStore {
 
     /// CRDT session phase of the open note (CRDT-CLIENT-PROTOCOL §2.1),
     /// fed into the book sync status (SPEC-LIVROS §4.2).
-    public private(set) var openNotePhase: EditorSnapshot.Phase = .closed
+    public var openNotePhase: EditorSnapshot.Phase { openSession?.phase ?? .closed }
+
+    /// Builds the connector for a new session. Test seam; production
+    /// dials the account's server (ws-ticket first, `?token=` fallback).
+    @ObservationIgnored public var makeConnector: (LumiAPIClient) -> any SyncConnector = { WebSocketConnector(client: $0) }
 
     public init(client: LumiAPIClient) {
         self.client = client
@@ -231,8 +158,7 @@ public final class RemoteVaultsStore {
             notesHasMore = false
             openNoteSnapshot = nil
             openNoteError = nil
-            openNoteCRDT = nil
-            openNoteLiveText = nil
+            destroyOpenSession()
             return
         }
         selectedVaultID = id
@@ -247,8 +173,7 @@ public final class RemoteVaultsStore {
         notesHasMore = false
         openNoteSnapshot = nil
         openNoteError = nil
-        openNoteCRDT = nil
-        openNoteLiveText = nil
+        destroyOpenSession()
         // Sequential rather than `async let` — Swift 6 typed throws don't
         // propagate through `async let` bindings, and serializing a few short
         // requests is fine for the UI flow.
@@ -289,50 +214,37 @@ public final class RemoteVaultsStore {
         isLoading = false
     }
 
-    /// Load the CRDT snapshot for a server note. Sets `openNoteSnapshot` on
-    /// success; surfaces failures via `openNoteError`. Idempotent — calling
-    /// twice with the same arguments simply re-fetches and re-arms the
-    /// clock. Also implicitly acknowledges any pending remote-update
-    /// signal — the screen is current again.
+    /// Fetch the REST snapshot of a server note: the read-only preview
+    /// shown while the session connects (§2.2.3) and the source of the
+    /// "Load file contents" body. Never builds or seeds a replica. When a
+    /// live session for the same note exists, its full `state` is merged
+    /// into that replica instead (pull-to-refresh, §5 / V8).
     public func loadOpenNote(vaultID: UUID, noteID: String) async {
         openNoteIsLoading = true
         openNoteError = nil
         do {
             let snapshot = try await client.getNoteSnapshot(vaultID: vaultID, noteID: noteID)
             openNoteSnapshot = snapshot
-            hasRemoteUpdate = false
-            // Phase H slice 2: spin up a fresh CRDT for this note. Its
-            // initial state is empty; the WS SyncStep2 reply will seed
-            // it with the server's full state (see subscribeToOpenNote).
-            // openNoteLiveText stays nil until the first apply lands —
-            // the host falls back to snapshot.text for the initial
-            // render.
-            // nil on platforms without the yrs binding (visionOS):
-            // saves then use the text-diff endpoint instead.
-            openNoteCRDT = LumiCRDT.makeIfSupported()
-            openNoteLiveText = nil
+            #if canImport(YSwift)
+            if let session = openSession, session.vaultID == vaultID, session.noteID == noteID,
+               let state = snapshot.stateData {
+                session.mergeSnapshotState(state)
+            }
+            #endif
         } catch {
             openNoteSnapshot = nil
             openNoteError = error
-            openNoteCRDT = nil
-            openNoteLiveText = nil
         }
         openNoteIsLoading = false
     }
 
-    /// Replace the cached snapshot in place — used after a successful
-    /// `applyDiff` returns the post-merge text + new clock so the next
-    /// save anchors against the right CRDT position. Caller is expected
-    /// to have updated its own editor baseline already.
+    /// Replace the cached snapshot in place.
     public func setOpenNoteSnapshot(_ snapshot: RemoteNoteSnapshot) {
         openNoteSnapshot = snapshot
     }
 
-    /// Fold the result of a successful editor save into the caches.
-    /// Safe to call after the note was closed or the user navigated
-    /// elsewhere (the close/Esc auto-save path): the open-note snapshot is
-    /// only replaced when that same note is still open in `vaultID`, and
-    /// the list row is only bumped when the listed vault is `vaultID`.
+    /// Fold the result of a successful REST save into the caches. Safe to
+    /// call after the note was closed.
     public func recordSavedSnapshot(_ snapshot: RemoteNoteSnapshot, vaultID: UUID) {
         guard selectedVaultID == vaultID else { return }
         if openNoteSnapshot?.id == snapshot.id {
@@ -341,418 +253,36 @@ public final class RemoteVaultsStore {
         bumpNoteUpdatedAt(noteID: snapshot.id, path: snapshot.path)
     }
 
-    /// Clear the currently-open server note. UI calls this when the user
-    /// navigates back to the vault detail view. Also tears down the WS
-    /// sync subscription if one is active.
+    /// Clear the currently-open server note and destroy its session.
     public func closeOpenNote() {
-        unsubscribeFromOpenNote()
+        destroyOpenSession()
         openNoteSnapshot = nil
         openNoteError = nil
         openNoteIsLoading = false
-        hasRemoteUpdate = false
-        openNoteCRDT = nil
-        openNoteLiveText = nil
     }
 
-    /// Mark the pending remote-update signal as observed. Host calls this
-    /// after refetching the snapshot (or after deciding the user's dirty
-    /// edits will absorb the change on save). Cleared automatically by
-    /// `loadOpenNote` too.
-    public func acknowledgeRemoteUpdate() {
-        hasRemoteUpdate = false
-    }
+    // MARK: - Live session
 
-    // MARK: - WS sync subscription (slice 4e)
-
-    /// Open the live-sync WebSocket against the currently-open note.
-    /// Idempotent — call after `loadOpenNote` has settled. Pass the
-    /// `stateVector` so the server can compute Step2 against our position;
-    /// pass empty Data if unknown.
-    ///
-    /// `attempt` is the 1-based attempt counter. Hosts always pass the
-    /// default (1) on a fresh subscribe; the reconnect path passes the
-    /// bumped value so emitted `.willReconnect` events carry an honest
-    /// attempt number all the way back. Slice 4f.
-    ///
-    /// The store consumes the resulting event stream on the main actor;
-    /// the only host-observable signal is `hasRemoteUpdate`, which flips
-    /// to `true` when the server fans out a SyncUpdate from another
-    /// client. Hosts decide policy from there (refetch if clean, banner
-    /// if dirty).
-    public func subscribeToOpenNote(
-        vaultID: UUID,
-        noteID: String,
-        attempt: Int = 1,
-        presence: PresenceState? = nil
-    ) async {
-        unsubscribeFromOpenNote()
-        ownPresence = presence
-        let baseURL = await client.baseURL
-        let token = await client.token
-        guard let baseURL, let token, !token.isEmpty else {
-            // No session → skip silently. The REST path may still work
-            // with a stale token; we just won't have live updates.
+    /// Open (or keep) the live session for a note. Switching notes
+    /// destroys the previous session first — retargeting a replica is
+    /// forbidden (§2.2.1, V16). No-op on platforms without a CRDT.
+    public func openLiveSession(vaultID: UUID, noteID: String, user: AwarenessUser?) {
+        #if canImport(YSwift)
+        if let s = openSession, s.vaultID == vaultID, s.noteID == noteID, !s.isDestroyed {
+            if s.termination == nil { s.start() }
             return
         }
-        // Phase H slice 2: prefer the local CRDT's state vector over the
-        // snapshot's `vector_clock`. The snapshot SV is *the server's*
-        // notion of "fully synced", which is only correct if our local
-        // doc already mirrors the server. After a fresh open the local
-        // CRDT is empty, so an empty SV → server replies with the full
-        // state in SyncStep2 → we apply and converge. Falls back to the
-        // snapshot's SV when no CRDT is present (e.g. tests bypassing
-        // loadOpenNote).
-        let stateVector: Data
-        if let crdt = openNoteCRDT {
-            stateVector = await crdt.stateVector()
-        } else {
-            stateVector = decodeBase64StateVector(openNoteSnapshot?.vectorClock)
-        }
-        let sub = NoteSyncClient(
-            baseURL: baseURL,
-            token: token,
-            vaultID: vaultID,
-            noteID: noteID,
-            attempt: max(1, attempt),
-            clientID: presence?.clientID
-        )
-        syncClient = sub
-        syncOpenNoteKey = (vaultID, noteID)
-        openNotePhase = .connecting
-        sub.start(stateVector: stateVector)
-
-        syncEventsTask = Task { @MainActor [weak self] in
-            for await event in sub.events {
-                guard let self else { return }
-                switch event {
-                case .syncStep2(let payload), .syncUpdate(let payload):
-                    // Server sent a diff or another client's update.
-                    // Apply to the local CRDT (Phase H slice 2); on
-                    // success, publish the new live text so hosts can
-                    // merge clean-state edits. Also keep the legacy
-                    // `hasRemoteUpdate` flag set so dirty-state hosts
-                    // still surface the merge banner.
-                    await self.applyLiveUpdate(payload)
-                    self.hasRemoteUpdate = true
-                    if case .syncStep2 = event { self.openNotePhase = .live }
-                case .opened:
-                    // Arm the stability window — `decideReconnect` reads
-                    // this on the next willReconnect to decide whether
-                    // this drop continues the prior backoff curve or
-                    // starts a fresh one. Slice 4f.1.
-                    self.syncOpenedAt = Date()
-                    if self.openNotePhase != .live { self.openNotePhase = .syncing }
-                    // Clear the reconnect hint — we're connected again.
-                    // Slice 4f.2.
-                    self.reconnectStatus = nil
-                    // Phase H slice 4: broadcast our own presence so
-                    // peers see we're here. The server fans this out
-                    // to other subscribers but echoes it back to us
-                    // too — the `applyPresenceFrame` filter drops the
-                    // self-echo. The heartbeat keeps us alive in
-                    // peers' lists past the 30s outdatedTimeout and
-                    // makes us visible to peers who joined after
-                    // .opened fired.
-                    self.broadcastOwnPresence()
-                    self.startPresenceHeartbeat()
-                case .willReconnect(let nextAttempt, let delaySeconds):
-                    // Transient close — schedule a re-subscribe. The
-                    // host-layer decision honours stability: if we'd
-                    // been connected long enough before the drop, the
-                    // curve resets to attempt 1. Capping (8 attempts)
-                    // is enforced here, not in NoteSyncClient.
-                    let decision = Self.decideReconnect(
-                        suggestedAttempt: nextAttempt,
-                        suggestedDelay: delaySeconds,
-                        openedAt: self.syncOpenedAt,
-                        now: Date(),
-                        stabilityWindow: Self.reconnectStabilitySeconds
-                    )
-                    // Consume the stamp so a subsequent willReconnect
-                    // (without an intervening `.opened`) inherits the
-                    // bumped attempt instead of looping at 1.
-                    self.syncOpenedAt = nil
-                    self.openNotePhase = .offline
-                    // Publish a hint so the UI can render "reconnecting
-                    // in Ns…" while the sleep elapses. Cleared on the
-                    // next .opened or on unsubscribe. Slice 4f.2.
-                    //
-                    // Skipped when the host-side cap is about to drop
-                    // the attempt entirely — `scheduleReconnect` no-ops
-                    // beyond maxReconnectAttempts, and surfacing a hint
-                    // that never fires would just confuse the user.
-                    if decision.attempt <= Self.maxReconnectAttempts {
-                        self.reconnectStatus = ReconnectStatus(
-                            attempt: decision.attempt,
-                            delaySeconds: decision.delaySeconds,
-                            scheduledAt: Date()
-                        )
-                    } else {
-                        self.reconnectStatus = nil
-                    }
-                    self.scheduleReconnect(
-                        vaultID: vaultID,
-                        noteID: noteID,
-                        attempt: decision.attempt,
-                        delaySeconds: decision.delaySeconds
-                    )
-                case .awareness(let payload):
-                    // Phase H slice 4: decode peer presence + update
-                    // the room list. Malformed/foreign-format payloads
-                    // are silently ignored so a stray frame from a
-                    // different presence protocol doesn't disrupt us.
-                    self.applyPresenceFrame(payload)
-                case .closed:
-                    // No host-actionable signal beyond what
-                    // .willReconnect already conveyed.
-                    continue
-                }
-            }
-        }
+        destroyOpenSession()
+        let session = NoteSyncSession(vaultID: vaultID, noteID: noteID, connector: makeConnector(client), user: user)
+        openSession = session
+        session.start()
+        #endif
     }
 
-    /// Decide the effective (attempt, delay) for a reconnect cycle.
-    /// Pure — exposed `internal` for tests; production call site lives
-    /// in `subscribeToOpenNote`'s event loop.
-    ///
-    /// Rule: if the WS had been `.opened` and stayed connected for at
-    /// least `stabilityWindow` seconds before the willReconnect arrived,
-    /// the connection is treated as healthy-then-blipped and the next
-    /// retry starts at attempt = 1 (with the corresponding short delay).
-    /// Otherwise we honour `NoteSyncClient`'s suggestion (a continuation
-    /// of the prior backoff curve).
-    ///
-    /// Slice 4f.1.
-    static func decideReconnect(
-        suggestedAttempt: Int,
-        suggestedDelay: Double,
-        openedAt: Date?,
-        now: Date,
-        stabilityWindow: TimeInterval
-    ) -> (attempt: Int, delaySeconds: Double) {
-        if let openedAt, now.timeIntervalSince(openedAt) >= stabilityWindow {
-            return (1, NoteSyncClient.backoffSeconds(attempt: 1))
-        }
-        return (suggestedAttempt, suggestedDelay)
-    }
-
-    /// Apply a WS-delivered Y.Doc update payload to the open-note CRDT
-    /// and republish the resulting text. Phase H slice 2.
-    ///
-    /// Tolerant of failure: a malformed payload from a misbehaving peer
-    /// shouldn't tear down the subscription. We log nothing (no logging
-    /// surface in LumiKit yet) but leave `openNoteLiveText` unchanged
-    /// so the host renders the prior known-good state. The next valid
-    /// update will overwrite it.
-    ///
-    /// Internal because the host never drives this directly — the WS
-    /// event loop is the only caller. `package` would be nicer but
-    /// LumiKit doesn't ship sub-modules yet; `func`-default visibility
-    /// (internal) is fine because LumiKitTests has `@testable import`.
-    func applyLiveUpdate(_ payload: Data) async {
-        guard let crdt = openNoteCRDT, !payload.isEmpty else { return }
-        do {
-            try await crdt.apply(update: payload)
-            openNoteLiveText = await crdt.text()
-        } catch {
-            // Apply failed (malformed bytes). Don't tear down the WS
-            // subscription — a single bad frame may still be followed
-            // by valid ones. Don't touch openNoteLiveText so the host's
-            // last known-good render survives.
-            _ = error
-        }
-    }
-
-    /// Encode our own `ownPresence` (if set) and ship it over the WS
-    /// awareness channel. Called from the `.opened` handler so the
-    /// frame goes out the moment we know peers can hear us. Silent
-    /// no-op when no own presence has been registered (e.g. the host
-    /// chose REST-only mode or the user hasn't completed auth).
-    /// Phase H slice 4.
-    private func broadcastOwnPresence() {
-        guard let presence = ownPresence, let client = syncClient else { return }
-        do {
-            let payload = try presence.encoded()
-            client.send(awareness: payload)
-        } catch {
-            // JSON-encoding a Codable struct can't realistically fail
-            // for our shape, but if it does the host has no recourse —
-            // peers just won't see us. Swallow.
-            _ = error
-        }
-    }
-
-    /// Decode an incoming awareness payload and update the presence
-    /// list. Drops our own echo (server fans out to ALL subscribers
-    /// including the origin) by matching on `clientID`.
-    ///
-    /// Recognises two frame shapes:
-    /// - **Normal heartbeat** — full presence struct; upserts the peer
-    ///   and refreshes the `lastSeen` stamp used by `cullStalePresence`.
-    /// - **Leave frame** (`left: true`, server-emitted on disconnect) —
-    ///   drops the peer immediately so the UI doesn't carry a stale
-    ///   chip for up to a full TTL window after a clean disconnect.
-    ///
-    /// Phase H slice 4 + post-H follow-up.
-    func applyPresenceFrame(_ payload: Data) {
-        applyPresenceFrame(payload, now: Date())
-    }
-
-    /// Test-seam variant of `applyPresenceFrame` so the lastSeen stamp
-    /// can be driven from a fixed clock.
-    func applyPresenceFrame(_ payload: Data, now: Date) {
-        guard let peer = try? PresenceState.decoded(from: payload) else { return }
-        // Filter our own echo. Different devices for the same user
-        // sign in with different clientIDs so both show up as distinct
-        // peers — only "this exact session" is filtered.
-        if let mine = ownPresence, mine.clientID == peer.clientID { return }
-        if peer.left == true {
-            presenceByClient.removeValue(forKey: peer.clientID)
-            presenceLastSeen.removeValue(forKey: peer.clientID)
-            refreshOpenNotePresence()
-            return
-        }
-        presenceByClient[peer.clientID] = peer
-        presenceLastSeen[peer.clientID] = now
-        refreshOpenNotePresence()
-    }
-
-    /// Drop peers whose last heartbeat is older than
-    /// `presenceStaleSeconds`. Called from the heartbeat tick so the
-    /// cull cadence matches the broadcast cadence. Pure on the supplied
-    /// clock; exposed `internal` for tests.
-    func cullStalePresence(now: Date = Date()) {
-        let threshold = now.addingTimeInterval(-Self.presenceStaleSeconds)
-        var removed = false
-        for (id, seen) in presenceLastSeen where seen < threshold {
-            presenceByClient.removeValue(forKey: id)
-            presenceLastSeen.removeValue(forKey: id)
-            removed = true
-        }
-        if removed { refreshOpenNotePresence() }
-    }
-
-    /// Republish the sorted presence list. Centralised so every mutator
-    /// uses the same ordering rule.
-    private func refreshOpenNotePresence() {
-        openNotePresence = presenceByClient.values.sorted {
-            $0.clientID.uuidString < $1.clientID.uuidString
-        }
-    }
-
-    /// Start a recurring heartbeat that re-broadcasts `ownPresence`
-    /// every `presenceHeartbeatSeconds`. Idempotent — cancels any
-    /// prior task first. No-op when `ownPresence` is nil (listen-only
-    /// host). Cancelled by `stopPresenceHeartbeat()` /
-    /// `unsubscribeFromOpenNote()`. Phase H follow-up.
-    private func startPresenceHeartbeat() {
-        stopPresenceHeartbeat()
-        guard ownPresence != nil else { return }
-        let interval = Self.presenceHeartbeatSeconds
-        presenceHeartbeatTask = Task { @MainActor [weak self] in
-            let ns = UInt64(interval * 1_000_000_000)
-            while !Task.isCancelled {
-                do {
-                    try await Task.sleep(nanoseconds: ns)
-                } catch {
-                    return
-                }
-                guard let self else { return }
-                // Tick housekeeping: cull stale peers first so the UI
-                // doesn't show ghosts past their TTL even when the
-                // server's leave frame never arrived (hard network
-                // drop, server restart). Then re-broadcast our own
-                // presence so peers keep seeing us. If we've torn down
-                // the subscription mid-sleep, ownPresence is nil and
-                // broadcastOwnPresence no-ops — safe to keep ticking
-                // until the task is cancelled.
-                self.cullStalePresence()
-                self.broadcastOwnPresence()
-            }
-        }
-    }
-
-    /// Stop the heartbeat task. Idempotent.
-    private func stopPresenceHeartbeat() {
-        presenceHeartbeatTask?.cancel()
-        presenceHeartbeatTask = nil
-    }
-
-    /// Reset the presence cache. Called from unsubscribe/close/clear
-    /// so a re-open starts with no stale peers visible. Phase H slice 4.
-    private func resetPresence() {
-        stopPresenceHeartbeat()
-        presenceByClient = [:]
-        presenceLastSeen = [:]
-        openNotePresence = []
-        ownPresence = nil
-    }
-
-    /// Tear down the WS sync subscription. Idempotent.
-    public func unsubscribeFromOpenNote() {
-        syncReconnectTask?.cancel()
-        syncReconnectTask = nil
-        syncEventsTask?.cancel()
-        syncEventsTask = nil
-        syncClient?.stop()
-        syncClient = nil
-        syncOpenNoteKey = nil
-        syncOpenedAt = nil
-        reconnectStatus = nil
-        openNotePhase = .closed
-        resetPresence()
-    }
-
-    /// Sleep `delaySeconds`, then re-issue `subscribeToOpenNote` with the
-    /// bumped attempt count. Caps at `maxReconnectAttempts` — beyond
-    /// that we leave the WS quiet and let the host decide whether to
-    /// surface a banner or wait for the user to re-open the note. Slice
-    /// 4f.
-    private func scheduleReconnect(vaultID: UUID, noteID: String,
-                                   attempt: Int, delaySeconds: Double) {
-        guard attempt <= Self.maxReconnectAttempts else {
-            // Exhausted retries — clear the open-note key so a stale
-            // entry doesn't leak into a future surprise reconnect.
-            syncOpenNoteKey = nil
-            return
-        }
-        syncReconnectTask?.cancel()
-        syncReconnectTask = Task { @MainActor [weak self] in
-            // Convert to nanoseconds. Negative/zero delay is fine — sleep
-            // returns immediately. Cancellation throws, which is caught
-            // below as the "stop while waiting" path.
-            let ns = UInt64(max(0, delaySeconds) * 1_000_000_000)
-            do {
-                try await Task.sleep(nanoseconds: ns)
-            } catch {
-                return
-            }
-            guard let self else { return }
-            // If the user closed the note (or re-opened a different one)
-            // while we were sleeping, the key was cleared or replaced —
-            // don't double-subscribe.
-            guard let key = self.syncOpenNoteKey,
-                  key.vaultID == vaultID,
-                  key.noteID == noteID else {
-                return
-            }
-            // Phase H slice 4: re-use the same presence on reconnect so
-            // peers don't see us disappear+reappear when the network
-            // blips. ownPresence is set by the original subscribe and
-            // cleared on host-driven unsubscribe — re-passing it here
-            // is safe even when it's nil.
-            let presence = self.ownPresence
-            await self.subscribeToOpenNote(vaultID: vaultID, noteID: noteID, attempt: attempt, presence: presence)
-        }
-    }
-
-    /// Decode the base64 state vector from a `RemoteNoteSnapshot.vectorClock`
-    /// into the raw `Data` we'd send as `SyncStep1`'s body. Returns empty
-    /// Data when the clock string is empty or undecodable (server still
-    /// replies with a full Step2 in that case).
-    private func decodeBase64StateVector(_ clock: String?) -> Data {
-        guard let clock, !clock.isEmpty else { return Data() }
-        return Data(base64Encoded: clock) ?? Data()
+    /// Tear down the open note's session (if any).
+    public func destroyOpenSession() {
+        openSession?.destroy()
+        openSession = nil
     }
 
     /// Bump the `updatedAt` of a cached note row to now. Used after a
@@ -814,14 +344,8 @@ public final class RemoteVaultsStore {
         }
         try await client.deleteNote(vaultID: vaultID, noteID: noteID)
         notes.removeAll { $0.id == noteID }
-        if openNoteSnapshot?.id == noteID {
-            unsubscribeFromOpenNote()
-            openNoteSnapshot = nil
-            openNoteError = nil
-            openNoteIsLoading = false
-            hasRemoteUpdate = false
-            openNoteCRDT = nil
-            openNoteLiveText = nil
+        if openNoteSnapshot?.id == noteID || openSession?.noteID == noteID {
+            closeOpenNote()
         }
     }
 
@@ -985,14 +509,13 @@ public final class RemoteVaultsStore {
             notes = []
             notesHasMore = false
             openNoteSnapshot = nil
-            openNoteCRDT = nil
-            openNoteLiveText = nil
+            destroyOpenSession()
         }
     }
 
     /// Wipe all state. Call on sign-out so the next sign-in starts clean.
     public func clear() {
-        unsubscribeFromOpenNote()
+        destroyOpenSession()
         vaults = []
         selectedVaultID = nil
         members = []
@@ -1005,9 +528,6 @@ public final class RemoteVaultsStore {
         openNoteSnapshot = nil
         openNoteError = nil
         openNoteIsLoading = false
-        hasRemoteUpdate = false
-        openNoteCRDT = nil
-        openNoteLiveText = nil
         lastError = nil
         isLoading = false
     }

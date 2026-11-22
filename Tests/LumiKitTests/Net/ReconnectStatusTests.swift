@@ -74,14 +74,14 @@ struct RemoteVaultsStoreReconnectStatusTests {
         #expect(store.reconnectStatus == nil)
     }
 
-    @Test("unsubscribeFromOpenNote clears any pending reconnect hint")
+    @Test("closing the open note clears any pending reconnect hint")
     func unsubscribeClears() async {
         let client = LumiAPIClient()
         let store = RemoteVaultsStore(client: client)
         // We can't reach the private setter from the test, but calling
         // unsubscribe before anything is open must be safely no-op AND
         // leave reconnectStatus nil (default).
-        store.unsubscribeFromOpenNote()
+        store.closeOpenNote()
         #expect(store.reconnectStatus == nil)
 
         // clear() is the broader sign-out path; same expectation.
