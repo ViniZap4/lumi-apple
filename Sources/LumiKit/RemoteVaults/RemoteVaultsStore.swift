@@ -169,10 +169,39 @@ public final class RemoteVaultsStore {
     private let auditPageSize: Int = 50
     private let notesPageSize: Int = 100
 
-    private let client: LumiAPIClient
+    @ObservationIgnored private var client: LumiAPIClient
+
+    /// CRDT session phase of the open note (CRDT-CLIENT-PROTOCOL §2.1),
+    /// fed into the book sync status (SPEC-LIVROS §4.2).
+    public private(set) var openNotePhase: EditorSnapshot.Phase = .closed
 
     public init(client: LumiAPIClient) {
         self.client = client
+    }
+
+    /// The account client this store talks through. Books bound to
+    /// different accounts swap the client; state is cleared on change so
+    /// nothing from one account leaks into another.
+    public var apiClient: LumiAPIClient { client }
+
+    public func setClient(_ newClient: LumiAPIClient) {
+        guard newClient !== client else { return }
+        clear()
+        client = newClient
+    }
+
+    /// Merge a feed catch-up into the visible note list (only when that
+    /// vault is the selected one). `nil` = server lacks `/changes`, refetch.
+    public func applyCatchUp(_ outcome: CatchUpOutcome?, vaultID: UUID) async {
+        guard selectedVaultID == vaultID else { return }
+        guard let outcome else {
+            if let resp = try? await client.listNotes(vaultID: vaultID, limit: notesPageSize, offset: 0) {
+                notes = resp.notes
+                notesHasMore = resp.notes.count >= notesPageSize
+            }
+            return
+        }
+        notes = CatchUp.apply(outcome, to: notes)
     }
 
     /// Pull the vault list from the server. Replaces the current `vaults`
@@ -389,6 +418,7 @@ public final class RemoteVaultsStore {
         )
         syncClient = sub
         syncOpenNoteKey = (vaultID, noteID)
+        openNotePhase = .connecting
         sub.start(stateVector: stateVector)
 
         syncEventsTask = Task { @MainActor [weak self] in
@@ -404,12 +434,14 @@ public final class RemoteVaultsStore {
                     // still surface the merge banner.
                     await self.applyLiveUpdate(payload)
                     self.hasRemoteUpdate = true
+                    if case .syncStep2 = event { self.openNotePhase = .live }
                 case .opened:
                     // Arm the stability window — `decideReconnect` reads
                     // this on the next willReconnect to decide whether
                     // this drop continues the prior backoff curve or
                     // starts a fresh one. Slice 4f.1.
                     self.syncOpenedAt = Date()
+                    if self.openNotePhase != .live { self.openNotePhase = .syncing }
                     // Clear the reconnect hint — we're connected again.
                     // Slice 4f.2.
                     self.reconnectStatus = nil
@@ -440,6 +472,7 @@ public final class RemoteVaultsStore {
                     // (without an intervening `.opened`) inherits the
                     // bumped attempt instead of looping at 1.
                     self.syncOpenedAt = nil
+                    self.openNotePhase = .offline
                     // Publish a hint so the UI can render "reconnecting
                     // in Ns…" while the sleep elapses. Cleared on the
                     // next .opened or on unsubscribe. Slice 4f.2.
@@ -666,6 +699,7 @@ public final class RemoteVaultsStore {
         syncOpenNoteKey = nil
         syncOpenedAt = nil
         reconnectStatus = nil
+        openNotePhase = .closed
         resetPresence()
     }
 
