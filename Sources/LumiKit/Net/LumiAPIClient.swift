@@ -335,12 +335,13 @@ public actor LumiAPIClient {
         vaultID: UUID,
         noteID: String,
         baseClock: String?,
+        baseState: String? = nil,
         text: String,
         origin: String = "apple-diff"
     ) async throws(LumiAPIError) -> RemoteNoteSnapshot {
         let escaped = noteID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? noteID
         let path = "/api/vaults/\(vaultID.uuidString.lowercased())/notes/\(escaped)/diff"
-        let body = ApplyDiffRequest(baseClock: baseClock, text: text, origin: origin)
+        let body = ApplyDiffRequest(baseClock: baseClock, baseState: baseState, text: text, origin: origin)
         return try await request(method: "POST", path: path, body: body, requireToken: true)
     }
 
@@ -366,6 +367,16 @@ public actor LumiAPIClient {
         let path = "/api/vaults/\(vaultID.uuidString.lowercased())/notes/\(escaped)/diff"
         let body = ApplyUpdateRequest(update: update.base64EncodedString(), origin: origin)
         return try await request(method: "POST", path: path, body: body, requireToken: true)
+    }
+
+    /// `POST /api/vaults/:vault/notes/:id/ws-ticket` — mints a single-use
+    /// (~30 s) ticket for the live-sync WebSocket upgrade (`?ticket=`),
+    /// so the long-lived token never lands in a URL. Servers without the
+    /// endpoint answer 404; callers then fall back to `?token=`.
+    public func createWSTicket(vaultID: UUID, noteID: String) async throws(LumiAPIError) -> WSTicket {
+        let escaped = noteID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? noteID
+        let path = "/api/vaults/\(vaultID.uuidString.lowercased())/notes/\(escaped)/ws-ticket"
+        return try await request(method: "POST", path: path, body: EmptyBody(), requireToken: true)
     }
 
     /// `POST /api/vaults/:vault/notes` — capability `note.create` required.
@@ -688,11 +699,20 @@ struct ApplyUpdateRequest: Encodable, Sendable {
 /// "apple-diff" is the canonical case for this client.
 struct ApplyDiffRequest: Encodable, Sendable {
     let baseClock: String?
+    var baseState: String? = nil
     let text: String
     let origin: String
 
+    init(baseClock: String?, baseState: String? = nil, text: String, origin: String) {
+        self.baseClock = baseClock
+        self.baseState = baseState
+        self.text = text
+        self.origin = origin
+    }
+
     enum CodingKeys: String, CodingKey {
         case baseClock = "base_clock"
+        case baseState = "base_state"
         case text, origin
     }
 
@@ -703,6 +723,9 @@ struct ApplyDiffRequest: Encodable, Sendable {
         // save case where no prior clock has been observed.
         if let baseClock, !baseClock.isEmpty {
             try c.encode(baseClock, forKey: .baseClock)
+        }
+        if let baseState, !baseState.isEmpty {
+            try c.encode(baseState, forKey: .baseState)
         }
         try c.encode(text, forKey: .text)
         try c.encode(origin, forKey: .origin)

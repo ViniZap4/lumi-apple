@@ -7,7 +7,9 @@ import Foundation
 /// Wire format:
 ///
 ///     Message     ::= varInt(messageType) + payload
-///     messageType ::= 0 Sync | 1 Awareness | 3 Auth | 4 QueryAwareness
+///     messageType ::= 0 Sync | 1 Awareness | 2 Auth | 3 QueryAwareness
+///
+/// (y-websocket numbering; the server aligned in wave 1b, §10 S8.)
 ///
 ///     Sync payload ::= varInt(syncSubType) + body
 ///     syncSubType  ::= 0 Step1 (body=stateVector)
@@ -18,16 +20,15 @@ import Foundation
 ///
 /// varInt is lib0's unsigned LEB128. varBytes is varInt(len) + bytes.
 ///
-/// Slice 4e of phase E.1.2 uses these primitives just to *subscribe* to
-/// live updates (open the WS, parse incoming frames enough to know "a
-/// remote update arrived"); it does NOT decode or apply the Y.Doc updates
-/// to a local CRDT. That's reserved for a future Phase H slice once a
-/// yswift-equivalent Swift Yjs binding lands.
+/// Awareness bodies are standard y-protocols awareness updates — see
+/// `AwarenessCodec`.
 public enum YProtocol {
     public static let messageSync: UInt8 = 0
     public static let messageAwareness: UInt8 = 1
-    public static let messageAuth: UInt8 = 3
-    public static let messageQueryAwareness: UInt8 = 4
+    public static let messageAuth: UInt8 = 2
+    public static let messageQueryAwareness: UInt8 = 3
+    /// Auth sub-type: permission denied (`y-protocols/auth.js`).
+    public static let authPermissionDenied: UInt8 = 0
 
     public static let syncStep1: UInt8 = 0
     public static let syncStep2: UInt8 = 1
@@ -142,6 +143,12 @@ public enum YProtocol {
         return out
     }
 
+    /// `[messageQueryAwareness]` — asks the server for every known
+    /// awareness state.
+    public static func encodeQueryAwareness() -> Data {
+        Data([messageQueryAwareness])
+    }
+
     // MARK: - Decoder
 
     /// Parse a single inbound WebSocket binary frame. Returns the decoded
@@ -167,8 +174,11 @@ public enum YProtocol {
             return ParsedMessage(type: type)
 
         case messageAuth:
-            // Body shape varies per Yjs client; treat as opaque.
-            return ParsedMessage(type: type)
+            // `[2, 0 permissionDenied, varString reason]`; keep the
+            // sub-type in `syncSub` and the rest opaque.
+            let sub: UInt8 = data.count >= 2 ? data[data.index(data.startIndex, offsetBy: 1)] : 0
+            let body = data.count > 2 ? Data(data.dropFirst(2)) : Data()
+            return ParsedMessage(type: type, syncSub: sub, body: body)
 
         default:
             throw DecodeError.unknownMessageType(type)

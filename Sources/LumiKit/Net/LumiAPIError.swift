@@ -34,7 +34,7 @@ extension LumiAPIError {
     public var isApplyDiffConflict: Bool {
         if case let .server(status, code, _) = self,
            status == 409,
-           code == "conflict" {
+           ["conflict", "base_required", "base_mismatch"].contains(code) {
             return true
         }
         return false

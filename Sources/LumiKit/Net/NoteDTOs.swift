@@ -126,16 +126,45 @@ public struct RemoteNoteSnapshot: Decodable, Sendable, Equatable, Identifiable {
     public let text: String
     /// Base64-encoded lib0-v1 state vector.
     public let vectorClock: String
+    /// Base64 full encoded doc (`EncodeStateAsUpdate`, §10 S9). The base
+    /// of a 3-way `/diff {text, base_state}` and what a pull-to-refresh
+    /// merges into a live replica. Absent on `/diff` responses and on
+    /// servers predating wave 1b.
+    public let state: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, path, text
+        case id, path, text, state
         case vectorClock = "vector_clock"
     }
 
-    public init(id: String, path: String, text: String, vectorClock: String) {
+    public init(id: String, path: String, text: String, vectorClock: String, state: String? = nil) {
         self.id = id
         self.path = path
         self.text = text
         self.vectorClock = vectorClock
+        self.state = state
+    }
+
+    /// Decoded `state`, nil when absent or malformed.
+    public var stateData: Data? {
+        guard let state, !state.isEmpty else { return nil }
+        return Data(base64Encoded: state)
+    }
+}
+
+/// `POST /api/vaults/:vault/notes/:id/ws-ticket` response: a single-use
+/// ticket valid for ~30 s, presented as `?ticket=` on the WS upgrade.
+public struct WSTicket: Decodable, Sendable, Equatable {
+    public let ticket: String
+    public let expiresAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case ticket
+        case expiresAt = "expires_at"
+    }
+
+    public init(ticket: String, expiresAt: String? = nil) {
+        self.ticket = ticket
+        self.expiresAt = expiresAt
     }
 }
