@@ -2,12 +2,15 @@ import SwiftUI
 import LumiKit
 import LumiUI
 
-/// Read + edit viewer for a server-vault note (E.1.2 slices 2 + 3). View
-/// mode renders the markdown body via the shared `MarkdownView` pipeline;
-/// edit mode hosts `VimEditor` (or `PlainTextEditor` if vim is off) bound
-/// to `AppState.remoteEditor.currentText`, with ⌘S → `PATCH .../notes/:id`.
-/// Local-vault reading-mode glide-scroll + link tooltips are deferred to a
-/// later slice that hoists `MarkdownReader` into LumiUI.
+/// Read + edit viewer for a server-vault note.
+///
+/// macOS / iOS: the note's live CRDT session (`store.openSession`, one
+/// replica for as long as the note is open) drives both modes. The REST
+/// snapshot is only a read-only preview while the session connects; the
+/// editor mounts once the first SyncStep2 arrived, starting from the
+/// replica text, and every keystroke goes out as a ranged op — there is
+/// no Save step. visionOS (no local CRDT) keeps the REST editor
+/// (`AppState.remoteEditor`, ⌘S → 3-way `/diff`).
 struct RemoteNoteDetailView: View {
     /// Server-vault row this note belongs to. Used for the header chrome.
     let vault: RemoteVault
@@ -37,7 +40,7 @@ struct RemoteNoteDetailView: View {
                 .padding(.horizontal, 32)
                 .padding(.bottom, 8)
 
-            remoteUpdateBanner
+            sessionBanner
                 .padding(.horizontal, 32)
                 .padding(.bottom, 8)
 
@@ -49,12 +52,6 @@ struct RemoteNoteDetailView: View {
         .onAppear(perform: ensureLoaded)
         .onChange(of: appState.remoteVaultsStore.openNoteSnapshot) { _, newSnapshot in
             handleSnapshotChange(newSnapshot)
-        }
-        .onChange(of: appState.remoteVaultsStore.hasRemoteUpdate) { _, flag in
-            handleRemoteUpdateFlag(flag)
-        }
-        .onChange(of: appState.remoteVaultsStore.openNoteLiveText) { _, newText in
-            handleLiveTextChange(newText)
         }
     }
 
@@ -85,7 +82,11 @@ struct RemoteNoteDetailView: View {
                     .labelsHidden()
                 }
 
-                if appState.remoteEditor.isDirty {
+                if let session = liveSession {
+                    Text(phaseLabel(session))
+                        .font(.caption2)
+                        .foregroundStyle(session.phase == .live ? theme.accent : theme.warning)
+                } else if appState.remoteEditor.isDirty {
                     Text("modified")
                         .font(.caption2)
                         .foregroundStyle(theme.warning)
@@ -99,7 +100,7 @@ struct RemoteNoteDetailView: View {
                         .foregroundStyle(theme.accent)
                 }
 
-                if canEditNotes {
+                if canEditNotes && liveSession == nil {
                     Button(action: requestSave) {
                         Label("Save", systemImage: "checkmark")
                             .labelStyle(.iconOnly)
@@ -155,7 +156,7 @@ struct RemoteNoteDetailView: View {
                         Circle()
                             .fill(Color(hex: peer.color))
                             .frame(width: 6, height: 6)
-                        Text(peer.displayName)
+                        Text(peer.name)
                             .font(.caption2)
                             .foregroundStyle(theme.text)
                     }
@@ -223,30 +224,55 @@ struct RemoteNoteDetailView: View {
         }
     }
 
-    /// "Remote changes pending" banner — shown only when the user has
-    /// dirty edits AND a remote update has arrived. When the user isn't
-    /// dirty, we auto-refetch instead (handled by `handleRemoteUpdateFlag`).
+    /// Live-session notices: fatal closes (§5), "cannot reach live
+    /// editing", and the legacy uninitialised-note recovery (§2.2.5).
     @ViewBuilder
-    private var remoteUpdateBanner: some View {
-        if appState.remoteVaultsStore.hasRemoteUpdate && appState.remoteEditor.isDirty {
-            HStack(spacing: 8) {
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .foregroundStyle(theme.info)
-                Text("remote changes pending — your next save will merge them via the server CRDT")
-                    .font(.system(.callout, design: .monospaced))
-                    .foregroundStyle(theme.text)
-                Spacer()
+    private var sessionBanner: some View {
+        if let session = liveSession {
+            if let termination = session.termination {
+                bannerRow(icon: "lock", tint: theme.warning, message: describe(termination))
+            } else if let notice = session.connectionNotice {
+                bannerRow(icon: "wifi.exclamationmark", tint: theme.warning, message: notice)
+            } else if session.hasSynced, session.emptyAtSync, session.text.isEmpty,
+                      let body = appState.remoteVaultsStore.openNoteSnapshot?.text, !body.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "doc.badge.arrow.up")
+                        .foregroundStyle(theme.info)
+                    Text("the live document is empty but the file has content")
+                        .font(.system(.callout, design: .monospaced))
+                        .foregroundStyle(theme.text)
+                    Spacer()
+                    Button("Load file contents") { session.initialiseFromFile(body) }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(theme.primary)
+                }
+                .padding(8)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(theme.info.opacity(0.08))
+                )
             }
-            .padding(8)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(theme.info.opacity(0.08))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .stroke(theme.info.opacity(0.4), lineWidth: 0.5)
-                    )
-            )
         }
+    }
+
+    private func bannerRow(icon: String, tint: Color, message: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .foregroundStyle(tint)
+            Text(message)
+                .font(.system(.callout, design: .monospaced))
+                .foregroundStyle(theme.text)
+            Spacer()
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(tint.opacity(0.08))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(tint.opacity(0.4), lineWidth: 0.5)
+                )
+        )
     }
 
     /// Strict-conflict banner — shown when `applyDiff` was rejected and
@@ -329,13 +355,13 @@ struct RemoteNoteDetailView: View {
             MarkdownReader(
                 title: displayTitle,
                 tags: [],
-                text: appState.remoteEditor.currentText,
+                text: readText,
                 // Server notes have no on-disk URL → cache is disabled, but
                 // MarkdownReader handles the nil path cleanly.
                 noteURL: nil,
                 baseURL: nil,
                 vaultRoot: nil,
-                isDirty: appState.remoteEditor.isDirty,
+                isDirty: liveSession == nil && appState.remoteEditor.isDirty,
                 scale: appState.preferences.readingScale,
                 fontFamily: markdownFontFamilyFromPreferences,
                 contentAnimations: appState.preferences.contentAnimations,
@@ -361,11 +387,11 @@ struct RemoteNoteDetailView: View {
 
     @ViewBuilder
     private var editMode: some View {
-        @Bindable var editor = appState.remoteEditor
-        Group {
-            if appState.preferences.vimEnabled {
+        if let session = liveSession {
+            if session.isEditable {
                 VimEditor(
-                    text: $editor.currentText,
+                    document: session,
+                    vimEnabled: appState.preferences.vimEnabled,
                     onModeChange: { appState.liveVimMode = $0 },
                     onEffect: handleVimEffect,
                     jjEscapeEnabled: appState.preferences.jjEscapeMapping,
@@ -373,9 +399,81 @@ struct RemoteNoteDetailView: View {
                     relativeLineNumbers: appState.preferences.relativeLineNumbers
                 )
                 .overlay(alignment: .top) { editModeStripe }
+                // One editor per replica: a new session remounts it.
+                .id(ObjectIdentifier(session))
             } else {
-                PlainTextEditor(text: $editor.currentText)
+                // §2.2.3: read-only preview until the first SyncStep2.
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 6) {
+                        if session.termination == nil { ProgressView().controlSize(.small) }
+                        Text(session.termination.map(describe) ?? "connecting to live editing…")
+                            .font(.system(.callout, design: .monospaced))
+                            .foregroundStyle(theme.textDim)
+                    }
+                    ScrollView {
+                        Text(readText)
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(theme.textDim)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
+        } else {
+            @Bindable var editor = appState.remoteEditor
+            Group {
+                if appState.preferences.vimEnabled {
+                    VimEditor(
+                        text: $editor.currentText,
+                        onModeChange: { appState.liveVimMode = $0 },
+                        onEffect: handleVimEffect,
+                        jjEscapeEnabled: appState.preferences.jjEscapeMapping,
+                        showLineNumbers: appState.preferences.showLineNumbers,
+                        relativeLineNumbers: appState.preferences.relativeLineNumbers
+                    )
+                    .overlay(alignment: .top) { editModeStripe }
+                } else {
+                    PlainTextEditor(text: $editor.currentText)
+                }
+            }
+        }
+    }
+
+    /// The open note's live session, when it belongs to this note.
+    private var liveSession: OpenNoteSession? {
+        guard let s = appState.remoteVaultsStore.openSession, s.noteID == listRow.id, !s.isDestroyed else { return nil }
+        return s
+    }
+
+    /// Text for read mode: the live replica once synced, else the REST
+    /// preview (or the REST editor's buffer on visionOS).
+    private var readText: String {
+        if let s = liveSession, s.hasSynced { return s.text }
+        if LumiCRDT.isSupported {
+            return appState.remoteVaultsStore.openNoteSnapshot.flatMap { $0.id == listRow.id ? $0.text : nil } ?? ""
+        }
+        return appState.remoteEditor.currentText
+    }
+
+    private func phaseLabel(_ session: OpenNoteSession) -> String {
+        switch session.phase {
+        case .live: return session.peers.isEmpty ? "live" : "live · \(session.peers.count + 1) editing"
+        case .syncing: return "syncing…"
+        case .connecting: return "connecting…"
+        case .offline: return session.hasPendingLocalChanges ? "offline · edits pending" : "offline"
+        case .closed: return "closed"
+        }
+    }
+
+    private func describe(_ termination: SessionTermination) -> String {
+        switch termination {
+        case .unauthorized: return "session expired — sign in again to keep editing"
+        case .forbidden: return "read-only — you don't have note.edit on this vault"
+        case .notFound: return "this note was deleted on the server"
+        case .policy: return "too many open live sessions — close another note and retry"
+        case .notConfigured: return "no server session — sign in to edit live"
         }
     }
 
@@ -434,66 +532,30 @@ struct RemoteNoteDetailView: View {
     private func ensureLoaded() {
         appState.remoteEditorMode = .view
         let store = appState.remoteVaultsStore
-        let presence = makeOwnPresence()
-        if let current = store.openNoteSnapshot, current.id == listRow.id {
+        let vaultID = vault.id
+        let noteID = listRow.id
+        if LumiCRDT.isSupported && canEditNotes {
+            // One replica per open note: joins empty, syncs, keeps the
+            // doc across reconnects (CRDT-CLIENT-PROTOCOL §2, §5).
+            store.openLiveSession(vaultID: vaultID, noteID: noteID, user: awarenessUser)
+        }
+        if let current = store.openNoteSnapshot, current.id == noteID {
             seedEditorIfNeeded(from: current)
-            // Idempotent — no-ops if already subscribed.
-            Task { await store.subscribeToOpenNote(vaultID: vault.id, noteID: listRow.id, presence: presence) }
             return
         }
-        Task {
-            await store.loadOpenNote(vaultID: vault.id, noteID: listRow.id)
-            await store.subscribeToOpenNote(vaultID: vault.id, noteID: listRow.id, presence: presence)
-        }
+        // REST snapshot: preview while connecting + "Load file contents".
+        Task { await store.loadOpenNote(vaultID: vaultID, noteID: noteID) }
     }
 
-    /// Build a presence broadcast for the local user from `AuthService`
-    /// + `AppState.clientID`. Returns nil when there's no active
-    /// session (REST-only mode or pre-login state) — the store treats
-    /// nil as "don't broadcast, just listen". Phase H slice 4.
-    private func makeOwnPresence() -> PresenceState? {
+    /// The local user as published over y-protocols awareness.
+    private var awarenessUser: AwarenessUser? {
         guard let account = appState.activeAccount else { return nil }
-        return PresenceState.make(
-            clientID: appState.clientID,
-            username: account.username,
-            displayName: account.displayName
-        )
-    }
-
-    /// React to the store's `hasRemoteUpdate` flag flipping to `true`.
-    /// Policy: if the user has NO dirty edits, refetch the snapshot
-    /// silently — the screen updates to reflect the new server state.
-    /// If they DO have dirty edits, leave the flag set so the banner
-    /// shows; the next save's `applyDiff` will merge.
-    private func handleRemoteUpdateFlag(_ flag: Bool) {
-        guard flag else { return }
-        if !appState.remoteEditor.isDirty {
-            let store = appState.remoteVaultsStore
-            Task { await store.loadOpenNote(vaultID: vault.id, noteID: listRow.id) }
-        }
-        // Else: banner picks up the flag; user will save through it.
+        return AwarenessUser(username: account.username, displayName: account.displayName)
     }
 
     private func handleSnapshotChange(_ newSnapshot: RemoteNoteSnapshot?) {
         guard let newSnapshot else { return }
         seedEditorIfNeeded(from: newSnapshot)
-    }
-
-    /// Merge a live CRDT-driven text update from the WS into the editor.
-    /// Phase H slice 2. Only applies when the editor is bound to this
-    /// note AND the user isn't dirty — a dirty user keeps their edits
-    /// and the remote-update banner (driven by `hasRemoteUpdate`)
-    /// surfaces the pending merge until they save. Skips no-op
-    /// transitions where the live text matches what we already render
-    /// (avoids stomping `originalText` on a self-echo).
-    private func handleLiveTextChange(_ newText: String?) {
-        guard let newText else { return }
-        let editor = appState.remoteEditor
-        guard editor.isBound(toVaultID: vault.id, noteID: listRow.id) else { return }
-        guard !editor.isDirty else { return }
-        guard editor.currentText != newText else { return }
-        editor.originalText = newText
-        editor.currentText = newText
     }
 
     /// Seed the editor state from a fetched payload — but only when this
@@ -503,7 +565,8 @@ struct RemoteNoteDetailView: View {
     /// also avoids overwriting a freshly-saved-merged baseline when the
     /// snapshot change fired from our own `applyDiff` response).
     private func seedEditorIfNeeded(from snapshot: RemoteNoteSnapshot) {
-        guard snapshot.id == listRow.id else { return }
+        // The REST editor exists only where there is no live replica.
+        guard !LumiCRDT.isSupported, snapshot.id == listRow.id else { return }
         let editor = appState.remoteEditor
         if !editor.isBound(toVaultID: vault.id, noteID: snapshot.id) {
             // Different note bound previously — replace state.
@@ -515,24 +578,25 @@ struct RemoteNoteDetailView: View {
         // Else: same note, user has dirty edits — leave them be.
     }
 
+    /// Pull to refresh: re-fetch the snapshot; with a live session its
+    /// state is merged into the kept replica (never a fresh doc, V8).
     private func refresh() {
         let store = appState.remoteVaultsStore
+        if LumiCRDT.isSupported && canEditNotes {
+            store.openLiveSession(vaultID: vault.id, noteID: listRow.id, user: awarenessUser)
+        }
         Task { await store.loadOpenNote(vaultID: vault.id, noteID: listRow.id) }
     }
 
+    /// REST fallback save (visionOS). Live sessions have no save step.
     private func requestSave() {
-        guard appState.remoteEditor.isDirty, !isSaving else { return }
+        guard liveSession == nil, appState.remoteEditor.isDirty, !isSaving else { return }
         let editor = appState.remoteEditor
         let store = appState.remoteVaultsStore
         let client = appState.remoteVaultsStore.apiClient
-        // Prefer the CRDT-aware commit path (Phase H slice 3) when an
-        // open-note CRDT is live; fall back to the text-diff path if
-        // not (store hasn't armed a CRDT yet, or the platform has no
-        // yrs binding).
-        let crdt = store.openNoteCRDT
         // `beginSave` captures vault/note/text synchronously, so a
         // caller (close()) may reset the editor right after this.
-        guard let save = editor.beginSave(via: client, crdt: crdt) else { return }
+        guard let save = editor.beginSave(via: client) else { return }
         let vaultID = vault.id
         Task {
             if let snapshot = await save.value {
@@ -560,6 +624,15 @@ struct RemoteNoteDetailView: View {
 
     private func handleVimEffect(_ effect: VimEffect) {
         let editor = appState.remoteEditor
+        if liveSession != nil {
+            // Live edits are already shared: :w is a no-op, :q/:wq/:q!
+            // just leave edit mode (there is nothing local to discard).
+            switch effect {
+            case .save: break
+            case .saveAndClose, .close: appState.remoteEditorMode = .view
+            }
+            return
+        }
         switch effect {
         case .save:
             // Server PATCH has no force/conflict distinction (last-write-

@@ -11,12 +11,27 @@ public typealias OpenNoteSession = UnavailableNoteSession
 /// Placeholder so `openSession` keeps one type on every platform. Never
 /// instantiated.
 @MainActor
-public final class UnavailableNoteSession {
+public final class UnavailableNoteSession: CollaborativeDocument {
     public var phase: EditorSnapshot.Phase { .closed }
     public var reconnectStatus: ReconnectStatus? { nil }
     public var peers: [PeerPresence] { [] }
+    public var vaultID: UUID { UUID() }
     public var noteID: String { "" }
     public var hasPendingLocalChanges: Bool { false }
+    public var hasSynced: Bool { false }
+    public var emptyAtSync: Bool { false }
+    public var termination: SessionTermination? { nil }
+    public var connectionNotice: String? { nil }
+    public var isDestroyed: Bool { true }
+    public var text: String { "" }
+    public var isEditable: Bool { false }
+    public var changeHandler: ((DocumentChange) -> Void)?
+    public var onUnauthorized: (() -> Void)?
+    public func applyLocal(_ edits: [TextEdit]) {}
+    public func undo() -> Bool { false }
+    public func redo() -> Bool { false }
+    public func breakUndoGroup() {}
+    public func initialiseFromFile(_ body: String) -> Bool { false }
     public func destroy() {}
     private init() {}
 }

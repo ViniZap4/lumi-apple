@@ -224,19 +224,15 @@ final class AppState {
                     self.selectedEntry = nil
                     self.selectedNoteID = nil
                 } else if self.selectedRemoteNoteID != nil {
+                    // Live (CRDT) edits are already on the server; only the
+                    // REST fallback (visionOS) has anything to save.
                     if self.remoteEditor.isDirty {
                         let client = self.remoteVaultsStore.apiClient
                         let store = self.remoteVaultsStore
-                        // Use the CRDT commit path (Phase H slice 3) so
-                        // this auto-save shares wire shape with the
-                        // Cmd-S / Save-button path in
-                        // RemoteNoteDetailView.requestSave. CRDT is nil
-                        // when the store hasn't armed one yet — the
-                        // commit falls back to the text path then.
                         // `beginSave` captures vault/note/text before
                         // returning, so the reset() below can't race it.
                         if let vaultID = self.remoteEditor.vaultID,
-                           let save = self.remoteEditor.beginSave(via: client, crdt: store.openNoteCRDT) {
+                           let save = self.remoteEditor.beginSave(via: client) {
                             Task {
                                 if let snapshot = await save.value {
                                     store.recordSavedSnapshot(snapshot, vaultID: vaultID)
@@ -353,7 +349,8 @@ final class AppState {
             return
         }
         let phase = remoteVaultsStore.openNotePhase
-        sync.openEditor = (book.id, EditorSnapshot(phase: phase, pending: remoteEditor.isDirty && phase != .live))
+        let pending = remoteVaultsStore.openSession?.hasPendingLocalChanges ?? remoteEditor.isDirty
+        sync.openEditor = (book.id, EditorSnapshot(phase: phase, pending: pending && phase != .live))
     }
 
     /// Replace the active session, closing the previous one to release scope.
