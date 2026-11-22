@@ -10,54 +10,308 @@ import AppKit
 import UIKit
 #endif
 
-/// Thin observable wrapper that owns a `TextBuffer` + `VimState` and dispatches
-/// input events through the pure `VimEngine` reducer. The UI bridge holds one
-/// of these per editor instance.
+/// The platform text view as seen by the controller. The controller is
+/// the single source of truth for the text; it pushes every change into
+/// the surface as **ranged** edits (never `string = …`), so TextKit keeps
+/// layout, undo coalescing and IME state for untouched text.
+@MainActor
+protocol EditorTextSurface: AnyObject {
+    /// Apply sequential UTF-16 edits to the storage. Programmatic: must
+    /// not loop back into `VimController.applyExternalEdit`.
+    func applyEdits(_ edits: [TextEdit])
+    /// Show the engine's cursor/selection.
+    func showSelection(_ range: NSRange, scroll: Bool)
+    /// The user's current selection (UTF-16).
+    var currentSelection: NSRange { get }
+    /// Drop an in-progress IME composition before a remote edit lands.
+    func discardMarkedText()
+}
+
+/// Owns the editor buffer (`TextBuffer`) and `VimState`, dispatches input
+/// through the pure `VimEngine`, and is the **single source of truth**
+/// for the editor text:
+///
+/// - every engine step that changes the text is reduced to one ranged
+///   `TextEdit` (UTF-16, surrogate-safe) that goes to the text view and,
+///   for server notes, to the CRDT (`CollaborativeDocument.applyLocal`);
+/// - remote CRDT deltas arrive as ranged edits and are applied to the
+///   buffer and the text view in place, with the cursor, visual anchor
+///   and marks mapped through them (CRDT-CLIENT-PROTOCOL §4.3);
+/// - edits the text view makes on its own (paste, cut, drag, dictation,
+///   Writing Tools, plain-mode typing) come back through
+///   `applyExternalEdit`.
+///
+/// Local notes bind a `String` via `onTextChange`; that callback only
+/// ever *receives* text — an external binding change goes through
+/// `replaceAll(with:)` as a ranged diff that keeps mode and history.
 @Observable
 @MainActor
 public final class VimController {
-    public var buffer: TextBuffer
+    public private(set) var buffer: TextBuffer
     public var state: VimState
-    /// Fires whenever the engine emits a side-effect (ex command). The host
-    /// translates `.save` / `.saveAndClose` / `.close` into app-level actions.
-    /// Stored non-Observable via `_` to avoid Observable diff churn on assignment.
-    @ObservationIgnored public var onEffect: ((VimEffect) -> Void)?
+    /// False → plain editing: the text view handles keys natively and the
+    /// controller only mirrors its edits (non-vim users on server notes).
+    public let vimEnabled: Bool
 
-    public init(initialText: String = "") {
+    @ObservationIgnored public var onEffect: ((VimEffect) -> Void)?
+    /// Local-note sink: receives the full text after every change.
+    @ObservationIgnored public var onTextChange: ((String) -> Void)?
+    @ObservationIgnored weak var surface: EditorTextSurface?
+    @ObservationIgnored public private(set) weak var document: CollaborativeDocument?
+
+    public init(initialText: String = "", vimEnabled: Bool = true) {
         self.buffer = TextBuffer(text: initialText, cursor: 0)
-        self.state = .initial
+        self.state = vimEnabled ? .initial : VimState(mode: .insert)
+        self.vimEnabled = vimEnabled
     }
 
-    /// Toggle the `jj → <Esc>` mapping at runtime. The host calls this when
-    /// the user's preference changes — flowing the bool through `state` keeps
-    /// the engine the single source of truth for behavior.
+    /// Collaborative editor over a live replica. The initial text is the
+    /// replica's (§2.2.4). Call `bindDocument()` once the editor is
+    /// mounted to start receiving remote changes — not from `init`,
+    /// because SwiftUI re-evaluates `State(initialValue:)` on every parent
+    /// render and a throwaway controller would steal the handler.
+    public init(document: CollaborativeDocument, vimEnabled: Bool = true) {
+        self.buffer = TextBuffer(text: document.text, cursor: 0)
+        self.state = vimEnabled ? .initial : VimState(mode: .insert)
+        self.vimEnabled = vimEnabled
+        self.document = document
+    }
+
+    /// Become the document's editor: remote changes flow into this
+    /// controller from now on. Catches up if the replica moved since
+    /// `init`.
+    public func bindDocument() {
+        guard let document else { return }
+        document.changeHandler = { [weak self] change in
+            self?.applyDocumentChange(change)
+        }
+        if document.text != buffer.text {
+            applyDocumentChange(.resync(document.text))
+        }
+    }
+
+    /// Editing allowed (collaborative: only once synced).
+    public var isEditable: Bool { document?.isEditable ?? true }
+
     public func setJJEscapeEnabled(_ enabled: Bool) {
         state.jjEscapeEnabled = enabled
     }
 
-    /// Replace the buffer text wholesale (e.g. when the user switches notes).
-    /// Resets the engine state to normal mode and clears history.
-    public func replace(text: String) {
-        let cursor = min(buffer.cursor, text.count)
-        buffer = TextBuffer(text: text, cursor: cursor)
-        state = .initial
-    }
+    // MARK: - Input
 
     public func send(_ input: VimInput) {
+        guard isEditable else { return }
+        if !vimEnabled {
+            // Plain mode: Esc does nothing; everything else arrives as
+            // native text-view edits.
+            return
+        }
+        if let document, interceptUndo(input, document: document) { return }
+
         let previousRegister = state.defaultRegister
+        let old = buffer
         let result = VimEngine.handle(input, state: state, buffer: buffer)
         state = result.state
         buffer = result.buffer
 
-        // Mirror yank/delete output to the system pasteboard so vim's `y` and
-        // `d` interoperate with Cmd+V outside the editor.
+        if document != nil {
+            // The CRDT owns undo for server notes (§8): an engine history
+            // push marks a vim change boundary; the snapshots themselves
+            // would revert peers' edits, so they are dropped.
+            if !state.history.undo.isEmpty || !state.history.redo.isEmpty {
+                document?.breakUndoGroup()
+                state.history = VimHistory()
+            }
+        }
+        if buffer.text != old.text, let edit = TextDiff.edit(from: old.text, to: buffer.text) {
+            commitLocal([edit], applyToSurface: true)
+        }
+        showEngineSelection()
+
         if state.defaultRegister != previousRegister, !state.defaultRegister.text.isEmpty {
             writeToSystemPasteboard(state.defaultRegister.text)
         }
-
         if let effect = result.effect {
             onEffect?(effect)
         }
+    }
+
+    /// Text committed by the input system (`insertText`, a finished IME
+    /// composition, a dead-key result such as ABNT2 `´` + `a` → `á`).
+    /// Fed to the engine character by character so insert-mode features
+    /// (jj, dot-repeat, macros) see it.
+    public func insertTyped(_ string: String) {
+        for ch in string {
+            switch ch {
+            case "\n", "\r\n", "\r": send(.return)
+            case "\t": send(.tab)
+            default: send(.character(ch))
+            }
+        }
+    }
+
+    /// `u` / `Ctrl-R` in idle normal mode on a server note → CRDT undo.
+    private func interceptUndo(_ input: VimInput, document: CollaborativeDocument) -> Bool {
+        guard state.mode == .normal else { return false }
+        var probe = state
+        probe.pendingCount = nil
+        guard VimEngine.isIdleNormal(probe) else { return false }
+        let isUndo: Bool
+        switch input {
+        case .character("u"): isUndo = true
+        case .controlR: isUndo = false
+        default: return false
+        }
+        let count = state.pendingCount ?? 1
+        state.pendingCount = nil
+        state.recordingInputs = []
+        state.recordingBaseline = nil
+        document.breakUndoGroup()
+        for _ in 0..<count {
+            let did = isUndo ? document.undo() : document.redo()
+            if !did { break }
+        }
+        return true
+    }
+
+    /// Menu / Cmd-Z undo (plain mode and the Edit menu).
+    public func undo() {
+        if let document {
+            document.breakUndoGroup()
+            document.undo()
+        } else if vimEnabled {
+            send(.character("u"))
+        }
+    }
+
+    public func redo() {
+        if let document {
+            document.breakUndoGroup()
+            document.redo()
+        } else if vimEnabled {
+            send(.controlR)
+        }
+    }
+
+    // MARK: - Edits made by the text view itself
+
+    /// The text view already changed its storage (paste, cut, drag and
+    /// drop, dictation, autocorrect, Writing Tools, plain-mode typing):
+    /// mirror the edit into the buffer and the CRDT.
+    func applyExternalEdit(_ edit: TextEdit) {
+        guard !edit.isNoOp else { return }
+        let ns = NSMutableString(string: buffer.text)
+        guard edit.apply(to: ns) else {
+            // Out of sync with the view — the view is what the user sees.
+            return
+        }
+        if document == nil, vimEnabled {
+            state.history.push(.init(buffer: buffer))
+        } else {
+            document?.breakUndoGroup()
+        }
+        let newText = ns as String
+        let caret = edit.location + edit.replacementLength
+        buffer = TextBuffer(text: newText, cursor: Self.charOffset(utf16: caret, in: newText))
+        if vimEnabled, state.mode != .insert {
+            buffer.cursor = buffer.clampedCursor(allowPastEnd: false)
+        }
+        commitLocal([edit], applyToSurface: false)
+        document?.breakUndoGroup()
+    }
+
+    /// The user moved the caret with the mouse / touch.
+    func userMovedSelection(to range: NSRange) {
+        let allowPastEnd = !vimEnabled || state.mode == .insert
+        buffer.cursor = Self.charOffset(utf16: range.location, in: buffer.text)
+        buffer.cursor = buffer.clampedCursor(allowPastEnd: allowPastEnd)
+    }
+
+    /// Local-note binding changed from outside (revert, reload): apply as
+    /// a ranged diff, keeping mode, registers and history.
+    public func replaceAll(with text: String) {
+        guard text != buffer.text, let edit = TextDiff.edit(from: buffer.text, to: text) else { return }
+        let cursor16 = PositionMapper.map(Self.utf16Offset(char: buffer.cursor, in: buffer.text), through: [edit])
+        buffer = TextBuffer(text: text, cursor: Self.charOffset(utf16: cursor16, in: text))
+        buffer.cursor = buffer.clampedCursor(allowPastEnd: state.mode == .insert)
+        surface?.applyEdits([edit])
+        showEngineSelection()
+    }
+
+    private func commitLocal(_ edits: [TextEdit], applyToSurface: Bool) {
+        if applyToSurface { surface?.applyEdits(edits) }
+        document?.applyLocal(edits)
+        onTextChange?(buffer.text)
+    }
+
+    // MARK: - Remote changes
+
+    func applyDocumentChange(_ change: DocumentChange) {
+        switch change {
+        case .remote(let edits):
+            applyIncoming(edits, isUndo: false)
+        case .undo(let edits):
+            applyIncoming(edits, isUndo: true)
+        case .resync(let text):
+            surface?.discardMarkedText()
+            let old = buffer.text
+            buffer = TextBuffer(text: text, cursor: min(buffer.cursor, text.count))
+            buffer.cursor = buffer.clampedCursor(allowPastEnd: state.mode == .insert)
+            if let edit = TextDiff.edit(from: old, to: text) { surface?.applyEdits([edit]) }
+            showEngineSelection()
+            onTextChange?(text)
+        }
+    }
+
+    private func applyIncoming(_ edits: [TextEdit], isUndo: Bool) {
+        guard !edits.isEmpty else { return }
+        surface?.discardMarkedText()
+        let oldText = buffer.text
+        let ns = NSMutableString(string: oldText)
+        for e in edits where !e.apply(to: ns) {
+            // Should not happen (the replica and the buffer move in
+            // lockstep); fall back to the replica's text.
+            if let document { applyDocumentChange(.resync(document.text)) }
+            return
+        }
+        let newText = ns as String
+
+        // Map every live position through the change (UTF-16 domain).
+        func map(_ char: Int, _ assoc: PositionAssoc = .after) -> Int {
+            let u = PositionMapper.map(Self.utf16Offset(char: char, in: oldText), through: edits, assoc: assoc)
+            return Self.charOffset(utf16: u, in: newText)
+        }
+        let plainSelection = vimEnabled ? nil : surface.map { PositionMapper.map($0.currentSelection, through: edits) }
+        var cursor: Int
+        if isUndo, let first = edits.first {
+            cursor = Self.charOffset(utf16: first.location, in: newText)
+        } else {
+            cursor = map(buffer.cursor)
+        }
+        if case let .visual(kind, anchor) = state.mode {
+            state.mode = .visual(kind, anchor: map(anchor))
+        }
+        state.marks = state.marks.mapValues { map($0) }
+        if let entry = state.commandLineEntryCursor { state.commandLineEntryCursor = map(entry) }
+        buffer = TextBuffer(text: newText, cursor: cursor)
+        let allowPastEnd = !vimEnabled || state.mode == .insert
+        buffer.cursor = buffer.clampedCursor(allowPastEnd: allowPastEnd)
+        cursor = buffer.cursor
+
+        surface?.applyEdits(edits)
+        if let plainSelection {
+            surface?.showSelection(plainSelection, scroll: isUndo)
+        } else {
+            showEngineSelection(scroll: isUndo)
+        }
+        onTextChange?(newText)
+    }
+
+    // MARK: - Selection
+
+    func showEngineSelection(scroll: Bool = true) {
+        guard vimEnabled else { return }
+        surface?.showSelection(selectionUTF16Range, scroll: scroll)
     }
 
     private func writeToSystemPasteboard(_ text: String) {
@@ -69,23 +323,15 @@ public final class VimController {
         #endif
     }
 
-    /// Cursor offset in UTF-16 code units, matching what UIKit/AppKit text
-    /// views use for `NSRange.location`.
+    /// Cursor offset in UTF-16 code units.
     public var cursorUTF16Offset: Int {
-        utf16Offset(of: buffer.cursor)
+        Self.utf16Offset(char: buffer.cursor, in: buffer.text)
     }
 
-    /// Selection to render in the platform text view. Drives both the visual
-    /// highlight (in visual mode) and a single-character "block cursor" in
-    /// normal mode — UIKit/AppKit render the 1-char selection as a tinted
-    /// rectangle, which is exactly the vim block-cursor look without needing
-    /// custom drawing.
+    /// Selection to render: the visual-mode range, or a one-character
+    /// "block cursor" in normal / command-line mode, or a caret in insert.
     public var selectionUTF16Range: NSRange {
         guard case let .visual(kind, anchor) = state.mode else {
-            // Normal *or* command-line mode: 1-char "block" if cursor is on a
-            // character. (Command-line mode keeps the editor cursor parked
-            // exactly where it was when search began; the pattern is rendered
-            // separately in the overlay/accessory bar.)
             let showsBlock = state.mode == .normal || state.mode.commandLinePrefix != nil
             if showsBlock,
                buffer.cursor < buffer.text.count,
@@ -123,14 +369,27 @@ public final class VimController {
     }
 
     private func utf16Offset(of charOffset: Int) -> Int {
-        let safe = max(0, min(charOffset, buffer.text.count))
-        return buffer.text.prefix(safe).utf16.count
+        Self.utf16Offset(char: charOffset, in: buffer.text)
     }
 
-    /// hlsearch: every occurrence of the active search pattern as a UTF-16
-    /// `NSRange`. During `/` or `?` typing this mirrors the in-progress buffer
-    /// (so highlights track the user's keystrokes); otherwise it reflects
-    /// `state.lastSearch?.pattern`. Empty when there's no active search.
+    /// Character offset → UTF-16 offset.
+    static func utf16Offset(char: Int, in text: String) -> Int {
+        let safe = max(0, min(char, text.count))
+        return text.index(text.startIndex, offsetBy: safe).utf16Offset(in: text)
+    }
+
+    /// UTF-16 offset → character offset, rounding down to a grapheme
+    /// boundary (never lands inside a surrogate pair or cluster).
+    static func charOffset(utf16 offset: Int, in text: String) -> Int {
+        let u = text.utf16
+        var idx = u.index(u.startIndex, offsetBy: max(0, min(offset, u.count)))
+        while idx > text.startIndex, idx.samePosition(in: text) == nil {
+            idx = u.index(before: idx)
+        }
+        return text.distance(from: text.startIndex, to: idx)
+    }
+
+    /// hlsearch: every occurrence of the active search pattern (UTF-16).
     public var searchHighlights: [NSRange] {
         guard let pattern = activeSearchPattern, !pattern.isEmpty else { return [] }
         return allMatches(in: buffer.text, pattern: pattern).map { range in
@@ -141,8 +400,6 @@ public final class VimController {
     }
 
     private var activeSearchPattern: String? {
-        // Incsearch highlights always show live during /  ? typing, regardless
-        // of :noh — pressing / re-engages search.
         if case let .commandLine(prefix, currentBuffer) = state.mode,
            (prefix == "/" || prefix == "?"),
            !currentBuffer.isEmpty
@@ -160,17 +417,5 @@ public final class VimController {
     }
 
     /// Human-readable mode label for status lines (`NORMAL`, `INSERT`, …).
-    public var modeLabel: String {
-        switch state.mode {
-        case .normal: return "NORMAL"
-        case .insert: return "INSERT"
-        case let .visual(kind, _):
-            switch kind {
-            case .characterwise: return "VISUAL"
-            case .linewise: return "V-LINE"
-            }
-        case let .commandLine(prefix, buffer):
-            return "\(prefix)\(buffer)"
-        }
-    }
+    public var modeLabel: String { state.mode.label }
 }

@@ -9,73 +9,78 @@ import AppKit
 import UIKit
 #endif
 
-/// Maps platform-specific key events into the engine's `VimInput` enum.
+/// Maps platform key input into `VimInput`.
 ///
-/// `mode` lets the mapper translate arrow keys differently depending on what
-/// the engine is currently doing. Outside command-line mode, up/down arrows
-/// stand in for `k`/`j` motions; inside command-line mode they step through
-/// search/ex history. Left/right remain `h`/`l` everywhere (vim doesn't move
-/// the cursor within the command-line buffer in our subset — typing or
-/// backspacing is the only mutation).
+/// Printable text is **not** mapped here any more: it travels through the
+/// platform text-input system (`interpretKeyEvents` → `insertText` /
+/// `setMarkedText` on macOS, `UITextInput` on iOS), so dead keys (ABNT2
+/// `´` + `a` → `á`), IMEs and the press-and-hold accent menu work. This
+/// type only handles keys the input system would otherwise consume —
+/// Escape, Ctrl chords, arrows — and the command selectors the input
+/// system emits (`insertNewline:`, `deleteBackward:`, `moveUp:` …).
 enum VimKeyMapper {
+    /// Input for an AppKit/UIKit text-input command selector, or nil to
+    /// swallow it silently (no beep, no native editing behind the
+    /// engine's back).
+    static func input(forCommand selector: String) -> VimInput? {
+        switch selector {
+        case "insertNewline:", "insertLineBreak:", "insertNewlineIgnoringFieldEditor:": return .return
+        case "deleteBackward:", "deleteBackwardByDecomposingPreviousCharacter:": return .backspace
+        case "insertTab:", "insertTabIgnoringFieldEditor:": return .tab
+        case "cancelOperation:": return .escape
+        case "moveLeft:": return .arrow(.left)
+        case "moveRight:": return .arrow(.right)
+        case "moveUp:": return .arrow(.up)
+        case "moveDown:": return .arrow(.down)
+        default: return nil
+        }
+    }
+
+    /// Ctrl chords the engine understands, by their base character.
+    static func controlInput(for base: String) -> VimInput? {
+        switch base.lowercased() {
+        case "r": return .controlR
+        case "d": return .controlD
+        case "u": return .controlU
+        case "[": return .escape
+        default: return nil
+        }
+    }
+
     #if canImport(AppKit)
-    static func map(event: NSEvent, mode: VimMode) -> VimInput? {
-        let inCommandLine = mode.commandLinePrefix != nil
+    /// Keys handled before the input system sees the event.
+    static func directInput(for event: NSEvent) -> VimInput? {
         switch event.keyCode {
         case 53: return .escape
-        case 36, 76: return .return
-        case 51: return .backspace
-        case 48: return .tab
-        case 126: return inCommandLine ? .historyPrev : .character("k") // up arrow
-        case 125: return inCommandLine ? .historyNext : .character("j") // down arrow
-        case 123: return .character("h") // left arrow
-        case 124: return .character("l") // right arrow
+        case 123: return .arrow(.left)
+        case 124: return .arrow(.right)
+        case 125: return .arrow(.down)
+        case 126: return .arrow(.up)
         default: break
         }
-        if event.modifierFlags.contains(.control),
-           let chars = event.charactersIgnoringModifiers {
-            switch chars {
-            case "r": return .controlR
-            case "d": return .controlD
-            case "u": return .controlU
-            default: break
-            }
+        if event.modifierFlags.contains(.control), let chars = event.charactersIgnoringModifiers {
+            return controlInput(for: chars)
         }
-        guard let chars = event.charactersIgnoringModifiers,
-              let first = chars.first,
-              !chars.isEmpty
-        else { return nil }
-        return .character(first)
+        return nil
     }
     #endif
 
     #if canImport(UIKit)
-    /// `UIKey` is main-actor isolated; key presses are delivered on the
-    /// main thread, so the mapper is too.
+    /// Hardware keys handled before UIKit's text input (`pressesBegan`).
     @MainActor
-    static func map(key: UIKey, mode: VimMode) -> VimInput? {
-        let inCommandLine = mode.commandLinePrefix != nil
+    static func directInput(for key: UIKey) -> VimInput? {
         switch key.keyCode {
         case .keyboardEscape: return .escape
-        case .keyboardReturnOrEnter, .keypadEnter: return .return
-        case .keyboardDeleteOrBackspace: return .backspace
-        case .keyboardTab: return .tab
-        case .keyboardUpArrow: return inCommandLine ? .historyPrev : .character("k")
-        case .keyboardDownArrow: return inCommandLine ? .historyNext : .character("j")
-        case .keyboardLeftArrow: return .character("h")
-        case .keyboardRightArrow: return .character("l")
+        case .keyboardUpArrow: return .arrow(.up)
+        case .keyboardDownArrow: return .arrow(.down)
+        case .keyboardLeftArrow: return .arrow(.left)
+        case .keyboardRightArrow: return .arrow(.right)
         default: break
         }
         if key.modifierFlags.contains(.control) {
-            switch key.characters {
-            case "r": return .controlR
-            case "d": return .controlD
-            case "u": return .controlU
-            default: break
-            }
+            return controlInput(for: key.charactersIgnoringModifiers)
         }
-        guard let first = key.characters.first else { return nil }
-        return .character(first)
+        return nil
     }
     #endif
 }
