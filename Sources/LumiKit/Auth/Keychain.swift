@@ -19,6 +19,10 @@ public enum Keychain {
     /// the server's base URL string so multiple servers can be kept distinct.
     public static let defaultService = "com.vinizap.lumi.auth"
 
+    /// Writes use `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` and are
+    /// never synchronizable (SPEC-LIVROS §2.2): the account feed keeps
+    /// running with the screen locked, but the token never leaves the
+    /// device via backups or iCloud Keychain.
     public static func set(_ value: String, service: String = defaultService, account: String) throws {
         guard let data = value.data(using: .utf8) else {
             throw Error.unexpectedData
@@ -26,11 +30,12 @@ public enum Keychain {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account
+            kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: false
         ]
         let attributes: [String: Any] = [
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         ]
         let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         switch updateStatus {

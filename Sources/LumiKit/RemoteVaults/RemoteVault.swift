@@ -16,17 +16,27 @@ public struct RemoteVault: Codable, Sendable, Equatable, Hashable, Identifiable 
     /// SPEC-V3 share-a-copy provenance. Present only on vaults created via
     /// `POST /api/vaults/:vault/copies` — records where the fork came from.
     public let copiedFrom: VaultCopyProvenance?
+    /// SPEC-LIVROS §3.5 additions. All optional so pre-feed servers decode.
+    /// `head` = current per-vault `seq` on this server.
+    public let head: Int64?
+    /// Caller's role name in this vault.
+    public let role: String?
+    public let canEdit: Bool?
+    public let federation: VaultFederation?
 
     enum CodingKeys: String, CodingKey {
-        case id, slug, name
+        case id, slug, name, head, role, federation
         case createdBy = "created_by"
         case createdAt = "created_at"
         case ownerUserID = "owner_user_id"
         case copiedFrom = "copied_from"
+        case canEdit = "can_edit"
     }
 
     public init(id: UUID, slug: String, name: String, createdBy: UUID, createdAt: Date?,
-                ownerUserID: UUID? = nil, copiedFrom: VaultCopyProvenance? = nil) {
+                ownerUserID: UUID? = nil, copiedFrom: VaultCopyProvenance? = nil,
+                head: Int64? = nil, role: String? = nil, canEdit: Bool? = nil,
+                federation: VaultFederation? = nil) {
         self.id = id
         self.slug = slug
         self.name = name
@@ -34,6 +44,10 @@ public struct RemoteVault: Codable, Sendable, Equatable, Hashable, Identifiable 
         self.createdAt = createdAt
         self.ownerUserID = ownerUserID
         self.copiedFrom = copiedFrom
+        self.head = head
+        self.role = role
+        self.canEdit = canEdit
+        self.federation = federation
     }
 
     public init(from decoder: Decoder) throws {
@@ -49,6 +63,10 @@ public struct RemoteVault: Codable, Sendable, Equatable, Hashable, Identifiable 
         }
         self.ownerUserID = try container.decodeIfPresent(UUID.self, forKey: .ownerUserID)
         self.copiedFrom = try container.decodeIfPresent(VaultCopyProvenance.self, forKey: .copiedFrom)
+        self.head = try container.decodeIfPresent(Int64.self, forKey: .head)
+        self.role = try container.decodeIfPresent(String.self, forKey: .role)
+        self.canEdit = try container.decodeIfPresent(Bool.self, forKey: .canEdit)
+        self.federation = try container.decodeIfPresent(VaultFederation.self, forKey: .federation)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -66,6 +84,10 @@ public struct RemoteVault: Codable, Sendable, Equatable, Hashable, Identifiable 
         if let copiedFrom {
             try container.encode(copiedFrom, forKey: .copiedFrom)
         }
+        try container.encodeIfPresent(head, forKey: .head)
+        try container.encodeIfPresent(role, forKey: .role)
+        try container.encodeIfPresent(canEdit, forKey: .canEdit)
+        try container.encodeIfPresent(federation, forKey: .federation)
     }
 }
 

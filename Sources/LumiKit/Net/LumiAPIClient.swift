@@ -19,10 +19,52 @@ public actor LumiAPIClient {
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
 
+    /// Optional observer notified after every REST call. The accounts
+    /// store uses it to track per-account `restHealth` (SPEC-LIVROS §4.2)
+    /// without each call site reporting failures by hand.
+    private var outcomeObserver: (@Sendable (Result<Void, LumiAPIError>) -> Void)?
+
     public init(session: URLSession = .shared) {
         self.session = session
         self.decoder = JSONDecoder()
         self.encoder = JSONEncoder()
+    }
+
+    /// One client per account (SPEC-LIVROS A1): base URL and token are fixed
+    /// at construction. `setBaseURL` stays for legacy tests only.
+    public init(baseURL: URL, token: String?, session: URLSession = .shared,
+                outcomeObserver: (@Sendable (Result<Void, LumiAPIError>) -> Void)? = nil) {
+        self.session = session
+        self.decoder = JSONDecoder()
+        self.encoder = JSONEncoder()
+        self.baseURL = baseURL
+        self.token = token
+        self.outcomeObserver = outcomeObserver
+    }
+
+    /// Join a base URL (optionally with a path) and an absolute API path.
+    public static func endpoint(_ baseURL: URL, _ path: String) -> URL? {
+        var base = baseURL.absoluteString
+        while base.hasSuffix("/") { base.removeLast() }
+        return URL(string: base + (path.hasPrefix("/") ? path : "/" + path))
+    }
+
+    public func setOutcomeObserver(_ observer: (@Sendable (Result<Void, LumiAPIError>) -> Void)?) {
+        self.outcomeObserver = observer
+    }
+
+    /// `GET /api/info` (public). New in SPEC-LIVROS §3.5; older servers
+    /// answer 404, which callers treat as "unknown server identity".
+    public func serverInfo() async throws(LumiAPIError) -> ServerInfo {
+        try await request(method: "GET", path: "/api/info", body: nil as EmptyBody?, requireToken: false)
+    }
+
+    /// `GET /api/vaults/:vault/changes?after=N&limit=L` (SPEC-LIVROS §3.5).
+    /// A 410 surfaces as `.server(status: 410, code: "resync_required", …)`;
+    /// use `LumiAPIError.isResyncRequired` and `resyncHead(from:)`.
+    public func vaultChanges(vaultID: UUID, after: Int64, limit: Int = 500) async throws(LumiAPIError) -> VaultChangesResponse {
+        let path = "/api/vaults/\(vaultID.uuidString.lowercased())/changes?after=\(after)&limit=\(min(max(limit, 1), 1000))"
+        return try await request(method: "GET", path: path, body: nil as EmptyBody?, requireToken: true)
     }
 
     public func setBaseURL(_ url: URL?) {
@@ -375,10 +417,28 @@ public actor LumiAPIClient {
         body: Body?,
         requireToken: Bool
     ) async throws(LumiAPIError) -> Response {
+        do {
+            let response: Response = try await performRequest(method: method, path: path, body: body, requireToken: requireToken)
+            outcomeObserver?(.success(()))
+            return response
+        } catch {
+            outcomeObserver?(.failure(error))
+            throw error
+        }
+    }
+
+    private func performRequest<Body: Encodable & Sendable, Response: Decodable & Sendable>(
+        method: String,
+        path: String,
+        body: Body?,
+        requireToken: Bool
+    ) async throws(LumiAPIError) -> Response {
         guard let baseURL else {
             throw .network(message: "no server configured")
         }
-        guard let url = URL(string: path, relativeTo: baseURL) else {
+        // String-join instead of `relativeTo:` so a base path
+        // (`https://x.com/lumi`, SPEC-LIVROS §2.1) is preserved.
+        guard let url = Self.endpoint(baseURL, path) else {
             throw .network(message: "invalid path \(path)")
         }
 
