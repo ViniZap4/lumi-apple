@@ -60,8 +60,9 @@ struct VimTextObjectQuoteTests {
 
     @Test("da\" deletes including the double quotes")
     func daQuote() {
+        // `a"` takes the trailing white space too (vim).
         let r = run("da\"", on: "say \"hello\" world", cursor: 7)
-        #expect(r.buffer.text == "say  world")
+        #expect(r.buffer.text == "say world")
     }
 
     @Test("ci' enters insert with single-quoted contents removed")

@@ -130,10 +130,10 @@ struct VimOperatorTests {
         #expect(r.buffer.text == "def")
     }
 
-    @Test("cw enters insert mode after deleting word")
+    @Test("cw changes to the end of the word (like ce) and enters insert")
     func cw() {
         let r = run("cw", on: "foo bar")
-        #expect(r.buffer.text == "bar")
+        #expect(r.buffer.text == " bar")
         #expect(r.state.mode == .insert)
     }
 

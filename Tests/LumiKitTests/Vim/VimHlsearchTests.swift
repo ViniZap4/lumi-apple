@@ -47,8 +47,8 @@ struct VimHlsearchTests {
 
     @Test("regex special chars work (e.g. word-class)")
     func regexClasses() {
-        // \\w+ in a string with regex-style escape passed through analyzeCaseFlags.
-        let m = allMatches(in: "ab cd ef", pattern: "\\w+")
+        // Vim (magic) syntax: `\\w\\+` is one-or-more word chars.
+        let m = allMatches(in: "ab cd ef", pattern: "\\w\\+")
         #expect(m == [0..<2, 3..<5, 6..<8])
     }
 

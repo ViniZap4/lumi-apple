@@ -55,9 +55,9 @@ struct VimMarkTests {
     @Test("d`a deletes characterwise to the marked position")
     func deleteToExactMark() {
         // "abcdefg" cursor=2, ma → mark 'a' at 2.
-        // h h moves to 0. d`a deletes [0..3) → "defg".
+        // h h moves to 0. d`a is exclusive: deletes [0..2) → "cdefg".
         let r = run("llmahhd`a", on: "abcdefg")
-        #expect(r.buffer.text == "defg")
+        #expect(r.buffer.text == "cdefg")
     }
 
     @Test("d'a deletes the entire marked line linewise")

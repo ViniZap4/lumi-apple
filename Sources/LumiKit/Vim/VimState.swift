@@ -5,206 +5,168 @@ import Foundation
 /// keeps the engine pure and testable.
 public struct VimState: Sendable, Hashable {
     public var mode: VimMode
-    public var pendingCount: Int?
-    public var pendingOperator: PendingOperator?
-    /// After `i` or `a` in operator-pending or visual mode: which kind of text
-    /// object the user is about to specify. Cleared once the object selector
-    /// (`w`, `"`, `(`, …) arrives.
-    public var pendingTextObjectKind: TextObjectKind?
-    /// After `f F t T` (in any mode): which find variant we're awaiting a
-    /// target character for.
-    public var pendingFindKind: FindKind?
-    /// The most recent successful find/till. Used by `;` (repeat) and `,`
-    /// (reverse-repeat).
-    public var lastFind: FindMemory?
-    /// The most recent successful search. Used by `n` (repeat) and `N`
-    /// (reverse-repeat), and by `/<CR>` / `?<CR>` empty-pattern reuse.
-    public var lastSearch: SearchMemory?
-    /// Snapshot of `buffer.cursor` taken when entering command-line mode via
-    /// `/` or `?` (search). Used by incsearch to (a) restart each preview
-    /// search from the original position, (b) restore the cursor on ESC, and
-    /// (c) anchor the operator range on `<CR>` when an operator is pending —
-    /// otherwise the live-preview cursor movement would collapse the range.
-    /// Not set for `:` ex commands (they don't preview).
-    public var commandLineEntryCursor: Int?
-    /// Toggled true by `:noh` (no-highlight). When set, hlsearch hides all
-    /// match decorations without forgetting `lastSearch` — so `n`/`N` keep
-    /// working. Any successful search clears the flag back to false.
-    public var hlsearchSuspended: Bool
-    /// Ex command history (`:` only). Oldest→newest; bounded by
-    /// `VimState.commandLineHistoryLimit`. Appended on `<CR>`; skips empty
-    /// and duplicates of the most-recent entry.
-    public var exHistory: [String]
-    /// Search history (`/` and `?` share). Same shape as `exHistory`.
-    public var searchHistory: [String]
-    /// While the user is walking command-line history with arrow keys, the
-    /// index into the active history (`exHistory` for `:`, `searchHistory`
-    /// for `/` `?`). `nil` means not walking — typing or `<CR>` clears it.
-    public var commandLineHistoryIndex: Int?
-    /// Saved buffer at the moment the user first pressed up-arrow during a
-    /// command-line session. Restored when arrow-down walks past the newest
-    /// entry. `nil` once navigation ends.
-    public var commandLineHistoryDraft: String?
-    /// True iff the most recent `handle()` call inserted a `j` into the
-    /// buffer while in insert mode. Cleared by any subsequent input. Powers
-    /// the `jj`-as-escape mapping when `jjEscapeEnabled` is on — the engine
-    /// detects "j after j" by remembering this flag across calls.
-    public var insertModeLastWasJ: Bool
 
-    /// Set after `r` in normal mode. The next typed character replaces the
-    /// character under the cursor. Stateful so `r` doesn't immediately fire.
-    public var awaitingReplaceChar: Bool
-    /// Toggles the `jj → <Esc>` insert-mode mapping. Off by default; the
-    /// host enables it from user preferences before each `handle()` call
-    /// (or sets it once and trusts it to stick). Pure data on `VimState`
-    /// so the engine stays the source of truth for behavior.
+    /// Keys of the normal / visual command being typed (`"a2d3`, `g`,
+    /// `ci`). Parsed afresh on every key by `VimEngine` (vim's own model):
+    /// incomplete → wait, complete → execute, invalid → drop.
+    public var pendingKeys: [VimInput]
+
+    /// The most recent successful find/till. Used by `;` and `,`.
+    public var lastFind: FindMemory?
+    /// The most recent successful search. Used by `n` / `N`.
+    public var lastSearch: SearchMemory?
+    /// Cursor when `/` or `?` was typed (incsearch restarts from it and
+    /// restores it on Esc; an operator's range is anchored on it).
+    public var commandLineEntryCursor: Int?
+    /// `:noh` hides search highlights without forgetting `lastSearch`.
+    public var hlsearchSuspended: Bool
+    /// Ex command history (`:`), oldest → newest.
+    public var exHistory: [String]
+    /// Search history (`/` and `?` share it).
+    public var searchHistory: [String]
+    /// Index into the active history while walking it with arrows.
+    public var commandLineHistoryIndex: Int?
+    /// The typed draft saved when the history walk started.
+    public var commandLineHistoryDraft: String?
+    /// After a search / ex line started from visual mode: the visual
+    /// selection to return to (`v/foo<CR>` extends the selection).
+    public var commandLineVisual: VisualSnapshot?
+
+    /// Legacy `jj → <Esc>` toggle (merged into `escapeSequences`).
     public var jjEscapeEnabled: Bool
-    /// Insert-mode key sequences that act as `<Esc>` (`jk`, `ff`, …) —
-    /// the web client's `escapeSequences` setting. The first key is typed
-    /// immediately; when the rest of the sequence follows within
-    /// `escapeTimeout` the typed prefix is removed and insert mode ends.
+    /// Insert-mode key sequences that act as `<Esc>` (`jk`, `ff`, …).
     public var escapeSequences: [String]
     /// Seconds allowed between the keys of an escape sequence.
     public var escapeTimeout: TimeInterval
-    /// Characters typed in a row in insert mode that are a prefix of some
-    /// escape sequence. Reset by any non-character input.
+    /// Characters typed in a row that are a prefix of an escape sequence.
     public var insertEscapeRun: String
     /// `inputTime` of the last key in `insertEscapeRun`.
     public var insertEscapeRunAt: TimeInterval?
-    /// Monotonic time of the input being handled (set by
-    /// `VimEngine.handle(_:state:buffer:at:)`). nil = no timing, so escape
-    /// sequences never time out (tests, macro and `.` replay).
+    /// Monotonic time of the input being handled (nil = no timing).
     public var inputTime: TimeInterval?
-    /// Default ("unnamed") register — receives the most recent yank/delete.
+
+    /// The unnamed register (`""`): the most recent yank/delete.
     public var defaultRegister: Register
-    /// Named registers (`"a` … `"z`, `"A` … `"Z`). Yank/delete writes here in
-    /// addition to the default register; paste reads from here when prefixed.
+    /// `"0`–`"9`, `"a`–`"z`, `"-`. Upper-case names append to lower-case.
     public var registers: [Character: Register]
-    /// Set after `"<letter>`. Consumed by the next register-using operator.
-    public var pendingRegister: Character?
-    /// Set after `"` itself. The next character is interpreted as the
-    /// register name.
-    public var awaitingRegisterChar: Bool
+    /// System clipboard contents, supplied by the host just before a
+    /// command that reads `"+` / `"*` (see `VimEngine.wantsClipboard`).
+    public var clipboard: String?
+    /// Name of the open note, for the read-only `"%` register.
+    public var fileName: String?
 
-    /// Mark name → cursor offset. Mirrors vim's per-file marks (a-z, A-Z).
+    /// Mark name → character offset. `a`–`z`, `A`–`Z`, and the automatic
+    /// marks `'` (previous context), `[` `]` (last change/yank), `<` `>`
+    /// (last visual), `.` (last change), `^` (last insert exit).
     public var marks: [Character: Int]
-    /// Set after `m`. Next character names the mark to set.
-    public var awaitingMarkSet: Bool
-    /// Set after `'`. Next character names the mark to jump to (line).
-    public var awaitingMarkJumpLine: Bool
-    /// Set after `` ` ``. Next character names the mark to jump to (exact).
-    public var awaitingMarkJumpExact: Bool
-    /// Set after first `g`. The next `g` resolves to fileStart motion (`gg`).
-    public var awaitingGG: Bool
 
-    /// Macros keyed by register name. Distinct from text registers because
-    /// they hold a typed sequence of `VimInput`, not a string.
+    /// Macros keyed by register name (typed inputs).
     public var macros: [Character: [VimInput]]
-    /// Register being recorded into (set after `q<letter>`). Nil when not
-    /// recording. While set, the engine wrapper appends every input.
+    /// Register being recorded into (after `q<reg>`).
     public var recordingMacro: Character?
-    /// Inputs accumulated for the active macro recording.
+    /// Inputs accumulated for the active recording.
     public var recordingMacroInputs: [VimInput]
-    /// Set after a bare `q` press (no active recording). The next letter
-    /// becomes the register name and recording starts.
-    public var awaitingMacroRegister: Bool
-    /// Set after `@`. The next char is the register to play (or `@` for
-    /// repeat-last-played).
-    public var awaitingMacroPlay: Bool
-    /// True while a macro is being played back. Suppresses re-recording into
-    /// any active outer macro and skips re-capturing as the played inputs.
+    /// True while a macro is being played back.
     public var isPlayingMacro: Bool
-    /// Depth of nested macro playback. Guards against runaway recursion.
+    /// Depth of nested macro playback.
     public var macroDepth: Int
-    /// Last successfully invoked macro name. Used by `@@`.
+    /// Last invoked macro name (for `@@`).
     public var lastPlayedMacro: Character?
-    /// Pending macro playback steps, stored as a stack (next step is the
-    /// last element). Only non-empty while a playback is draining; nested
-    /// `@x` invocations push onto it instead of recursing. Engine-internal.
+    /// Pending macro playback steps (stack; next step is the last).
     var macroSteps: [MacroStep] = []
 
-    /// One unit of scheduled macro playback.
     enum MacroStep: Sendable, Hashable {
-        /// Feed this input through `VimEngine.handle`.
         case input(VimInput)
-        /// One nested macro invocation finished — decrement `macroDepth`.
         case end
     }
 
     public var history: VimHistory
 
-    /// Most recent committed sequence of inputs that produced a buffer
-    /// modification. Replayed by `.` (dot-repeat).
+    /// Most recent committed sequence of inputs that changed the buffer.
+    /// Replayed by `.`.
     public var lastChange: [VimInput]?
-    /// Inputs accumulated for the current command sequence. The recording
-    /// wrapper inside `VimEngine.handle` manages this — engine handlers
-    /// usually don't touch it. Meta-commands (undo, redo, dot itself) clear
-    /// it so they're not captured as changes.
+    /// Inputs of the command sequence in flight (dot-repeat recording).
     public var recordingInputs: [VimInput]
-    /// `buffer.text` snapshot taken when recording started. Used to decide
-    /// whether the sequence actually modified anything.
+    /// Buffer text when the in-flight sequence started.
     public var recordingBaseline: String?
-    /// Set to `true` while a `.` replay is in progress. The wrapper bypasses
-    /// recording while this is on, so the replay doesn't clobber `lastChange`.
+    /// True while a `.` replay is in progress.
     public var isReplaying: Bool
+
+    /// Column `j`/`k` aim for (vim's `curswant`); `Int.max` after `$`.
+    public var desiredColumn: Int?
+    /// The insert / replace session in progress.
+    public var insertSession: InsertSession?
+    /// Ctrl-O in insert mode: 1 = waiting for the one command, 2 = it is
+    /// being typed. Insert resumes when it completes.
+    public var insertOneShot: Int
+    /// Insert mode after Ctrl-R / Ctrl-R in the command line: the next
+    /// key names the register to insert.
+    public var awaitingInsertRegister: Bool
+    /// The text typed by the last insert session (`".`, Ctrl-A).
+    public var lastInsertedText: String
+    /// Last executed ex command line (`":`, `@:`).
+    public var lastExCommand: String?
+    /// The previous visual selection (`gv`, `'<`, `'>`).
+    public var lastVisual: VisualSnapshot?
+    /// Block visual with `$`: every line extends to its end.
+    public var blockToLineEnd: Bool
+
+    /// Settings (`:set`, `.vimrc`).
+    public var options: VimOptions
+    /// Key mappings (`:map` family, `.vimrc`).
+    public var mappings: [VimMapping]
+    /// The mapping leader as key notation (`\`, `,`, `<Space>`).
+    public var leader: String
+    /// Typed keys that are a prefix of some mapping's left-hand side.
+    public var mapPending: [VimInput]
+    /// `inputTime` when `mapPending` last grew.
+    public var mapPendingAt: TimeInterval?
+    /// Insert-mode mapping keys already typed into the buffer while the
+    /// mapping could still complete (`jj`): removed when it does.
+    public var mapTentative: Int
+
+    /// Last `:s` (for `&`, `:&&`, `:s` with no pattern).
+    public var lastSubstitute: SubstituteMemory?
+    /// `:s///c` interactive confirmation in progress.
+    public var substituteConfirm: SubstituteConfirm?
+    /// Visible lines reported by the host (for `H` `M` `L` and page keys).
+    public var viewport: VimViewport?
+    /// Message for the command-line area; cleared by the next key.
+    public var message: VimMessage?
+    /// Offsets the engine is tracking through its own edits (`:g`,
+    /// `:normal` over a range). nil = the tracked line was deleted.
+    var trackedOffsets: [Int?] = []
+    /// The operator / count a `/` or `?` search was started with.
+    var searchContext: SearchContext?
 
     public init(
         mode: VimMode = .normal,
-        pendingCount: Int? = nil,
-        pendingOperator: PendingOperator? = nil,
-        pendingTextObjectKind: TextObjectKind? = nil,
-        pendingFindKind: FindKind? = nil,
         lastFind: FindMemory? = nil,
         lastSearch: SearchMemory? = nil,
-        commandLineEntryCursor: Int? = nil,
-        hlsearchSuspended: Bool = false,
         exHistory: [String] = [],
         searchHistory: [String] = [],
-        commandLineHistoryIndex: Int? = nil,
-        commandLineHistoryDraft: String? = nil,
-        insertModeLastWasJ: Bool = false,
-        awaitingReplaceChar: Bool = false,
         jjEscapeEnabled: Bool = false,
         escapeSequences: [String] = [],
         escapeTimeout: TimeInterval = 0.2,
         defaultRegister: Register = Register(),
         registers: [Character: Register] = [:],
-        pendingRegister: Character? = nil,
-        awaitingRegisterChar: Bool = false,
         marks: [Character: Int] = [:],
-        awaitingMarkSet: Bool = false,
-        awaitingMarkJumpLine: Bool = false,
-        awaitingMarkJumpExact: Bool = false,
-        awaitingGG: Bool = false,
         macros: [Character: [VimInput]] = [:],
-        recordingMacro: Character? = nil,
-        recordingMacroInputs: [VimInput] = [],
-        awaitingMacroRegister: Bool = false,
-        awaitingMacroPlay: Bool = false,
-        isPlayingMacro: Bool = false,
-        macroDepth: Int = 0,
-        lastPlayedMacro: Character? = nil,
         history: VimHistory = VimHistory(),
         lastChange: [VimInput]? = nil,
-        recordingInputs: [VimInput] = [],
-        recordingBaseline: String? = nil,
-        isReplaying: Bool = false
+        options: VimOptions = VimOptions()
     ) {
         self.mode = mode
-        self.pendingCount = pendingCount
-        self.pendingOperator = pendingOperator
-        self.pendingTextObjectKind = pendingTextObjectKind
-        self.pendingFindKind = pendingFindKind
+        self.pendingKeys = []
         self.lastFind = lastFind
         self.lastSearch = lastSearch
-        self.commandLineEntryCursor = commandLineEntryCursor
-        self.hlsearchSuspended = hlsearchSuspended
+        self.commandLineEntryCursor = nil
+        self.hlsearchSuspended = false
         self.exHistory = exHistory
         self.searchHistory = searchHistory
-        self.commandLineHistoryIndex = commandLineHistoryIndex
-        self.commandLineHistoryDraft = commandLineHistoryDraft
-        self.insertModeLastWasJ = insertModeLastWasJ
-        self.awaitingReplaceChar = awaitingReplaceChar
+        self.commandLineHistoryIndex = nil
+        self.commandLineHistoryDraft = nil
+        self.commandLineVisual = nil
         self.jjEscapeEnabled = jjEscapeEnabled
         self.escapeSequences = escapeSequences
         self.escapeTimeout = escapeTimeout
@@ -213,40 +175,74 @@ public struct VimState: Sendable, Hashable {
         self.inputTime = nil
         self.defaultRegister = defaultRegister
         self.registers = registers
-        self.pendingRegister = pendingRegister
-        self.awaitingRegisterChar = awaitingRegisterChar
+        self.clipboard = nil
+        self.fileName = nil
         self.marks = marks
-        self.awaitingMarkSet = awaitingMarkSet
-        self.awaitingMarkJumpLine = awaitingMarkJumpLine
-        self.awaitingMarkJumpExact = awaitingMarkJumpExact
-        self.awaitingGG = awaitingGG
         self.macros = macros
-        self.recordingMacro = recordingMacro
-        self.recordingMacroInputs = recordingMacroInputs
-        self.awaitingMacroRegister = awaitingMacroRegister
-        self.awaitingMacroPlay = awaitingMacroPlay
-        self.isPlayingMacro = isPlayingMacro
-        self.macroDepth = macroDepth
-        self.lastPlayedMacro = lastPlayedMacro
+        self.recordingMacro = nil
+        self.recordingMacroInputs = []
+        self.isPlayingMacro = false
+        self.macroDepth = 0
+        self.lastPlayedMacro = nil
         self.history = history
         self.lastChange = lastChange
-        self.recordingInputs = recordingInputs
-        self.recordingBaseline = recordingBaseline
-        self.isReplaying = isReplaying
+        self.recordingInputs = []
+        self.recordingBaseline = nil
+        self.isReplaying = false
+        self.desiredColumn = nil
+        self.insertSession = mode.isTyping ? InsertSession(start: 0, count: 1, kind: .plain) : nil
+        self.insertOneShot = 0
+        self.awaitingInsertRegister = false
+        self.lastInsertedText = ""
+        self.lastExCommand = nil
+        self.lastVisual = nil
+        self.blockToLineEnd = false
+        self.options = options
+        self.mappings = []
+        self.leader = "\\"
+        self.mapPending = []
+        self.mapPendingAt = nil
+        self.mapTentative = 0
+        self.lastSubstitute = nil
+        self.substituteConfirm = nil
+        self.viewport = nil
+        self.message = nil
     }
 
     public static let initial = VimState()
 
-    /// Cap on entries kept per command-line history ring. Old entries are
-    /// dropped from the front when this is exceeded.
+    /// Cap on entries kept per command-line history ring.
     public static let commandLineHistoryLimit = 50
 
-    /// Effective count for the next motion/operator: `pendingCount ?? 1`.
+    // MARK: Pending-command views (derived from `pendingKeys`)
+
+    /// What the pending keys are waiting for (operator, register, …).
+    public var pending: VimPendingInfo { VimEngine.pendingInfo(self) }
+
+    /// Count typed so far for the pending command.
+    public var pendingCount: Int? { pending.count }
+    /// Operator waiting for its motion (operator-pending mode).
+    public var pendingOperator: PendingOperator? {
+        pending.op.map { PendingOperator(op: $0, count: pending.count ?? 1) }
+    }
+    /// Register named with `"x` for the pending command.
+    public var pendingRegister: Character? { pending.register }
+    /// True right after `"` (the next key names a register).
+    public var awaitingRegisterChar: Bool { pending.awaiting == .register }
+    /// True right after `m` (the next key names a mark).
+    public var awaitingMarkSet: Bool { pending.awaiting == .markSet }
+    /// Effective count for the pending command: `pendingCount ?? 1`.
     public var effectiveCount: Int { pendingCount ?? 1 }
 }
 
-/// An operator captured while waiting for its motion (or its repeat key like
-/// `dd`).
+/// What a pending `/` / `?` search applies to once confirmed.
+struct SearchContext: Sendable, Hashable {
+    var op: VimOperator?
+    var register: Character?
+    var count: Int?
+}
+
+/// An operator captured while waiting for its motion.
 public struct PendingOperator: Sendable, Hashable {
     public let op: VimOperator
     public let count: Int
@@ -268,11 +264,14 @@ public struct FindMemory: Sendable, Hashable {
     }
 }
 
-/// A vim register holds yanked / deleted text plus a hint about its kind.
+/// A vim register: text plus how it was captured.
 public struct Register: Sendable, Hashable {
     public enum Kind: Sendable, Hashable {
         case characterwise
+        /// Whole lines; `text` ends with `\n`.
         case linewise
+        /// A rectangle; `text` holds its rows separated by `\n`.
+        case blockwise
     }
 
     public var text: String
@@ -282,4 +281,171 @@ public struct Register: Sendable, Hashable {
         self.text = text
         self.kind = kind
     }
+}
+
+/// A visual selection to restore (`gv`).
+public struct VisualSnapshot: Sendable, Hashable {
+    public var kind: VimMode.VisualKind
+    public var anchor: Int
+    public var head: Int
+    public var toLineEnd: Bool
+
+    public init(kind: VimMode.VisualKind, anchor: Int, head: Int, toLineEnd: Bool = false) {
+        self.kind = kind
+        self.anchor = anchor
+        self.head = head
+        self.toLineEnd = toLineEnd
+    }
+}
+
+/// An insert (or replace) session: where it began and what to do on Esc.
+public struct InsertSession: Sendable, Hashable {
+    public enum Kind: Sendable, Hashable {
+        case plain
+        /// `o` / `O`: a count repeats the typed text on new lines.
+        case openLine(below: Bool)
+        /// Visual-block `I` / `A` / `c`: on Esc the typed text is copied
+        /// to lines `firstLine+1 … lastLine` at `column` (`toLineEnd`:
+        /// at each line's end; `pad`: short lines are padded).
+        case block(firstLine: Int, lastLine: Int, column: Int, toLineEnd: Bool, pad: Bool)
+    }
+
+    public var start: Int
+    public var count: Int
+    public var kind: Kind
+    /// Text typed so far (what `".` will hold).
+    public var typed: String = ""
+    /// Inputs typed in this session (for the count repeat on Esc).
+    public var inputs: [VimInput] = []
+    /// Replace mode: the characters overwritten, for backspace.
+    public var replaced: [Character?] = []
+
+    public init(start: Int, count: Int, kind: Kind) {
+        self.start = start
+        self.count = count
+        self.kind = kind
+    }
+}
+
+/// `:set` options (and the `.vimrc` subset).
+public struct VimOptions: Sendable, Hashable {
+    public var tabstop: Int = 4
+    public var shiftwidth: Int = 4
+    public var expandtab: Bool = true
+    public var ignorecase: Bool = true
+    public var smartcase: Bool = true
+    public var hlsearch: Bool = true
+    public var incsearch: Bool = true
+    /// Copy the indent of the current line when starting a new one.
+    public var autoindent: Bool = true
+    /// View options: nil follows the app preference.
+    public var number: Bool?
+    public var relativenumber: Bool?
+    public var wrap: Bool?
+    /// Milliseconds to wait for a mapping to complete.
+    public var timeoutlen: Int = 1000
+
+    public init() {}
+
+    /// One indent level as text.
+    var indentUnit: String {
+        expandtab ? String(repeating: " ", count: max(1, shiftwidth)) : "\t"
+    }
+}
+
+/// One key mapping. `lhs` / `rhs` are engine inputs.
+public struct VimMapping: Sendable, Hashable {
+    public enum Mode: Sendable, Hashable { case all, normal, insert, visual, operatorPending }
+    public var mode: Mode
+    public var lhs: [VimInput]
+    public var rhs: [VimInput]
+    public var noremap: Bool
+    /// Ex alias (`map :W :write`): the command name without `:`.
+    public var exAlias: String?
+
+    public init(mode: Mode, lhs: [VimInput], rhs: [VimInput], noremap: Bool, exAlias: String? = nil) {
+        self.mode = mode
+        self.lhs = lhs
+        self.rhs = rhs
+        self.noremap = noremap
+        self.exAlias = exAlias
+    }
+
+    func applies(in mode: Mode) -> Bool {
+        self.mode == mode || (self.mode == .all && mode != .insert)
+    }
+}
+
+/// Visible line range (0-based, inclusive), reported by the host.
+public struct VimViewport: Sendable, Hashable {
+    public var firstLine: Int
+    public var lastLine: Int
+
+    public init(firstLine: Int, lastLine: Int) {
+        self.firstLine = firstLine
+        self.lastLine = max(firstLine, lastLine)
+    }
+
+    public var height: Int { lastLine - firstLine + 1 }
+}
+
+public struct SubstituteMemory: Sendable, Hashable {
+    public var pattern: String
+    public var replacement: String
+    public var flags: String
+}
+
+/// State of a `:s///c` session.
+public struct SubstituteConfirm: Sendable, Hashable {
+    public var pattern: String
+    public var replacement: String
+    public var global: Bool
+    public var caseFlag: Character?
+    /// Character offset where the next match search starts.
+    public var searchFrom: Int
+    /// Index into `VimState.trackedOffsets` of the range end (line end).
+    public var limitIndex: Int
+    /// The match being asked about (character range).
+    public var current: Range<Int>?
+    public var replacedCount: Int = 0
+    public var lastLine: Int = -1
+}
+
+/// What the keys typed so far are waiting for — drives the legend's
+/// which-key completions and the cursor shape.
+public struct VimPendingInfo: Sendable, Hashable {
+    public enum Awaiting: Sendable, Hashable {
+        case none
+        case register
+        case markSet
+        case markJump
+        case findChar
+        case replaceChar
+        case textObject
+        case gPrefix
+        case zPrefix
+        case bigZPrefix
+        case bracket
+        case macroRecord
+        case macroPlay
+        case motion
+        case mapping
+    }
+
+    public var count: Int?
+    public var register: Character?
+    public var op: VimOperator?
+    public var awaiting: Awaiting
+    /// Keys typed, for display (`"a2d`, `g`, `<Space>`).
+    public var display: String
+
+    public init(count: Int? = nil, register: Character? = nil, op: VimOperator? = nil, awaiting: Awaiting = .none, display: String = "") {
+        self.count = count
+        self.register = register
+        self.op = op
+        self.awaiting = awaiting
+        self.display = display
+    }
+
+    public var isEmpty: Bool { display.isEmpty }
 }

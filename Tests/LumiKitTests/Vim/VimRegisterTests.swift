@@ -70,17 +70,17 @@ struct VimRegisterTests {
         #expect(r.state.awaitingRegisterChar == false)
     }
 
-    @Test("uppercase register name is also valid")
+    @Test("uppercase register name appends to the lower-case register")
     func uppercaseRegister() {
-        let r = run("\"Ayw", on: "foo bar")
-        #expect(r.state.registers["A"]?.text == "foo ")
+        let r = run("\"ayw\"Ayw", on: "foo bar")
+        #expect(r.state.registers["a"]?.text == "foo foo ")
+        #expect(r.state.registers["A"] == nil)
     }
 
-    @Test("digit after \" is rejected (only letters)")
-    func nonLetterRegister() {
+    @Test("numbered registers can be named explicitly")
+    func numberedRegister() {
         let r = run("\"1yw", on: "foo bar")
-        // "1" rejected → no pending register; yw runs as a normal yank.
-        #expect(r.state.registers["1"] == nil)
+        #expect(r.state.registers["1"]?.text == "foo ")
         #expect(r.state.defaultRegister.text == "foo ")
     }
 }

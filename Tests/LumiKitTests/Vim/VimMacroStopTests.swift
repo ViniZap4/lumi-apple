@@ -24,19 +24,12 @@ private func run(_ keys: String, on text: String, cursor: Int = 0) -> VimEngine.
 
 @Suite("Vim — mode-independent macro `q` stop")
 struct VimMacroStopTests {
-    @Test("q in insert mode stops recording and leaves user in insert")
-    func qStopsFromInsert() {
-        // qa i hello q — record `i hello` (the `q` is trimmed by finalize),
-        // stop, stay in insert. The `q` is NOT inserted into the buffer.
-        let r = run("qaihelloq", on: "")
-        if let inputs = r.state.macros["a"] {
-            #expect(inputs == [.character("i"), .character("h"), .character("e"), .character("l"), .character("l"), .character("o")])
-        } else {
-            Issue.record("expected macro a to be recorded")
-        }
+    @Test("q in insert mode types a q (vim): recording continues")
+    func qTypesInInsert() {
+        let r = run("qaihelloq⎋q", on: "")
+        #expect(r.buffer.text == "helloq")
         #expect(r.state.recordingMacro == nil)
-        #expect(r.state.mode == .insert)
-        #expect(r.buffer.text == "hello")
+        #expect(r.state.macros["a"] == [.character("i"), .character("h"), .character("e"), .character("l"), .character("l"), .character("o"), .character("q"), .escape])
     }
 
     @Test("playing the macro recorded from insert replays the insert session")
