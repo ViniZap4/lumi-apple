@@ -168,6 +168,12 @@ final class MarkdownAttachmentOverlays {
         if heightsChanged { scheduleInvalidation() }
     }
 
+    /// Mounted hosted views with their frames (container coordinates):
+    /// hint mode labels the code blocks' copy buttons from these.
+    var mountedViews: [(attachment: MarkdownBlockAttachment, frame: CGRect)] {
+        mounted.values.map { ($0.attachment, $0.view.frame) }
+    }
+
     /// Drop hosts whose attachment is no longer in the document.
     func retain(only live: Set<ObjectIdentifier>) {
         for key in mounted.keys where !live.contains(key) { unmount(key) }

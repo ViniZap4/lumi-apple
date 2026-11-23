@@ -275,6 +275,10 @@ extension MarkdownDocumentController: SplitPreviewSurface {
             .map { $0 + top }
     }
 
+    var previewScrollView: MarkdownPlatformScrollView? { textView }
+    func focusPreview() -> Bool { textView.becomeFirstResponder() }
+    var previewHasFocus: Bool { textView.isFirstResponder }
+
     var previewContentHeight: CGFloat { textView.contentSize.height }
     var previewViewportHeight: CGFloat { textView.bounds.height }
     var previewScrollOffset: CGFloat { textView.contentOffset.y }

@@ -605,7 +605,12 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
     override func becomeFirstResponder() -> Bool {
         let ok = super.becomeFirstResponder()
         scheduleCursorUpdate()
+        if ok { controller?.onFocus?() }
         return ok
+    }
+
+    func focusEditor() {
+        window?.makeFirstResponder(self)
     }
 
     override func resignFirstResponder() -> Bool {
@@ -1277,7 +1282,12 @@ final class VimUIKitTextView: UITextView, EditorTextSurface {
     override func becomeFirstResponder() -> Bool {
         let ok = super.becomeFirstResponder()
         updateCursor()
+        if ok { controller?.onFocus?() }
         return ok
+    }
+
+    func focusEditor() {
+        _ = becomeFirstResponder()
     }
 
     override func resignFirstResponder() -> Bool {

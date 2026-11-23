@@ -42,6 +42,8 @@ protocol EditorTextSurface: AnyObject {
     func viewportTopLine() -> Double?
     /// Scroll so source line `line` (fractional) sits at the top.
     func scrollViewport(toLine line: Double)
+    /// Take keyboard focus (pane navigation back to the editor).
+    func focusEditor()
 }
 
 extension EditorTextSurface {
@@ -52,6 +54,7 @@ extension EditorTextSurface {
     func flashYank(_ ranges: [NSRange]) {}
     func viewportTopLine() -> Double? { nil }
     func scrollViewport(toLine line: Double) {}
+    func focusEditor() {}
 }
 
 /// What the chrome shows about the editor: mode, pending keys (legend /
@@ -140,6 +143,16 @@ public final class VimController {
     /// split preview's scroll sync.
     @ObservationIgnored public var onUserInteraction: (() -> Void)?
     @ObservationIgnored public private(set) weak var document: CollaborativeDocument?
+    /// Pane keys (`⌃h/j/k/l`, `⌃w …`) in normal / visual mode. Observed:
+    /// the legend shows the `⌃w` completions while one is pending.
+    public var paneKeys = EditorPaneKeys()
+    /// The host moves focus; returns false when no pane lies that way
+    /// (the key then keeps its vim meaning). nil → pane keys are off.
+    @ObservationIgnored public var onPaneCommand: ((PaneCommand) -> Bool)?
+    /// The text view became first responder (click, pane move).
+    @ObservationIgnored public var onFocus: (() -> Void)?
+    /// The split this editor sits in (set by `SplitScrollSync.attach`).
+    @ObservationIgnored public internal(set) weak var split: SplitScrollSync?
     @ObservationIgnored private var mapTimer: Task<Void, Never>?
 
     public init(initialText: String = "", vimEnabled: Bool = true) {
@@ -220,8 +233,23 @@ public final class VimController {
     // MARK: - Input
 
     public func send(_ input: VimInput) {
-        guard isEditable else { return }
         if !vimEnabled { return }
+        if let onPaneCommand {
+            switch paneKeys.feed(input, state: state) {
+            case .pass:
+                break
+            case .consume:
+                return
+            case let .pane(command, passIfUnhandled):
+                let moved = onPaneCommand(command)
+                // Leaving the editor leaves visual mode (web parity).
+                if moved, state.mode.isVisual {
+                    run(VimEngine.handle(.escape, state: state, buffer: startBuffer(), at: ProcessInfo.processInfo.systemUptime), old: buffer)
+                }
+                if moved || !passIfUnhandled { return }
+            }
+        }
+        guard isEditable else { return }
         if let document, interceptUndo(input, document: document) { return }
         if VimEngine.wantsClipboard(state) { state.clipboard = readSystemPasteboard() }
         if !state.mode.isTyping { state.viewport = currentViewport() }
@@ -440,6 +468,30 @@ public final class VimController {
     // MARK: - Viewport (split preview scroll sync)
 
     public func viewportTopLine() -> Double? { surface?.viewportTopLine() }
+
+    /// Give the text view keyboard focus.
+    public func focusTextView() { surface?.focusEditor() }
+
+    /// Normal mode: if the cursor is off screen (the viewport followed a
+    /// scrolled preview), put it on the first fully visible line's first
+    /// non-blank — vim keeps the cursor in the window the same way.
+    public func moveCursorIntoViewport() {
+        guard vimEnabled, state.mode == .normal, let vis = surface?.visibleRange() else { return }
+        let ns = buffer.text as NSString
+        let cursor = cursorUTF16Offset
+        guard ns.length > 0, cursor < vis.location || cursor > NSMaxRange(vis) else { return }
+        var start = ns.lineRange(for: NSRange(location: min(vis.location, ns.length), length: 0)).location
+        if start < vis.location {
+            let next = NSMaxRange(ns.lineRange(for: NSRange(location: start, length: 0)))
+            if next <= NSMaxRange(vis), next < ns.length { start = next }
+        }
+        while start < ns.length, let u = UnicodeScalar(ns.character(at: start)), u == " " || u == "\t" { start += 1 }
+        var b = buffer
+        b.cursor = Self.charOffset(utf16: start, in: buffer.text)
+        b.cursor = b.clampedCursor(allowPastEnd: false)
+        buffer = b
+        showEngineSelection(scroll: false)
+    }
     public func scrollViewport(toLine line: Double) { surface?.scrollViewport(toLine: line) }
 
     /// The user moved the caret with the mouse / touch.

@@ -26,6 +26,17 @@ final class MarkdownDocumentNSTextView: NSTextView {
     /// Click on a link run (tasks, callouts, anchors) resolved here so
     /// attachment characters (checkboxes) work like text links.
     var onInternalLink: ((URL, Int) -> Bool)?
+    /// The pane became first responder (click, ⌃l, hint): the split
+    /// preview tells its host it has keyboard focus.
+    var onFocus: (() -> Void)?
+    /// Back-reference for keyboard reading (`MarkdownReading`).
+    weak var owner: MarkdownDocumentController?
+
+    override func becomeFirstResponder() -> Bool {
+        let ok = super.becomeFirstResponder()
+        if ok { onFocus?() }
+        return ok
+    }
 
     override func scrollWheel(with event: NSEvent) {
         onInteraction?()
@@ -171,7 +182,7 @@ final class MarkdownDocumentController: NSObject, NSTextViewDelegate {
     let interaction = MarkdownDocumentInteraction()
     private(set) weak var sync: SplitScrollSync?
     private var lastHeader: MarkdownHeader?
-    private var renderedDocument: MarkdownDocument?
+    private(set) var renderedDocument: MarkdownDocument?
     private var syncScheduled = false
 
     private struct HostedEnvKey: Equatable {
@@ -236,6 +247,8 @@ final class MarkdownDocumentController: NSObject, NSTextViewDelegate {
             self.scheduleSyncLayout()
         }
         tv.onInteraction = { [weak self] in self?.sync?.claim(.preview) }
+        tv.owner = self
+        tv.onFocus = { [weak self] in self?.sync?.previewDidFocus() }
         tv.onInternalLink = { [weak self] url, index in
             guard let self else { return false }
             return self.handleInternal(url, at: index)
@@ -259,7 +272,7 @@ final class MarkdownDocumentController: NSObject, NSTextViewDelegate {
     }
 
     /// Tasks, callouts, footnotes and `#anchors`. True when handled.
-    private func handleInternal(_ url: URL, at index: Int) -> Bool {
+    func handleInternal(_ url: URL, at index: Int) -> Bool {
         switch interaction.handle(url, at: index, renderer: renderer) {
         case .external:
             return false
@@ -486,6 +499,10 @@ extension MarkdownDocumentController: SplitPreviewSurface {
         return MarkdownDocumentInteraction.blockTops(layoutManager: tlm, renderer: renderer, blockCount: blockCount)?
             .map { $0 + originY }
     }
+
+    var previewScrollView: MarkdownPlatformScrollView? { scrollView }
+    func focusPreview() -> Bool { textView.window?.makeFirstResponder(textView) ?? false }
+    var previewHasFocus: Bool { textView.window?.firstResponder === textView }
 
     var previewContentHeight: CGFloat { textView.frame.height }
     var previewViewportHeight: CGFloat { scrollView.contentView.bounds.height }

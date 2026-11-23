@@ -104,6 +104,11 @@ protocol SplitPreviewSurface: AnyObject {
     func blockTops(blockCount: Int) -> [CGFloat]?
     var previewContentHeight: CGFloat { get }
     var previewViewportHeight: CGFloat { get }
+    /// The preview's own scroll view (keyboard reading scrolls it).
+    var previewScrollView: MarkdownPlatformScrollView? { get }
+    /// Make the preview the first responder (keyboard focus).
+    func focusPreview() -> Bool
+    var previewHasFocus: Bool { get }
     var previewScrollOffset: CGFloat { get }
     func setPreviewScrollOffset(_ y: CGFloat)
 }
@@ -116,6 +121,16 @@ protocol SplitPreviewSurface: AnyObject {
 public final class SplitScrollSync {
     public init() {}
 
+    /// How the preview shows beside the editor.
+    public enum Placement: Sendable, Hashable { case off, beside, tabbed }
+
+    /// Set by `SourceSplit` (not observed: read on key presses).
+    public internal(set) var placement: Placement = .off
+    /// `SourceSplit` installs it: switch the narrow layout's tab.
+    var showTab: ((_ preview: Bool) -> Void)?
+    /// The host learns the preview took keyboard focus (click, hint).
+    public var onPreviewFocus: (() -> Void)?
+
     public private(set) weak var editor: VimController?
     weak var preview: SplitPreviewSurface?
     private var document: MarkdownDocument?
@@ -127,6 +142,7 @@ public final class SplitScrollSync {
 
     public func attach(editor: VimController) {
         self.editor = editor
+        editor.split = self
         editor.onViewportScroll = { [weak self] in self?.scrolled(.source) }
         editor.onUserInteraction = { [weak self] in self?.claim(.source) }
     }
@@ -136,6 +152,41 @@ public final class SplitScrollSync {
     }
 
     public func claim(_ side: ScrollSync.Side) { leader = side }
+
+    // MARK: Keyboard reading of the preview (pane focus)
+
+    /// The preview is on screen (beside, or the Preview tab).
+    public var isPreviewMounted: Bool { preview != nil }
+    /// The preview's scroll view, for keyboard scrolling.
+    public var previewScrollView: MarkdownPlatformScrollView? { preview?.previewScrollView }
+    public var previewHasFocus: Bool { preview?.previewHasFocus ?? false }
+
+    /// Give the preview keyboard focus. In the narrow layout this first
+    /// switches to the Preview tab (the pane mounts on the next pass, so
+    /// focus follows asynchronously). False when there is no preview.
+    @discardableResult
+    public func focusPreview() -> Bool {
+        if placement == .off { return false }
+        if placement == .tabbed, preview == nil {
+            showTab?(true)
+            DispatchQueue.main.async { [weak self] in _ = self?.preview?.focusPreview() }
+            return true
+        }
+        claim(.preview)
+        return preview?.focusPreview() ?? false
+    }
+
+    /// Back to the editor (and to the Source tab when narrow).
+    public func focusEditor() {
+        if placement == .tabbed { showTab?(false) }
+        claim(.source)
+        editor?.focusTextView()
+    }
+
+    func previewDidFocus() {
+        leader = .preview
+        onPreviewFocus?()
+    }
 
     func scrolled(_ side: ScrollSync.Side) {
         guard side == leader else { return }

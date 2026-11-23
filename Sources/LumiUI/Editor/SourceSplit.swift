@@ -26,6 +26,12 @@ public struct SourceSplit<Editor: View>: View {
     let vaultRoot: URL?
     let onToggleTask: ((Int) -> Void)?
     let onInAppLink: ((URL) -> Bool)?
+    /// Which side has keyboard focus (pane navigation): a thin accent
+    /// line marks it. nil → no marker.
+    let focus: ScrollSync.Side?
+    /// The split's coordinator, for the host (pane focus, keyboard
+    /// reading of the preview).
+    let onSync: ((SplitScrollSync) -> Void)?
     @ViewBuilder let editor: () -> Editor
 
     @State private var sync = SplitScrollSync()
@@ -53,8 +59,12 @@ public struct SourceSplit<Editor: View>: View {
         vaultRoot: URL? = nil,
         onToggleTask: ((Int) -> Void)? = nil,
         onInAppLink: ((URL) -> Bool)? = nil,
+        focus: ScrollSync.Side? = nil,
+        onSync: ((SplitScrollSync) -> Void)? = nil,
         @ViewBuilder editor: @escaping () -> Editor
     ) {
+        self.focus = focus
+        self.onSync = onSync
         self.enabled = enabled
         self.text = text
         self._ratio = ratio
@@ -75,6 +85,7 @@ public struct SourceSplit<Editor: View>: View {
                 if enabled && narrow { tabs }
                 HStack(spacing: 0) {
                     editor()
+                        .overlay(alignment: .top) { focusMark(.source, enabled: enabled) }
                         .frame(width: enabled && !narrow ? max(200, geo.size.width * r - 4) : nil)
                         .frame(maxWidth: enabled && !narrow ? nil : .infinity)
                         .opacity(enabled && narrow && tab == .preview ? 0 : 1)
@@ -85,15 +96,35 @@ public struct SourceSplit<Editor: View>: View {
                     }
                     if enabled && (!narrow || tab == .preview) {
                         preview
+                            .overlay(alignment: .top) { focusMark(.preview, enabled: true) }
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
             }
             .coordinateSpace(.named("lumi.split"))
-            .onAppear { sync.isActive = enabled && !narrow }
-            .onChange(of: narrow) { _, n in sync.isActive = enabled && !n }
+            .onAppear {
+                sync.isActive = enabled && !narrow
+                place(enabled: enabled, narrow: narrow)
+                sync.showTab = { tab = $0 ? .preview : .source }
+                onSync?(sync)
+            }
+            .onChange(of: narrow) { _, n in
+                sync.isActive = enabled && !n
+                place(enabled: enabled, narrow: n)
+            }
+            .onChange(of: tab) { _, t in
+                // The hidden pane must not keep the keyboard: the tab
+                // that shows takes it.
+                guard enabled && narrow else { return }
+                if t == .preview {
+                    DispatchQueue.main.async { sync.focusPreview() }
+                } else {
+                    sync.focusEditor()
+                }
+            }
             .onChange(of: enabled) { _, on in
                 sync.isActive = on && !narrow
+                place(enabled: on, narrow: narrow)
                 if on { previewText = text }
             }
         }
@@ -106,6 +137,23 @@ public struct SourceSplit<Editor: View>: View {
             }
             try? await Task.sleep(for: ScrollSync.previewDebounce)
             if !Task.isCancelled { previewText = text }
+        }
+    }
+
+    private func place(enabled: Bool, narrow: Bool) {
+        sync.placement = !enabled ? .off : (narrow ? .tabbed : .beside)
+    }
+
+    /// Thin accent line on top of the focused side (only while both
+    /// panes show, so a lone editor never wears it).
+    @ViewBuilder
+    private func focusMark(_ side: ScrollSync.Side, enabled: Bool) -> some View {
+        if enabled, focus == side {
+            Rectangle()
+                .fill(theme.primary.opacity(0.85))
+                .frame(height: 2)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
         }
     }
 
