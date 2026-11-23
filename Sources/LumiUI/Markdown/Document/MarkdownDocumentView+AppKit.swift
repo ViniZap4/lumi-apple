@@ -282,8 +282,9 @@ final class MarkdownDocumentController: NSObject, NSTextViewDelegate {
             .underlineStyle: NSUnderlineStyle.single.rawValue,
             .cursor: NSCursor.pointingHand,
         ]
+        // Same selection accent as the editor and the explorer row.
         textView.selectedTextAttributes = [
-            .backgroundColor: palette.primary.withAlphaComponent(0.28),
+            .backgroundColor: NSColor(style.theme.selection),
         ]
         hideTooltip()
     }

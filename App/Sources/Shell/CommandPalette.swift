@@ -131,7 +131,7 @@ struct CommandPalette: View {
         }
         .padding(.horizontal, 16)
         .frame(height: 30)
-        .background(selected ? theme.accent.opacity(0.14) : Color.clear)
+        .background(selected ? theme.selectionRow : Color.clear)
     }
 
     private func move(_ d: Int, _ n: Int) {

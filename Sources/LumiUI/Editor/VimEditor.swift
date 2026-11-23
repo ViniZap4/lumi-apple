@@ -20,6 +20,14 @@ public struct VimEditor: View {
     /// Per-device editor settings (web parity): escape sequences, their
     /// timeout, font size and soft wrap.
     let options: VimEditorOptions
+    /// Parsed per-device `.vimrc` (mappings, leader, options).
+    let vimrc: ParsedVimrc?
+    /// Draw a block cursor in normal mode (preference).
+    let blockCursor: Bool
+    /// Name of the open note (`"%`, Ctrl-G).
+    let fileName: String?
+    /// Mode / pending keys / messages for the chrome (legend, status).
+    let onStatusChange: ((VimStatus) -> Void)?
 
     @State private var controller: VimController
 
@@ -30,9 +38,17 @@ public struct VimEditor: View {
         jjEscapeEnabled: Bool = false,
         showLineNumbers: Bool = false,
         relativeLineNumbers: Bool = false,
-        options: VimEditorOptions = VimEditorOptions()
+        options: VimEditorOptions = VimEditorOptions(),
+        vimrc: ParsedVimrc? = nil,
+        blockCursor: Bool = true,
+        fileName: String? = nil,
+        onStatusChange: ((VimStatus) -> Void)? = nil
     ) {
         self.options = options
+        self.vimrc = vimrc
+        self.blockCursor = blockCursor
+        self.fileName = fileName
+        self.onStatusChange = onStatusChange
         self.text = text
         self.onModeChange = onModeChange
         self.onEffect = onEffect
@@ -52,9 +68,17 @@ public struct VimEditor: View {
         jjEscapeEnabled: Bool = false,
         showLineNumbers: Bool = false,
         relativeLineNumbers: Bool = false,
-        options: VimEditorOptions = VimEditorOptions()
+        options: VimEditorOptions = VimEditorOptions(),
+        vimrc: ParsedVimrc? = nil,
+        blockCursor: Bool = true,
+        fileName: String? = nil,
+        onStatusChange: ((VimStatus) -> Void)? = nil
     ) {
         self.options = options
+        self.vimrc = vimrc
+        self.blockCursor = blockCursor
+        self.fileName = fileName
+        self.onStatusChange = onStatusChange
         self.text = nil
         self.onModeChange = onModeChange
         self.onEffect = onEffect
@@ -67,19 +91,24 @@ public struct VimEditor: View {
     @Environment(\.theme) private var theme
 
     public var body: some View {
+        let opts = controller.state.options
         VStack(spacing: 0) {
             VimTextViewBridge(
                 controller: controller,
                 mode: controller.state.mode,
                 highlights: controller.searchHighlights,
                 theme: theme,
-                showLineNumbers: showLineNumbers,
-                relativeLineNumbers: relativeLineNumbers,
+                showLineNumbers: opts.number ?? showLineNumbers,
+                relativeLineNumbers: opts.relativenumber ?? relativeLineNumbers,
                 fontSize: options.fontSize,
-                lineWrapping: options.lineWrapping
+                lineWrapping: opts.wrap ?? options.lineWrapping,
+                blockRanges: controller.blockSelectionRanges,
+                blockCursor: blockCursor
             )
             if case let .commandLine(prefix, buffer) = controller.state.mode {
                 VimCommandLineOverlay(prefix: prefix, buffer: buffer)
+            } else if let message = controller.state.message {
+                VimMessageView(message: message)
             }
         }
         .onChange(of: text?.wrappedValue) { _, new in
@@ -92,6 +121,15 @@ public struct VimEditor: View {
         .onChange(of: controller.state.mode) { _, mode in
             onModeChange?(mode)
         }
+        .onChange(of: controller.status) { _, status in
+            onStatusChange?(status)
+        }
+        .onChange(of: vimrc) { _, parsed in
+            controller.applyVimrc(parsed)
+        }
+        .onChange(of: fileName) { _, name in
+            controller.setFileName(name)
+        }
         .onAppear {
             controller.bindDocument()
             controller.onEffect = onEffect
@@ -100,7 +138,10 @@ public struct VimEditor: View {
             }
             controller.setJJEscapeEnabled(jjEscapeEnabled)
             controller.setEscapeSequences(options.escapeSequences, timeout: options.escapeTimeout)
+            controller.applyVimrc(vimrc)
+            controller.setFileName(fileName)
             onModeChange?(controller.state.mode)
+            onStatusChange?(controller.status)
         }
         .onChange(of: jjEscapeEnabled) { _, newValue in
             controller.setJJEscapeEnabled(newValue)
@@ -134,15 +175,50 @@ public struct VimEditorOptions: Equatable, Sendable {
 
 /// Convenience accessor so callers (e.g. detail toolbar) can show the current
 /// mode without owning a `VimController` reference.
+/// One-line message (or a multi-line panel such as `:registers`) under
+/// the editor; replaced by the next key.
+struct VimMessageView: View {
+    let message: VimMessage
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        Group {
+            if message.isMultiline {
+                ScrollView {
+                    Text(message.text)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(maxHeight: 220)
+            } else {
+                Text(message.text)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .font(.system(.callout, design: .monospaced))
+        .foregroundStyle(message.isError ? theme.error : theme.text)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(theme.overlayBackground)
+        .overlay(alignment: .top) { Rectangle().fill(theme.border).frame(height: 0.5) }
+        .allowsHitTesting(message.isMultiline)
+        .accessibilityLabel(message.text)
+    }
+}
+
 public extension VimMode {
     var label: String {
         switch self {
         case .normal: return "NORMAL"
         case .insert: return "INSERT"
+        case .replace: return "REPLACE"
         case let .visual(kind, _):
             switch kind {
             case .characterwise: return "VISUAL"
             case .linewise: return "V-LINE"
+            case .block: return "V-BLOCK"
             }
         case let .commandLine(prefix, buffer):
             return "\(prefix)\(buffer)"

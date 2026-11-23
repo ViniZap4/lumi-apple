@@ -59,3 +59,11 @@ public struct ThemeTokens: Sendable, Hashable {
         self.logoColors = logoColors
     }
 }
+
+public extension ThemeTokens {
+    /// The one selection accent used app-wide: editor visual selection,
+    /// reader text selection, explorer cursor row (`selectionRow`).
+    var selection: Color { accent.opacity(0.28) }
+    /// The explorer / palette cursor row.
+    var selectionRow: Color { accent.opacity(0.16) }
+}

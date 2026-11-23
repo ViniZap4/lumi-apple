@@ -314,7 +314,8 @@ struct VimAppKitTextViewTests {
         let (view, c, doc) = make("hello world")
         c.send(.character("w"))
         doc.remote([TextEdit(location: 0, length: 0, replacement: ">> ")])
-        #expect(view.selectedRange() == NSRange(location: 9, length: 1))
+        // Normal mode shows a caret; the block is the cursor overlay.
+        #expect(view.selectedRange() == NSRange(location: 9, length: 0))
     }
 }
 

@@ -26,6 +26,7 @@ enum VimKeyMapper {
         switch selector {
         case "insertNewline:", "insertLineBreak:", "insertNewlineIgnoringFieldEditor:": return .return
         case "deleteBackward:", "deleteBackwardByDecomposingPreviousCharacter:": return .backspace
+        case "deleteForward:": return .delete
         case "insertTab:", "insertTabIgnoringFieldEditor:": return .tab
         case "cancelOperation:": return .escape
         case "moveLeft:": return .arrow(.left)
@@ -36,15 +37,14 @@ enum VimKeyMapper {
         }
     }
 
-    /// Ctrl chords the engine understands, by their base character.
+    /// Ctrl chords, by their base character: every Ctrl-letter reaches
+    /// the engine (Ctrl-W, Ctrl-V, Ctrl-A …); Ctrl-[ and Ctrl-C are Esc.
     static func controlInput(for base: String) -> VimInput? {
-        switch base.lowercased() {
-        case "r": return .controlR
-        case "d": return .controlD
-        case "u": return .controlU
-        case "[": return .escape
-        default: return nil
-        }
+        let lower = base.lowercased()
+        guard lower.count == 1, let c = lower.first else { return nil }
+        if c == "[" { return .escape }
+        guard c.isASCII, c.isLetter else { return nil }
+        return VimInput.ctrl(c)
     }
 
     #if canImport(AppKit)
@@ -56,6 +56,7 @@ enum VimKeyMapper {
         case 124: return .arrow(.right)
         case 125: return .arrow(.down)
         case 126: return .arrow(.up)
+        case 117: return .delete
         default: break
         }
         if event.modifierFlags.contains(.control), let chars = event.charactersIgnoringModifiers {

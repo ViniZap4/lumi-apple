@@ -84,6 +84,10 @@ struct VimTextViewBridge: NSViewRepresentable {
     let relativeLineNumbers: Bool
     var fontSize: CGFloat = 13
     var lineWrapping: Bool = true
+    /// Visual-block selection (one range per line).
+    var blockRanges: [NSRange] = []
+    /// Draw a block cursor in normal mode (preference).
+    var blockCursor: Bool = true
 
     func makeNSView(context: Context) -> NSScrollView {
         let textView = VimAppKitTextView(usingTextLayoutManager: true)
@@ -126,18 +130,22 @@ struct VimTextViewBridge: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? VimAppKitTextView else { return }
-        let isInsert = mode == .insert || !controller.vimEnabled
         textView.updateTheme(EditorStyler(theme: theme, fontSize: fontSize))
         textView.applyWrapping(lineWrapping, in: scrollView)
-        textView.insertionPointColor = isInsert ? NSColor(theme.primary) : NSColor(theme.accent)
-        textView.selectedTextAttributes = [
-            .backgroundColor: isInsert
-                ? NSColor(theme.primary).withAlphaComponent(0.30)
-                : NSColor(theme.accent).withAlphaComponent(0.55),
-            .foregroundColor: isInsert ? NSColor(theme.text) : NSColor(theme.background)
-        ]
+        textView.caretColor = NSColor(mode == .insert || !controller.vimEnabled ? theme.primary : theme.accent)
+        textView.cursorColors = VimCursorColors(
+            normal: NSColor(theme.accent), insert: NSColor(theme.primary),
+            replace: NSColor(theme.warning), inverted: NSColor(theme.background)
+        )
+        textView.blockCursorPreference = blockCursor
+        // One selection accent app-wide (explorer row, reader, editor).
+        textView.selectedTextAttributes = [.backgroundColor: NSColor(theme.selection)]
         textView.isEditable = controller.isEditable
-        textView.applySearchHighlights(highlights, color: NSColor(theme.warning).withAlphaComponent(0.35))
+        textView.applyRenderingHighlights(
+            search: highlights, searchColor: NSColor(theme.warning).withAlphaComponent(0.35),
+            block: blockRanges, blockColor: NSColor(theme.selection)
+        )
+        textView.updateCursor()
 
         if let ruler = scrollView.verticalRulerView as? LineNumberRulerView {
             ruler.theme = theme
@@ -155,6 +163,15 @@ struct VimTextViewBridge: NSViewRepresentable {
 final class VimAppKitTextView: NSTextView, EditorTextSurface {
     private(set) weak var controller: VimController?
     var styler: EditorStyler?
+    /// The vim cursor overlay (block / bar / underline / half block).
+    let cursorView = VimCursorView()
+    var cursorColors = VimCursorColors(normal: .systemBlue, insert: .systemBlue, replace: .systemOrange, inverted: .textBackgroundColor)
+    var blockCursorPreference = true
+    /// Colour for the system caret when it shows (IME composition).
+    var caretColor: NSColor = .systemBlue
+    private(set) var cursorStyle = VimCursorStyle(shape: .block, blinks: false)
+    private var blinkTimer: Timer?
+    private var blinkOn = true
     /// True while the controller writes into the storage.
     private var applyingEngineChange = false
     private var updatingMarkedText = false
@@ -168,6 +185,7 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
     func attach(_ controller: VimController) {
         self.controller = controller
         controller.surface = self
+        if cursorView.superview == nil { addSubview(cursorView) }
         applyingEngineChange = true
         let styler = self.styler ?? EditorStyler(theme: .tokyoNight, fontSize: 13)
         textStorage?.setAttributedString(NSAttributedString(string: controller.buffer.text, attributes: styler.baseAttributes))
@@ -228,7 +246,7 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
         applyingEngineChange = true
         lastHighlightedRange = EditorStorage.apply(edits, to: storage, styler: styler)
         applyingEngineChange = false
-        if !appliedHighlights.isEmpty { reapplySearchHighlights() }
+        if !appliedHighlights.isEmpty || !appliedBlock.isEmpty { reapplyRenderingHighlights() }
     }
 
     func showSelection(_ range: NSRange, scroll: Bool) {
@@ -237,7 +255,14 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
         settingSelection = true
         setSelectedRange(clamped)
         settingSelection = false
-        if scroll { scrollRangeToVisible(clamped) }
+        if scroll {
+            if let c = controller, clamped.length > 0 {
+                scrollRangeToVisible(c.cursorCharacterRange)
+            } else {
+                scrollRangeToVisible(clamped)
+            }
+        }
+        updateCursor()
     }
 
     var currentSelection: NSRange { selectedRange() }
@@ -372,33 +397,254 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
         // A click (or a finished drag) moves the engine cursor; a drag
         // selection stays visible for Cmd-C until the next engine move.
         controller.userMovedSelection(to: first)
+        updateCursor()
     }
 
     @objc func undo(_ sender: Any?) { controller?.undo() }
     @objc func redo(_ sender: Any?) { controller?.redo() }
 
-    // MARK: Search highlights (TextKit 2 rendering attributes — no storage edits)
+    // MARK: Search + block highlights (TextKit 2 rendering attributes — no storage edits)
 
     private var highlightColor: NSColor = .systemYellow
+    private var appliedBlock: [NSRange] = []
+    private var blockColor: NSColor = .selectedTextBackgroundColor
 
     func applySearchHighlights(_ ranges: [NSRange], color: NSColor) {
-        guard ranges != appliedHighlights || color != highlightColor else { return }
-        highlightColor = color
-        appliedHighlights = ranges
-        reapplySearchHighlights()
+        applyRenderingHighlights(search: ranges, searchColor: color, block: appliedBlock, blockColor: blockColor)
     }
 
-    private func reapplySearchHighlights() {
+    func applyRenderingHighlights(search: [NSRange], searchColor: NSColor, block: [NSRange], blockColor: NSColor) {
+        guard search != appliedHighlights || searchColor != highlightColor || block != appliedBlock || blockColor != self.blockColor else { return }
+        highlightColor = searchColor
+        appliedHighlights = search
+        appliedBlock = block
+        self.blockColor = blockColor
+        reapplyRenderingHighlights()
+    }
+
+    private func reapplyRenderingHighlights() {
         guard let tlm = textLayoutManager, let content = tlm.textContentManager else { return }
         tlm.removeRenderingAttribute(.backgroundColor, for: content.documentRange)
         let length = (string as NSString).length
-        for r in appliedHighlights where NSMaxRange(r) <= length {
-            guard let start = content.location(content.documentRange.location, offsetBy: r.location),
-                  let end = content.location(start, offsetBy: r.length),
-                  let range = NSTextRange(location: start, end: end)
-            else { continue }
-            tlm.addRenderingAttribute(.backgroundColor, value: highlightColor, for: range)
+        for (ranges, color) in [(appliedHighlights, highlightColor), (appliedBlock, blockColor)] {
+            for r in ranges where NSMaxRange(r) <= length {
+                guard let start = content.location(content.documentRange.location, offsetBy: r.location),
+                      let end = content.location(start, offsetBy: r.length),
+                      let range = NSTextRange(location: start, end: end)
+                else { continue }
+                tlm.addRenderingAttribute(.backgroundColor, value: color, for: range)
+            }
         }
+    }
+
+    // MARK: Cursor (mode-shaped overlay)
+
+    /// Frame of the character cell at `range` (UTF-16) in view
+    /// coordinates. Empty ranges (line end, empty line, end of text) get
+    /// a one-cell-wide frame at the insertion point.
+    func cellRect(for range: NSRange) -> NSRect? {
+        guard let tlm = textLayoutManager, let tcm = tlm.textContentManager else { return nil }
+        let length = (string as NSString).length
+        let loc = min(range.location, length)
+        let font = (styler?.baseAttributes[.font] as? NSFont) ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let cellWidth = ("0" as NSString).size(withAttributes: [.font: font]).width
+        let lineHeight = ceil(font.ascender - font.descender + font.leading)
+        let origin = textContainerOrigin
+        let padding = textContainer?.lineFragmentPadding ?? 5
+        guard let start = tcm.location(tcm.documentRange.location, offsetBy: loc) else { return nil }
+        let len = min(range.length, length - loc)
+        let end = len > 0 ? tcm.location(start, offsetBy: len) : start
+        guard let end, let textRange = NSTextRange(location: start, end: end) else { return nil }
+        tlm.ensureLayout(for: textRange)
+        var frame: CGRect?
+        tlm.enumerateTextSegments(in: textRange, type: .standard, options: []) { _, f, _, _ in
+            frame = frame.map { $0.union(f) } ?? f
+            return len > 0
+        }
+        if var f = frame, f.height > 0 {
+            f.origin.x += origin.x
+            f.origin.y += origin.y
+            if len == 0 || f.width < 1 { f.size.width = cellWidth }
+            return f
+        }
+        // No line fragment (empty text, or the empty line after a final
+        // newline): place the cell after the previous character's line.
+        if loc > 0, let prev = cellRect(for: NSRange(location: loc - 1, length: 1)) {
+            if (string as NSString).character(at: loc - 1) == 10 {
+                return NSRect(x: origin.x + padding, y: prev.maxY, width: cellWidth, height: prev.height)
+            }
+            return NSRect(x: prev.maxX, y: prev.minY, width: cellWidth, height: prev.height)
+        }
+        return NSRect(x: origin.x + padding, y: origin.y, width: cellWidth, height: lineHeight)
+    }
+
+    /// Tests / offscreen renders: pretend the view has keyboard focus.
+    var focusOverride: Bool?
+
+    private var isEditorFocused: Bool {
+        if let focusOverride { return focusOverride }
+        guard let window else { return false }
+        return window.isKeyWindow && window.firstResponder === self
+    }
+
+    /// Re-resolve the cursor shape for the current mode and move the
+    /// overlay to the cursor's cell.
+    func updateCursor() {
+        guard let controller, controller.vimEnabled else {
+            cursorView.isHidden = true
+            stopBlink()
+            setSystemCaret(visible: true)
+            return
+        }
+        let style = VimCursorStyle.resolve(
+            mode: controller.state.mode,
+            pending: controller.state.pending,
+            hasMarkedText: hasMarkedText(),
+            vimEnabled: true,
+            isFocused: isEditorFocused,
+            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+            blockCursor: blockCursorPreference
+        )
+        cursorStyle = style
+        setSystemCaret(visible: style.usesSystemCaret)
+        guard !style.usesSystemCaret, style.shape != .hidden else {
+            cursorView.isHidden = true
+            stopBlink()
+            return
+        }
+        let range = controller.cursorCharacterRange
+        guard let rect = cellRect(for: range) else {
+            cursorView.isHidden = true
+            return
+        }
+        cursorView.shape = style.shape
+        cursorView.color = cursorColors.color(for: style.shape, mode: controller.state.mode)
+        cursorView.thickness = style.shape == .bar ? 2 : max(2, floor(rect.height / 9))
+        if range.length > 0, style.shape == .block || style.shape == .halfBlock {
+            let text = (string as NSString).substring(with: range)
+            let font = (textStorage?.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont)
+                ?? (styler?.baseAttributes[.font] as? NSFont) ?? .monospacedSystemFont(ofSize: 13, weight: .regular)
+            cursorView.glyph = text == "\t" ? nil : NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: cursorColors.inverted])
+        } else {
+            cursorView.glyph = nil
+        }
+        if cursorView.frame != rect { cursorView.frame = rect }
+        cursorView.isHidden = false
+        restartBlink(style.blinks)
+    }
+
+    private func setSystemCaret(visible: Bool) {
+        let color = visible ? caretColor : NSColor.clear
+        if insertionPointColor != color { insertionPointColor = color }
+        if #available(macOS 14.0, *) {
+            for case let indicator as NSTextInsertionIndicator in subviews {
+                indicator.displayMode = visible ? .automatic : .hidden
+            }
+        }
+    }
+
+    override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
+        // Our overlay draws the vim cursor; the system caret only shows
+        // for plain editing and IME composition.
+        guard controller?.vimEnabled != true || cursorStyle.usesSystemCaret else { return }
+        super.drawInsertionPoint(in: rect, color: color, turnedOn: flag)
+    }
+
+    private func restartBlink(_ blinks: Bool) {
+        blinkTimer?.invalidate()
+        blinkTimer = nil
+        blinkOn = true
+        cursorView.alphaValue = 1
+        guard blinks else { return }
+        let timer = Timer(timeInterval: VimCursorStyle.blinkInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.blinkOn.toggle()
+                self.cursorView.alphaValue = self.blinkOn ? 1 : 0
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        blinkTimer = timer
+    }
+
+    private func stopBlink() {
+        blinkTimer?.invalidate()
+        blinkTimer = nil
+        cursorView.alphaValue = 1
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let ok = super.becomeFirstResponder()
+        DispatchQueue.main.async { [weak self] in self?.updateCursor() }
+        return ok
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let ok = super.resignFirstResponder()
+        DispatchQueue.main.async { [weak self] in self?.updateCursor() }
+        return ok
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: nil)
+        if let window {
+            NotificationCenter.default.addObserver(self, selector: #selector(windowKeyChanged), name: NSWindow.didBecomeKeyNotification, object: window)
+            NotificationCenter.default.addObserver(self, selector: #selector(windowKeyChanged), name: NSWindow.didResignKeyNotification, object: window)
+        } else {
+            stopBlink()
+        }
+    }
+
+    @objc private func windowKeyChanged() { updateCursor() }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        if controller != nil { updateCursor() }
+    }
+
+    // MARK: Viewport (H M L, page keys, zz, gj gk)
+
+    func visibleRange() -> NSRange? {
+        let vr = visibleRect
+        guard vr.height > 0 else { return nil }
+        let top = characterIndexForInsertion(at: NSPoint(x: vr.minX + 1, y: vr.minY + 1))
+        let bottom = characterIndexForInsertion(at: NSPoint(x: vr.minX + 1, y: vr.maxY - 2))
+        guard top != NSNotFound, bottom != NSNotFound else { return nil }
+        return NSRange(location: min(top, bottom), length: abs(bottom - top))
+    }
+
+    func displayLineOffset(from: Int, count: Int) -> Int? {
+        guard let rect = cellRect(for: NSRange(location: from, length: 0)) else { return nil }
+        let y = rect.midY + CGFloat(count) * rect.height
+        guard y >= 0, y <= bounds.maxY else { return nil }
+        let idx = characterIndexForInsertion(at: NSPoint(x: rect.minX + 1, y: y))
+        return idx == NSNotFound ? nil : idx
+    }
+
+    func scrollCursor(to position: VimScrollPosition, cursor: Int) {
+        guard let sv = enclosingScrollView, let r = cellRect(for: NSRange(location: cursor, length: 0)) else { return }
+        let visible = sv.contentView.bounds
+        var y: CGFloat
+        switch position {
+        case .top: y = r.minY - textContainerOrigin.y
+        case .center: y = r.midY - visible.height / 2
+        case .bottom: y = r.maxY - visible.height + textContainerOrigin.y
+        }
+        y = max(0, min(y, max(0, frame.height - visible.height)))
+        sv.contentView.scroll(to: NSPoint(x: visible.minX, y: y))
+        sv.reflectScrolledClipView(sv.contentView)
+    }
+
+    func scrollLines(_ lines: Int) {
+        guard let sv = enclosingScrollView else { return }
+        let font = (styler?.baseAttributes[.font] as? NSFont) ?? .monospacedSystemFont(ofSize: 13, weight: .regular)
+        let lh = ceil(font.ascender - font.descender + font.leading)
+        let visible = sv.contentView.bounds
+        let y = max(0, min(visible.minY + CGFloat(lines) * lh, max(0, frame.height - visible.height)))
+        sv.contentView.scroll(to: NSPoint(x: visible.minX, y: y))
+        sv.reflectScrolledClipView(sv.contentView)
     }
 }
 
@@ -417,6 +663,8 @@ struct VimTextViewBridge: UIViewRepresentable {
     let relativeLineNumbers: Bool
     var fontSize: CGFloat = 16
     var lineWrapping: Bool = true
+    var blockRanges: [NSRange] = []
+    var blockCursor: Bool = true
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -465,12 +713,21 @@ struct VimTextViewBridge: UIViewRepresentable {
 
     func updateUIView(_ textView: UITextView, context: Context) {
         guard let view = textView as? VimUIKitTextView else { return }
-        let isInsert = mode == .insert || !controller.vimEnabled
         view.updateTheme(EditorStyler(theme: theme, fontSize: fontSize))
-        view.tintColor = UIColor(isInsert ? theme.primary : theme.accent)
+        // One selection accent app-wide (explorer row, reader, editor).
+        view.tintColor = UIColor(theme.accent)
+        view.cursorColors = VimCursorColors(
+            normal: UIColor(theme.accent), insert: UIColor(theme.primary),
+            replace: UIColor(theme.warning), inverted: UIColor(theme.background)
+        )
+        view.blockCursorPreference = blockCursor
         view.applyAccessoryTheme(theme)
         view.isEditable = controller.isEditable
-        view.applySearchHighlights(highlights, color: UIColor(theme.warning).withAlphaComponent(0.35))
+        view.applyRenderingHighlights(
+            search: highlights, searchColor: UIColor(theme.warning).withAlphaComponent(0.35),
+            block: blockRanges, blockColor: UIColor(theme.selection)
+        )
+        view.updateCursor()
 
         if case let .commandLine(prefix, buffer) = mode {
             view.commandLineBar?.prefix = prefix
@@ -495,6 +752,12 @@ struct VimTextViewBridge: UIViewRepresentable {
 final class VimUIKitTextView: UITextView, EditorTextSurface {
     private(set) weak var controller: VimController?
     var styler: EditorStyler?
+    let cursorView = VimCursorView()
+    var cursorColors = VimCursorColors(normal: .systemBlue, insert: .systemBlue, replace: .systemOrange, inverted: .systemBackground)
+    var blockCursorPreference = true
+    private(set) var cursorStyle = VimCursorStyle(shape: .block, blinks: false)
+    private var blinkTimer: Timer?
+    private var blinkOn = true
     var accessoryBar: VimAccessoryBar?
     var commandLineBar: VimCommandLineAccessoryBar?
     private var applyingEngineChange = false
@@ -507,6 +770,7 @@ final class VimUIKitTextView: UITextView, EditorTextSurface {
     func attach(_ controller: VimController) {
         self.controller = controller
         controller.surface = self
+        if cursorView.superview == nil { addSubview(cursorView) }
         let styler = self.styler ?? EditorStyler(theme: .tokyoNight, fontSize: 16)
         applyingEngineChange = true
         textStorage.setAttributedString(NSAttributedString(string: controller.buffer.text, attributes: styler.baseAttributes))
@@ -540,18 +804,20 @@ final class VimUIKitTextView: UITextView, EditorTextSurface {
         lastHighlightedRange = EditorStorage.apply(edits, to: textStorage, styler: styler)
         inputDelegate?.textDidChange(self)
         applyingEngineChange = false
-        if !appliedHighlights.isEmpty { reapplySearchHighlights() }
+        if !appliedHighlights.isEmpty || !appliedBlock.isEmpty { reapplyRenderingHighlights() }
     }
 
     func showSelection(_ range: NSRange, scroll: Bool) {
         let length = textStorage.length
         let loc = min(range.location, length)
         let clamped = NSRange(location: loc, length: min(range.length, length - loc))
-        guard selectedRange != clamped else { return }
-        settingSelection = true
-        selectedRange = clamped
-        settingSelection = false
-        if scroll { scrollRangeToVisible(clamped) }
+        if selectedRange != clamped {
+            settingSelection = true
+            selectedRange = clamped
+            settingSelection = false
+            if scroll { scrollRangeToVisible(controller?.cursorCharacterRange ?? clamped) }
+        }
+        updateCursor()
     }
 
     var currentSelection: NSRange { selectedRange }
@@ -638,6 +904,7 @@ final class VimUIKitTextView: UITextView, EditorTextSurface {
     func userChangedSelection() {
         guard !settingSelection, !applyingEngineChange, markedTextRange == nil, let controller else { return }
         controller.userMovedSelection(to: selectedRange)
+        updateCursor()
     }
 
     // MARK: Accessory bars
@@ -661,25 +928,199 @@ final class VimUIKitTextView: UITextView, EditorTextSurface {
         }
     }
 
-    // MARK: Search highlights (TextKit 2 rendering attributes)
+    // MARK: Search + block highlights (TextKit 2 rendering attributes)
+
+    private var appliedBlock: [NSRange] = []
+    private var blockColor: UIColor = .systemBlue
 
     func applySearchHighlights(_ ranges: [NSRange], color: UIColor) {
-        guard ranges != appliedHighlights || color != highlightColor else { return }
-        highlightColor = color
-        appliedHighlights = ranges
-        reapplySearchHighlights()
+        applyRenderingHighlights(search: ranges, searchColor: color, block: appliedBlock, blockColor: blockColor)
     }
 
-    private func reapplySearchHighlights() {
+    func applyRenderingHighlights(search: [NSRange], searchColor: UIColor, block: [NSRange], blockColor: UIColor) {
+        guard search != appliedHighlights || searchColor != highlightColor || block != appliedBlock || blockColor != self.blockColor else { return }
+        highlightColor = searchColor
+        appliedHighlights = search
+        appliedBlock = block
+        self.blockColor = blockColor
+        reapplyRenderingHighlights()
+    }
+
+    private func reapplyRenderingHighlights() {
         guard let tlm = textLayoutManager, let content = tlm.textContentManager else { return }
         tlm.removeRenderingAttribute(.backgroundColor, for: content.documentRange)
-        for r in appliedHighlights where NSMaxRange(r) <= textStorage.length {
-            guard let start = content.location(content.documentRange.location, offsetBy: r.location),
-                  let end = content.location(start, offsetBy: r.length),
-                  let range = NSTextRange(location: start, end: end)
-            else { continue }
-            tlm.addRenderingAttribute(.backgroundColor, value: highlightColor, for: range)
+        for (ranges, color) in [(appliedHighlights, highlightColor), (appliedBlock, blockColor)] {
+            for r in ranges where NSMaxRange(r) <= textStorage.length {
+                guard let start = content.location(content.documentRange.location, offsetBy: r.location),
+                      let end = content.location(start, offsetBy: r.length),
+                      let range = NSTextRange(location: start, end: end)
+                else { continue }
+                tlm.addRenderingAttribute(.backgroundColor, value: color, for: range)
+            }
         }
+    }
+
+    // MARK: Cursor (mode-shaped overlay; the system caret hides)
+
+    func cellRect(for range: NSRange) -> CGRect? {
+        guard let tlm = textLayoutManager, let tcm = tlm.textContentManager else { return nil }
+        let length = textStorage.length
+        let loc = min(range.location, length)
+        let font = (styler?.baseAttributes[.font] as? UIFont) ?? .monospacedSystemFont(ofSize: 16, weight: .regular)
+        let cellWidth = ("0" as NSString).size(withAttributes: [.font: font]).width
+        let origin = CGPoint(x: textContainerInset.left, y: textContainerInset.top)
+        let padding = textContainer.lineFragmentPadding
+        guard let start = tcm.location(tcm.documentRange.location, offsetBy: loc) else { return nil }
+        let len = min(range.length, length - loc)
+        let end = len > 0 ? tcm.location(start, offsetBy: len) : start
+        guard let end, let textRange = NSTextRange(location: start, end: end) else { return nil }
+        tlm.ensureLayout(for: textRange)
+        var frame: CGRect?
+        tlm.enumerateTextSegments(in: textRange, type: .standard, options: []) { _, f, _, _ in
+            frame = frame.map { $0.union(f) } ?? f
+            return len > 0
+        }
+        if var f = frame, f.height > 0 {
+            f.origin.x += origin.x
+            f.origin.y += origin.y
+            if len == 0 || f.width < 1 { f.size.width = cellWidth }
+            return f
+        }
+        if loc > 0, let prev = cellRect(for: NSRange(location: loc - 1, length: 1)) {
+            if (textStorage.string as NSString).character(at: loc - 1) == 10 {
+                return CGRect(x: origin.x + padding, y: prev.maxY, width: cellWidth, height: prev.height)
+            }
+            return CGRect(x: prev.maxX, y: prev.minY, width: cellWidth, height: prev.height)
+        }
+        return CGRect(x: origin.x + padding, y: origin.y, width: cellWidth, height: font.lineHeight)
+    }
+
+    func updateCursor() {
+        guard let controller, controller.vimEnabled else {
+            cursorView.isHidden = true
+            stopBlink()
+            return
+        }
+        let style = VimCursorStyle.resolve(
+            mode: controller.state.mode,
+            pending: controller.state.pending,
+            hasMarkedText: markedTextRange != nil,
+            vimEnabled: true,
+            isFocused: isFirstResponder,
+            reduceMotion: UIAccessibility.isReduceMotionEnabled,
+            blockCursor: blockCursorPreference
+        )
+        let systemChanged = style.usesSystemCaret != cursorStyle.usesSystemCaret
+        cursorStyle = style
+        if systemChanged { setNeedsLayout() }
+        guard !style.usesSystemCaret, style.shape != .hidden, let rect = cellRect(for: controller.cursorCharacterRange) else {
+            cursorView.isHidden = true
+            stopBlink()
+            return
+        }
+        let range = controller.cursorCharacterRange
+        cursorView.shape = style.shape
+        cursorView.color = cursorColors.color(for: style.shape, mode: controller.state.mode)
+        cursorView.thickness = style.shape == .bar ? 2 : max(2, floor(rect.height / 9))
+        if range.length > 0, style.shape == .block || style.shape == .halfBlock {
+            let text = (textStorage.string as NSString).substring(with: range)
+            let font = (textStorage.attribute(.font, at: range.location, effectiveRange: nil) as? UIFont)
+                ?? (styler?.baseAttributes[.font] as? UIFont) ?? .monospacedSystemFont(ofSize: 16, weight: .regular)
+            cursorView.glyph = text == "\t" ? nil : NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: cursorColors.inverted])
+        } else {
+            cursorView.glyph = nil
+        }
+        if cursorView.frame != rect { cursorView.frame = rect }
+        cursorView.isHidden = false
+        bringSubviewToFront(cursorView)
+        restartBlink(style.blinks)
+    }
+
+    /// Hide the system caret while our overlay draws the cursor.
+    override func caretRect(for position: UITextPosition) -> CGRect {
+        let base = super.caretRect(for: position)
+        guard controller?.vimEnabled == true, !cursorStyle.usesSystemCaret else { return base }
+        return CGRect(x: base.minX, y: base.minY, width: 0, height: 0)
+    }
+
+    private func restartBlink(_ blinks: Bool) {
+        blinkTimer?.invalidate()
+        blinkTimer = nil
+        blinkOn = true
+        cursorView.alpha = 1
+        guard blinks else { return }
+        let timer = Timer(timeInterval: VimCursorStyle.blinkInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.blinkOn.toggle()
+                self.cursorView.alpha = self.blinkOn ? 1 : 0
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        blinkTimer = timer
+    }
+
+    private func stopBlink() {
+        blinkTimer?.invalidate()
+        blinkTimer = nil
+        cursorView.alpha = 1
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let ok = super.becomeFirstResponder()
+        updateCursor()
+        return ok
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let ok = super.resignFirstResponder()
+        updateCursor()
+        return ok
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if controller != nil, let c = controller, let rect = cellRect(for: c.cursorCharacterRange), cursorView.frame != rect, !cursorView.isHidden {
+            cursorView.frame = rect
+        }
+    }
+
+    // MARK: Viewport
+
+    func visibleRange() -> NSRange? {
+        let top = closestPosition(to: CGPoint(x: textContainerInset.left + 1, y: contentOffset.y + 1))
+        let bottom = closestPosition(to: CGPoint(x: textContainerInset.left + 1, y: contentOffset.y + bounds.height - 2))
+        guard let top, let bottom else { return nil }
+        let a = offset(from: beginningOfDocument, to: top), b = offset(from: beginningOfDocument, to: bottom)
+        return NSRange(location: min(a, b), length: abs(b - a))
+    }
+
+    func displayLineOffset(from: Int, count: Int) -> Int? {
+        guard let rect = cellRect(for: NSRange(location: from, length: 0)) else { return nil }
+        let y = rect.midY + CGFloat(count) * rect.height
+        guard y >= 0, y <= contentSize.height else { return nil }
+        guard let pos = closestPosition(to: CGPoint(x: rect.minX + 1, y: y)) else { return nil }
+        return offset(from: beginningOfDocument, to: pos)
+    }
+
+    func scrollCursor(to position: VimScrollPosition, cursor: Int) {
+        guard let r = cellRect(for: NSRange(location: cursor, length: 0)) else { return }
+        let h = bounds.height
+        var y: CGFloat
+        switch position {
+        case .top: y = r.minY - textContainerInset.top
+        case .center: y = r.midY - h / 2
+        case .bottom: y = r.maxY - h + textContainerInset.bottom
+        }
+        y = max(-adjustedContentInset.top, min(y, max(0, contentSize.height - h)))
+        setContentOffset(CGPoint(x: contentOffset.x, y: y), animated: false)
+    }
+
+    func scrollLines(_ lines: Int) {
+        let font = (styler?.baseAttributes[.font] as? UIFont) ?? .monospacedSystemFont(ofSize: 16, weight: .regular)
+        let h = bounds.height
+        let y = max(-adjustedContentInset.top, min(contentOffset.y + CGFloat(lines) * font.lineHeight, max(0, contentSize.height - h)))
+        setContentOffset(CGPoint(x: contentOffset.x, y: y), animated: false)
     }
 }
 

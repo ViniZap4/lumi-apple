@@ -150,7 +150,8 @@ final class MarkdownDocumentController: NSObject, UITextViewDelegate {
                 .foregroundColor: palette.primary,
                 .underlineStyle: NSUnderlineStyle.single.rawValue,
             ]
-            textView.tintColor = palette.primary
+            // Same selection accent as the editor and the explorer row.
+            textView.tintColor = UIColor(newStyle.theme.accent)
         }
         let envKey = HostedEnvKey(style: newStyle, vaultRoot: vaultRoot, embedDepth: embedDepth)
         if envKey != hostedEnvKey {

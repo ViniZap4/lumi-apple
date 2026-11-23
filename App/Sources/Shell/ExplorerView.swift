@@ -222,7 +222,7 @@ struct ExplorerColumn: View {
         .background(alignment: .leading) {
             if isCursor {
                 ZStack(alignment: .leading) {
-                    Rectangle().fill(active ? theme.accent.opacity(0.16) : theme.text.opacity(0.06))
+                    Rectangle().fill(active ? theme.selectionRow : theme.text.opacity(0.06))
                     if active {
                         Rectangle().fill(theme.accent).frame(width: 2)
                     }

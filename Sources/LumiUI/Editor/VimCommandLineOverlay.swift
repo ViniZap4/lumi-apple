@@ -13,6 +13,7 @@ struct VimCommandLineOverlay: View {
     let prefix: Character
     let buffer: String
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var caretVisible: Bool = true
 
     var body: some View {
@@ -38,6 +39,9 @@ struct VimCommandLineOverlay: View {
                 .frame(height: 0.5)
         }
         .onAppear {
+            // The editor's cursor moved here (command line / search);
+            // it blinks unless the user asked to reduce motion.
+            guard !reduceMotion else { return }
             withAnimation(.easeInOut(duration: 0.5).repeatForever()) {
                 caretVisible.toggle()
             }

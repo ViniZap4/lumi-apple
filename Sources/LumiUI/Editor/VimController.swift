@@ -25,25 +25,91 @@ protocol EditorTextSurface: AnyObject {
     var currentSelection: NSRange { get }
     /// Drop an in-progress IME composition before a remote edit lands.
     func discardMarkedText()
+    /// UTF-16 offsets of the first and last visible characters.
+    func visibleRange() -> NSRange?
+    /// Offset `count` display (wrapped) lines from `from`, keeping the
+    /// horizontal position; nil when the view can't tell.
+    func displayLineOffset(from: Int, count: Int) -> Int?
+    /// Scroll so the cursor line sits at `position`.
+    func scrollCursor(to position: VimScrollPosition, cursor: Int)
+    /// Scroll by whole lines (negative = up).
+    func scrollLines(_ lines: Int)
+}
+
+extension EditorTextSurface {
+    func visibleRange() -> NSRange? { nil }
+    func displayLineOffset(from: Int, count: Int) -> Int? { nil }
+    func scrollCursor(to position: VimScrollPosition, cursor: Int) {}
+    func scrollLines(_ lines: Int) {}
+}
+
+/// What the chrome shows about the editor: mode, pending keys (legend /
+/// showcmd), recording, messages.
+public struct VimStatus: Equatable, Sendable {
+    public var mode: VimMode
+    public var pending: VimPendingInfo
+    public var recording: Character?
+    public var message: VimMessage?
+    public var insertOneShot: Bool
+    public var substituteConfirm: Bool
+    public var leader: String
+    public var leaderMaps: [(keys: String, rhs: String)]
+    public var escapeSequences: [String]
+
+    public static func == (a: VimStatus, b: VimStatus) -> Bool {
+        a.mode == b.mode && a.pending == b.pending && a.recording == b.recording && a.message == b.message
+            && a.insertOneShot == b.insertOneShot && a.substituteConfirm == b.substituteConfirm && a.leader == b.leader
+            && a.leaderMaps.map(\.keys) == b.leaderMaps.map(\.keys) && a.leaderMaps.map(\.rhs) == b.leaderMaps.map(\.rhs)
+            && a.escapeSequences == b.escapeSequences
+    }
+
+    public init(mode: VimMode = .normal, pending: VimPendingInfo = VimPendingInfo(), recording: Character? = nil,
+                message: VimMessage? = nil, insertOneShot: Bool = false, substituteConfirm: Bool = false,
+                leader: String = "\\", leaderMaps: [(keys: String, rhs: String)] = [], escapeSequences: [String] = []) {
+        self.mode = mode
+        self.pending = pending
+        self.recording = recording
+        self.message = message
+        self.insertOneShot = insertOneShot
+        self.substituteConfirm = substituteConfirm
+        self.leader = leader
+        self.leaderMaps = leaderMaps
+        self.escapeSequences = escapeSequences
+    }
+
+    /// The legend context for this editor state.
+    public var legendContext: LegendContext {
+        if substituteConfirm { return .substituteConfirm }
+        switch mode {
+        case .insert: return .insert
+        case .replace: return .replace
+        case .commandLine(let p, _): return p == ":" ? .commandLine : .search
+        case let .visual(kind, _):
+            switch kind {
+            case .characterwise: return .visual
+            case .linewise: return .visualLine
+            case .block: return .visualBlock
+            }
+        case .normal:
+            return pending.op != nil ? .operatorPending : .normal
+        }
+    }
 }
 
 /// Owns the editor buffer (`TextBuffer`) and `VimState`, dispatches input
 /// through the pure `VimEngine`, and is the **single source of truth**
 /// for the editor text:
 ///
-/// - every engine step that changes the text is reduced to one ranged
-///   `TextEdit` (UTF-16, surrogate-safe) that goes to the text view and,
-///   for server notes, to the CRDT (`CollaborativeDocument.applyLocal`);
+/// - every engine step that changes the text reaches the text view and,
+///   for server notes, the CRDT (`CollaborativeDocument.applyLocal`) as
+///   the ranged UTF-16 edits the engine logged (`TextBuffer.edits`) — a
+///   `:s` over many lines is one edit per match in one transaction;
 /// - remote CRDT deltas arrive as ranged edits and are applied to the
 ///   buffer and the text view in place, with the cursor, visual anchor
 ///   and marks mapped through them (CRDT-CLIENT-PROTOCOL §4.3);
 /// - edits the text view makes on its own (paste, cut, drag, dictation,
 ///   Writing Tools, plain-mode typing) come back through
 ///   `applyExternalEdit`.
-///
-/// Local notes bind a `String` via `onTextChange`; that callback only
-/// ever *receives* text — an external binding change goes through
-/// `replaceAll(with:)` as a ranged diff that keeps mode and history.
 @Observable
 @MainActor
 public final class VimController {
@@ -58,6 +124,7 @@ public final class VimController {
     @ObservationIgnored public var onTextChange: ((String) -> Void)?
     @ObservationIgnored weak var surface: EditorTextSurface?
     @ObservationIgnored public private(set) weak var document: CollaborativeDocument?
+    @ObservationIgnored private var mapTimer: Task<Void, Never>?
 
     public init(initialText: String = "", vimEnabled: Bool = true) {
         self.buffer = TextBuffer(text: initialText, cursor: 0)
@@ -65,11 +132,8 @@ public final class VimController {
         self.vimEnabled = vimEnabled
     }
 
-    /// Collaborative editor over a live replica. The initial text is the
-    /// replica's (§2.2.4). Call `bindDocument()` once the editor is
-    /// mounted to start receiving remote changes — not from `init`,
-    /// because SwiftUI re-evaluates `State(initialValue:)` on every parent
-    /// render and a throwaway controller would steal the handler.
+    /// Collaborative editor over a live replica. Call `bindDocument()`
+    /// once the editor is mounted to start receiving remote changes.
     public init(document: CollaborativeDocument, vimEnabled: Bool = true) {
         self.buffer = TextBuffer(text: document.text, cursor: 0)
         self.state = vimEnabled ? .initial : VimState(mode: .insert)
@@ -77,9 +141,6 @@ public final class VimController {
         self.document = document
     }
 
-    /// Become the document's editor: remote changes flow into this
-    /// controller from now on. Catches up if the replica moved since
-    /// `init`.
     public func bindDocument() {
         guard let document else { return }
         document.changeHandler = { [weak self] change in
@@ -90,36 +151,80 @@ public final class VimController {
         }
     }
 
-    /// Editing allowed (collaborative: only once synced).
     public var isEditable: Bool { document?.isEditable ?? true }
 
     public func setJJEscapeEnabled(_ enabled: Bool) {
         state.jjEscapeEnabled = enabled
     }
 
-    /// Insert-mode escape sequences (`jk`, `ff`) and the time allowed
-    /// between their keys, from the per-device editor settings.
     public func setEscapeSequences(_ sequences: [String], timeout: TimeInterval) {
         state.escapeSequences = sequences
         state.escapeTimeout = timeout
+    }
+
+    /// Install a parsed `.vimrc` (mappings, leader, options).
+    public func applyVimrc(_ parsed: ParsedVimrc?) {
+        guard let parsed else {
+            state.mappings = []
+            state.leader = Vimrc.defaultLeader
+            return
+        }
+        state.apply(vimrc: parsed)
+    }
+
+    /// Name of the open note (`"%`, Ctrl-G).
+    public func setFileName(_ name: String?) {
+        state.fileName = name
+    }
+
+    /// Snapshot for the chrome (legend, status line).
+    public var status: VimStatus {
+        let leaderKeys = state.leader
+        let leaderMaps: [(keys: String, rhs: String)] = state.mappings.compactMap { m in
+            guard m.exAlias == nil, m.mode != .insert else { return nil }
+            let lhs = m.lhs.notation
+            let lead = VimInput.parse(notation: leaderKeys)?.notation ?? leaderKeys
+            guard lhs.hasPrefix(lead), lhs.count > lead.count else { return nil }
+            return (String(lhs.dropFirst(lead.count)), m.rhs.notation)
+        }
+        return VimStatus(
+            mode: state.mode,
+            pending: state.pending,
+            recording: state.recordingMacro,
+            message: state.message,
+            insertOneShot: state.insertOneShot > 0,
+            substituteConfirm: state.substituteConfirm != nil,
+            leader: leaderKeys,
+            leaderMaps: leaderMaps,
+            escapeSequences: VimEngineEscapes.sequences(state)
+        )
     }
 
     // MARK: - Input
 
     public func send(_ input: VimInput) {
         guard isEditable else { return }
-        if !vimEnabled {
-            // Plain mode: Esc does nothing; everything else arrives as
-            // native text-view edits.
-            return
-        }
+        if !vimEnabled { return }
         if let document, interceptUndo(input, document: document) { return }
-
-        let previousRegister = state.defaultRegister
+        if VimEngine.wantsClipboard(state) { state.clipboard = readSystemPasteboard() }
+        if !state.mode.isTyping { state.viewport = currentViewport() }
         let old = buffer
-        let result = VimEngine.handle(input, state: state, buffer: buffer, at: ProcessInfo.processInfo.systemUptime)
+        run(VimEngine.handle(input, state: state, buffer: startBuffer(), at: ProcessInfo.processInfo.systemUptime), old: old)
+    }
+
+    private func startBuffer() -> TextBuffer {
+        var b = buffer
+        b.edits = []
+        return b
+    }
+
+    private func run(_ result: VimEngine.Result, old: TextBuffer) {
+        let previousRegister = state.defaultRegister
         state = result.state
-        buffer = result.buffer
+        var nb = result.buffer
+        let edits = nb.edits
+        nb.edits = []
+        buffer = nb
 
         if document != nil {
             // The CRDT owns undo for server notes (§8): an engine history
@@ -130,23 +235,73 @@ public final class VimController {
                 state.history = VimHistory()
             }
         }
-        if buffer.text != old.text, let edit = TextDiff.edit(from: old.text, to: buffer.text) {
-            commitLocal([edit], applyToSurface: true)
+        if buffer.text != old.text {
+            let ranged: [TextEdit]
+            if !edits.isEmpty, TextEdit.apply(edits, to: old.text) == buffer.text {
+                ranged = edits
+            } else if let edit = TextDiff.edit(from: old.text, to: buffer.text) {
+                ranged = [edit]
+            } else {
+                ranged = []
+            }
+            if !ranged.isEmpty { commitLocal(ranged, applyToSurface: true) }
         }
-        showEngineSelection()
+
+        var scroll = true
+        if let effect = result.effect {
+            switch effect {
+            case let .displayLines(from, count):
+                let from16 = Self.utf16Offset(char: from, in: buffer.text)
+                if let target = surface?.displayLineOffset(from: from16, count: count) {
+                    buffer.cursor = Self.charOffset(utf16: target, in: buffer.text)
+                    var b = buffer
+                    b.cursor = clampForMode(b)
+                    buffer = b
+                }
+            case let .scrollCursor(position):
+                surface?.scrollCursor(to: position, cursor: cursorUTF16Offset)
+                scroll = false
+            case let .scrollLines(n):
+                surface?.scrollLines(n)
+            case .save, .saveAndClose, .close:
+                break
+            }
+        }
+        showEngineSelection(scroll: scroll)
 
         if state.defaultRegister != previousRegister, !state.defaultRegister.text.isEmpty {
             writeToSystemPasteboard(state.defaultRegister.text)
         }
+        scheduleMapTimeout()
         if let effect = result.effect {
-            onEffect?(effect)
+            switch effect {
+            case .save, .saveAndClose, .close: onEffect?(effect)
+            default: break
+            }
+        }
+    }
+
+    private func clampForMode(_ b: TextBuffer) -> Int {
+        let allowPastEnd = state.mode.isTyping
+        return b.clampedCursor(allowPastEnd: allowPastEnd)
+    }
+
+    /// A half-typed mapping resolves after `timeoutlen`.
+    private func scheduleMapTimeout() {
+        mapTimer?.cancel()
+        guard !state.mapPending.isEmpty else { return }
+        let ms = max(50, state.options.timeoutlen)
+        mapTimer = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000)
+            guard !Task.isCancelled, let self, !self.state.mapPending.isEmpty else { return }
+            let old = self.buffer
+            self.run(VimEngine.timeout(state: self.state, buffer: self.startBuffer()), old: old)
         }
     }
 
     /// Text committed by the input system (`insertText`, a finished IME
-    /// composition, a dead-key result such as ABNT2 `´` + `a` → `á`).
-    /// Fed to the engine character by character so insert-mode features
-    /// (jj, dot-repeat, macros) see it.
+    /// composition, a dead-key result). Fed to the engine character by
+    /// character so insert-mode features (jj, dot-repeat, macros) see it.
     public func insertTyped(_ string: String) {
         for ch in string {
             switch ch {
@@ -159,18 +314,18 @@ public final class VimController {
 
     /// `u` / `Ctrl-R` in idle normal mode on a server note → CRDT undo.
     private func interceptUndo(_ input: VimInput, document: CollaborativeDocument) -> Bool {
-        guard state.mode == .normal else { return false }
-        var probe = state
-        probe.pendingCount = nil
-        guard VimEngine.isIdleNormal(probe) else { return false }
+        guard state.mode == .normal, state.insertOneShot == 0, state.substituteConfirm == nil else { return false }
+        let info = state.pending
+        let onlyCount = state.pendingKeys.allSatisfy { $0.char?.isNumber == true }
+        guard onlyCount, info.register == nil, state.mapPending.isEmpty else { return false }
         let isUndo: Bool
         switch input {
-        case .character("u"): isUndo = true
+        case .character("u"), .character("U"): isUndo = true
         case .controlR: isUndo = false
         default: return false
         }
-        let count = state.pendingCount ?? 1
-        state.pendingCount = nil
+        let count = info.count ?? 1
+        state.pendingKeys = []
         state.recordingInputs = []
         state.recordingBaseline = nil
         document.breakUndoGroup()
@@ -202,25 +357,23 @@ public final class VimController {
 
     // MARK: - Edits made by the text view itself
 
-    /// The text view already changed its storage (paste, cut, drag and
-    /// drop, dictation, autocorrect, Writing Tools, plain-mode typing):
-    /// mirror the edit into the buffer and the CRDT.
     func applyExternalEdit(_ edit: TextEdit) {
         guard !edit.isNoOp else { return }
         let ns = NSMutableString(string: buffer.text)
-        guard edit.apply(to: ns) else {
-            // Out of sync with the view — the view is what the user sees.
-            return
-        }
+        guard edit.apply(to: ns) else { return }
         if document == nil, vimEnabled {
             state.history.push(.init(buffer: buffer))
         } else {
             document?.breakUndoGroup()
         }
+        let oldText = buffer.text
         let newText = ns as String
         let caret = edit.location + edit.replacementLength
+        state.marks = state.marks.mapValues { m in
+            Self.charOffset(utf16: PositionMapper.map(Self.utf16Offset(char: m, in: oldText), through: [edit]), in: newText)
+        }
         buffer = TextBuffer(text: newText, cursor: Self.charOffset(utf16: caret, in: newText))
-        if vimEnabled, state.mode != .insert {
+        if vimEnabled, !state.mode.isTyping {
             buffer.cursor = buffer.clampedCursor(allowPastEnd: false)
         }
         commitLocal([edit], applyToSurface: false)
@@ -229,18 +382,17 @@ public final class VimController {
 
     /// The user moved the caret with the mouse / touch.
     func userMovedSelection(to range: NSRange) {
-        let allowPastEnd = !vimEnabled || state.mode == .insert
+        let allowPastEnd = !vimEnabled || state.mode.isTyping
         buffer.cursor = Self.charOffset(utf16: range.location, in: buffer.text)
         buffer.cursor = buffer.clampedCursor(allowPastEnd: allowPastEnd)
+        state.desiredColumn = nil
     }
 
-    /// Local-note binding changed from outside (revert, reload): apply as
-    /// a ranged diff, keeping mode, registers and history.
     public func replaceAll(with text: String) {
         guard text != buffer.text, let edit = TextDiff.edit(from: buffer.text, to: text) else { return }
         let cursor16 = PositionMapper.map(Self.utf16Offset(char: buffer.cursor, in: buffer.text), through: [edit])
         buffer = TextBuffer(text: text, cursor: Self.charOffset(utf16: cursor16, in: text))
-        buffer.cursor = buffer.clampedCursor(allowPastEnd: state.mode == .insert)
+        buffer.cursor = buffer.clampedCursor(allowPastEnd: state.mode.isTyping)
         surface?.applyEdits([edit])
         showEngineSelection()
     }
@@ -263,7 +415,7 @@ public final class VimController {
             surface?.discardMarkedText()
             let old = buffer.text
             buffer = TextBuffer(text: text, cursor: min(buffer.cursor, text.count))
-            buffer.cursor = buffer.clampedCursor(allowPastEnd: state.mode == .insert)
+            buffer.cursor = buffer.clampedCursor(allowPastEnd: state.mode.isTyping)
             if let edit = TextDiff.edit(from: old, to: text) { surface?.applyEdits([edit]) }
             showEngineSelection()
             onTextChange?(text)
@@ -276,14 +428,11 @@ public final class VimController {
         let oldText = buffer.text
         let ns = NSMutableString(string: oldText)
         for e in edits where !e.apply(to: ns) {
-            // Should not happen (the replica and the buffer move in
-            // lockstep); fall back to the replica's text.
             if let document { applyDocumentChange(.resync(document.text)) }
             return
         }
         let newText = ns as String
 
-        // Map every live position through the change (UTF-16 domain).
         func map(_ char: Int, _ assoc: PositionAssoc = .after) -> Int {
             let u = PositionMapper.map(Self.utf16Offset(char: char, in: oldText), through: edits, assoc: assoc)
             return Self.charOffset(utf16: u, in: newText)
@@ -299,9 +448,18 @@ public final class VimController {
             state.mode = .visual(kind, anchor: map(anchor))
         }
         state.marks = state.marks.mapValues { map($0) }
+        if var v = state.lastVisual {
+            v.anchor = map(v.anchor)
+            v.head = map(v.head)
+            state.lastVisual = v
+        }
         if let entry = state.commandLineEntryCursor { state.commandLineEntryCursor = map(entry) }
+        if var session = state.insertSession {
+            session.start = map(session.start, .before)
+            state.insertSession = session
+        }
         buffer = TextBuffer(text: newText, cursor: cursor)
-        let allowPastEnd = !vimEnabled || state.mode == .insert
+        let allowPastEnd = !vimEnabled || state.mode.isTyping
         buffer.cursor = buffer.clampedCursor(allowPastEnd: allowPastEnd)
         cursor = buffer.cursor
 
@@ -321,6 +479,16 @@ public final class VimController {
         surface?.showSelection(selectionUTF16Range, scroll: scroll)
     }
 
+    private func readSystemPasteboard() -> String? {
+        #if canImport(AppKit)
+        return NSPasteboard.general.string(forType: .string)
+        #elseif canImport(UIKit)
+        return UIPasteboard.general.string
+        #else
+        return nil
+        #endif
+    }
+
     private func writeToSystemPasteboard(_ text: String) {
         #if canImport(AppKit)
         NSPasteboard.general.clearContents()
@@ -330,27 +498,45 @@ public final class VimController {
         #endif
     }
 
+    private func currentViewport() -> VimViewport? {
+        guard let r = surface?.visibleRange() else { return nil }
+        let text = buffer.text
+        let first = lineIndex(atUTF16: r.location, in: text)
+        let last = lineIndex(atUTF16: NSMaxRange(r), in: text)
+        return VimViewport(firstLine: first, lastLine: last)
+    }
+
+    private func lineIndex(atUTF16 offset: Int, in text: String) -> Int {
+        var n = 0
+        var i = 0
+        for u in text.utf16 {
+            if i >= offset { break }
+            if u == 10 { n += 1 }
+            i += 1
+        }
+        return n
+    }
+
     /// Cursor offset in UTF-16 code units.
     public var cursorUTF16Offset: Int {
         Self.utf16Offset(char: buffer.cursor, in: buffer.text)
     }
 
-    /// Selection to render: the visual-mode range, or a one-character
-    /// "block cursor" in normal / command-line mode, or a caret in insert.
+    /// The character the cursor sits on (UTF-16), empty at a line end.
+    public var cursorCharacterRange: NSRange {
+        let from = cursorUTF16Offset
+        guard buffer.cursor < buffer.text.count else { return NSRange(location: from, length: 0) }
+        let ch = buffer.text[buffer.cursorIndex]
+        if ch == "\n" { return NSRange(location: from, length: 0) }
+        let to = utf16Offset(of: buffer.cursor + 1)
+        return NSRange(location: from, length: to - from)
+    }
+
+    /// Native selection to show: the visual range (character / line
+    /// visual) or a caret at the cursor. The cursor itself is drawn by
+    /// the editor's cursor overlay (block / bar / underline).
     public var selectionUTF16Range: NSRange {
         guard case let .visual(kind, anchor) = state.mode else {
-            let showsBlock = state.mode == .normal || state.mode.commandLinePrefix != nil
-            if showsBlock,
-               buffer.cursor < buffer.text.count,
-               !buffer.text.isEmpty
-            {
-                let cursorChar = buffer.text[buffer.cursorIndex]
-                if cursorChar != "\n" {
-                    let from = cursorUTF16Offset
-                    let to = utf16Offset(of: buffer.cursor + 1)
-                    return NSRange(location: from, length: to - from)
-                }
-            }
             return NSRange(location: cursorUTF16Offset, length: 0)
         }
         let cursor = buffer.cursor
@@ -359,61 +545,73 @@ public final class VimController {
             let from = min(anchor, cursor)
             let to = min(buffer.text.count, max(anchor, cursor) + 1)
             let utf16From = utf16Offset(of: from)
-            let utf16To = utf16Offset(of: to)
-            return NSRange(location: utf16From, length: utf16To - utf16From)
+            return NSRange(location: utf16From, length: utf16Offset(of: to) - utf16From)
         case .linewise:
             let anchorLine = lineForOffset(anchor)
             let cursorLine = lineForOffset(cursor)
-            let firstLine = min(anchorLine, cursorLine)
-            let lastLine = max(anchorLine, cursorLine)
-            let from = buffer.lineStart(of: firstLine)
-            var to = buffer.lineEnd(of: lastLine)
+            let from = buffer.lineStart(of: min(anchorLine, cursorLine))
+            var to = buffer.lineEnd(of: max(anchorLine, cursorLine))
             if to < buffer.text.count { to += 1 }
             let utf16From = utf16Offset(of: from)
-            let utf16To = utf16Offset(of: to)
-            return NSRange(location: utf16From, length: utf16To - utf16From)
+            return NSRange(location: utf16From, length: utf16Offset(of: to) - utf16From)
+        case .block:
+            return NSRange(location: cursorUTF16Offset, length: 0)
         }
+    }
+
+    /// Visual-block selection, one UTF-16 range per line.
+    public var blockSelectionRanges: [NSRange] {
+        guard case let .visual(.block, anchor) = state.mode else { return [] }
+        let text = buffer.text
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        var starts: [Int] = []
+        var off = 0
+        for l in lines { starts.append(off); off += l.count + 1 }
+        func lineCol(_ o: Int) -> (Int, Int) {
+            var l = 0
+            while l + 1 < starts.count, starts[l + 1] <= o { l += 1 }
+            return (l, o - starts[l])
+        }
+        let (la, ca) = lineCol(anchor), (lh, ch) = lineCol(buffer.cursor)
+        let left = min(ca, ch), right = max(ca, ch)
+        var out: [NSRange] = []
+        for l in min(la, lh)...max(la, lh) {
+            let len = lines[l].count
+            let s = starts[l] + min(left, len)
+            let e = state.blockToLineEnd ? starts[l] + len : starts[l] + min(right + 1, len)
+            guard e > s else { continue }
+            let s16 = utf16Offset(of: s), e16 = utf16Offset(of: e)
+            out.append(NSRange(location: s16, length: e16 - s16))
+        }
+        return out
     }
 
     private func utf16Offset(of charOffset: Int) -> Int {
         Self.utf16Offset(char: charOffset, in: buffer.text)
     }
 
-    /// Character offset → UTF-16 offset.
     static func utf16Offset(char: Int, in text: String) -> Int {
         let safe = max(0, min(char, text.count))
         return text.index(text.startIndex, offsetBy: safe).utf16Offset(in: text)
     }
 
-    /// UTF-16 offset → character offset, rounding down to a grapheme
-    /// boundary (never lands inside a surrogate pair or cluster).
     static func charOffset(utf16 offset: Int, in text: String) -> Int {
-        let u = text.utf16
-        var idx = u.index(u.startIndex, offsetBy: max(0, min(offset, u.count)))
-        while idx > text.startIndex, idx.samePosition(in: text) == nil {
-            idx = u.index(before: idx)
-        }
-        return text.distance(from: text.startIndex, to: idx)
+        characterOffset(utf16: offset, in: text)
     }
 
     /// hlsearch: every occurrence of the active search pattern (UTF-16).
     public var searchHighlights: [NSRange] {
         guard let pattern = activeSearchPattern, !pattern.isEmpty else { return [] }
-        return allMatches(in: buffer.text, pattern: pattern).map { range in
-            let from = utf16Offset(of: range.lowerBound)
-            let to = utf16Offset(of: range.upperBound)
-            return NSRange(location: from, length: to - from)
-        }
+        let opts = SearchCaseOptions(ignorecase: state.options.ignorecase, smartcase: state.options.smartcase)
+        return allMatchesUTF16(in: buffer.text, pattern: pattern, case: opts)
     }
 
     private var activeSearchPattern: String? {
-        if case let .commandLine(prefix, currentBuffer) = state.mode,
-           (prefix == "/" || prefix == "?"),
-           !currentBuffer.isEmpty
-        {
-            return currentBuffer
+        if case let .commandLine(prefix, current) = state.mode, prefix == "/" || prefix == "?", !current.isEmpty {
+            return state.options.incsearch ? current : nil
         }
-        guard !state.hlsearchSuspended else { return nil }
+        if let c = state.substituteConfirm { return c.pattern }
+        guard state.options.hlsearch, !state.hlsearchSuspended else { return nil }
         return state.lastSearch?.pattern
     }
 
@@ -423,6 +621,14 @@ public final class VimController {
         return b.cursorLine
     }
 
-    /// Human-readable mode label for status lines (`NORMAL`, `INSERT`, …).
     public var modeLabel: String { state.mode.label }
+}
+
+/// Escape sequences in effect (legend).
+enum VimEngineEscapes {
+    static func sequences(_ s: VimState) -> [String] {
+        var seqs = s.escapeSequences.filter { $0.count >= 2 }
+        if s.jjEscapeEnabled, !seqs.contains("jj") { seqs.append("jj") }
+        return seqs
+    }
 }
