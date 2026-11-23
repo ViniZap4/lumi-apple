@@ -655,6 +655,13 @@ public enum VimEngine {
         case .yank:
             storeRegister(text, kind: kind, register: register, isDelete: false, &st)
             markSpan()
+            let spans: [Range<Int>]
+            switch region {
+            case let .chars(f, t): spans = [f..<max(f, t)]
+            case let .lines(a, z): spans = [doc.lineStart(a)..<max(doc.lineStart(a), doc.lineEnd(z))]
+            case let .block(r): spans = (r.firstLine...r.lastLine).map { l in let (s, e) = blockSpan(r, line: l, doc: doc); return s..<e }
+            }
+            st.lastYank = VimYank(seq: (st.lastYank?.seq ?? 0) + 1, spans: spans.filter { !$0.isEmpty })
             switch region {
             case let .chars(f, _): b.cursor = f
             case let .lines(a, z):

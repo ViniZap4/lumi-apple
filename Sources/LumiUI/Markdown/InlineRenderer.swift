@@ -98,6 +98,23 @@ public enum InlineRenderer {
 
         case .softBreak:
             return AttributedString(" ")
+
+        case let .mark(children):
+            var attr = render(children, theme: theme)
+            attr.backgroundColor = theme.warning.opacity(0.32)
+            return attr
+
+        case let .kbd(s):
+            var attr = AttributedString(s)
+            attr.inlinePresentationIntent = .code
+            attr.backgroundColor = theme.overlayBackground
+            return attr
+
+        case let .footnoteRef(_, number):
+            var attr = AttributedString("\(number)")
+            attr.baselineOffset = 6
+            attr.foregroundColor = theme.primary
+            return attr
         }
     }
 
@@ -112,11 +129,12 @@ public enum InlineRenderer {
             case .math: return true
             case let .strong(children),
                  let .emphasis(children),
-                 let .strikethrough(children):
+                 let .strikethrough(children),
+                 let .mark(children):
                 if containsMath(children) { return true }
             case let .link(_, children):
                 if containsMath(children) { return true }
-            case .text, .code, .image, .lineBreak, .softBreak:
+            case .text, .code, .image, .lineBreak, .softBreak, .kbd, .footnoteRef:
                 continue
             }
         }
@@ -134,9 +152,11 @@ public enum InlineRenderer {
             case .link: return true
             case let .strong(children),
                  let .emphasis(children),
-                 let .strikethrough(children):
+                 let .strikethrough(children),
+                 let .mark(children):
                 if containsLink(children) { return true }
-            case .text, .code, .image, .math, .lineBreak, .softBreak:
+            case .footnoteRef: return true
+            case .text, .code, .image, .math, .lineBreak, .softBreak, .kbd:
                 continue
             }
         }

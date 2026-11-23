@@ -342,6 +342,16 @@ private func renderInlineHTML(_ node: InlineNode, into out: inout String) {
         out.append("<br>")
     case .softBreak:
         out.append(" ")
+    case let .mark(children):
+        out.append("<mark>")
+        for c in children { renderInlineHTML(c, into: &out) }
+        out.append("</mark>")
+    case let .kbd(s):
+        out.append("<kbd>")
+        out.append(escapeHTML(s))
+        out.append("</kbd>")
+    case let .footnoteRef(_, number):
+        out.append("<sup>\(number)</sup>")
     }
 }
 

@@ -41,6 +41,7 @@ struct MarkdownAttachmentContent: View {
             .environment(\.markdownVaultRoot, environment.vaultRoot)
             .environment(\.markdownEmbedDepth, environment.embedDepth)
             .environment(\.markdownLinkAction, environment.linkAction)
+            .environment(\.markdownAttachmentWidth, width)
             .environment(\.openURL, OpenURLAction { [linkAction = environment.linkAction] url in
                 linkAction.handle(url) ? .handled : .systemAction
             })
@@ -59,6 +60,10 @@ struct MarkdownAttachmentContent: View {
             MermaidView(code: code)
         case let .media(reference):
             MediaView(reference: reference)
+        case let .code(language, code):
+            MarkdownCodeBlockView(language: language, code: code)
+        case let .table(table):
+            MarkdownTableView(table: table)
         }
     }
 }

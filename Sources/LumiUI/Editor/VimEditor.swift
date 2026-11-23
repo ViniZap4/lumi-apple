@@ -89,6 +89,10 @@ public struct VimEditor: View {
     }
 
     @Environment(\.theme) private var theme
+    @Environment(\.splitScrollSync) private var splitSync
+    /// Hands the controller to the host (task toggles from a preview,
+    /// `:preview split`), on appear.
+    @Environment(\.vimControllerSink) private var controllerSink
 
     public var body: some View {
         let opts = controller.state.options
@@ -102,7 +106,7 @@ public struct VimEditor: View {
                 relativeLineNumbers: opts.relativenumber ?? relativeLineNumbers,
                 fontSize: options.fontSize,
                 lineWrapping: opts.wrap ?? options.lineWrapping,
-                blockRanges: controller.blockSelectionRanges,
+                blockRanges: controller.visualHighlightRanges,
                 blockCursor: blockCursor
             )
             if case let .commandLine(prefix, buffer) = controller.state.mode {
@@ -132,6 +136,8 @@ public struct VimEditor: View {
         }
         .onAppear {
             controller.bindDocument()
+            splitSync?.attach(editor: controller)
+            controllerSink?(controller)
             controller.onEffect = onEffect
             if let text {
                 controller.onTextChange = { text.wrappedValue = $0 }
@@ -224,4 +230,9 @@ public extension VimMode {
             return "\(prefix)\(buffer)"
         }
     }
+}
+
+public extension EnvironmentValues {
+    /// Receives the editor's `VimController` when it appears.
+    @Entry var vimControllerSink: (@MainActor (VimController) -> Void)? = nil
 }

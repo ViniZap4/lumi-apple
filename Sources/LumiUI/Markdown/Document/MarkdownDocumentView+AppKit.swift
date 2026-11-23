@@ -21,6 +21,26 @@ final class MarkdownDocumentNSTextView: NSTextView {
     }
     var onLayout: (() -> Void)?
     var onHoverLink: ((MarkdownLinkHit?) -> Void)?
+    /// The user touched the pane (wheel, click): split-preview leader.
+    var onInteraction: (() -> Void)?
+    /// Click on a link run (tasks, callouts, anchors) resolved here so
+    /// attachment characters (checkboxes) work like text links.
+    var onInternalLink: ((URL, Int) -> Bool)?
+
+    override func scrollWheel(with event: NSEvent) {
+        onInteraction?()
+        super.scrollWheel(with: event)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onInteraction?()
+        let point = convert(event.locationInWindow, from: nil)
+        if event.clickCount == 1, let hit = linkHit(at: point), let url = hit.value as? URL,
+           url.scheme?.hasPrefix("lumi-") == true, onInternalLink?(url, hit.range.location) == true {
+            return
+        }
+        super.mouseDown(with: event)
+    }
     private var hoverArea: NSTrackingArea?
     private var lastHoverRange: NSRange?
 
@@ -148,6 +168,11 @@ final class MarkdownDocumentController: NSObject, NSTextViewDelegate {
     private var tooltip: NSHostingView<AnyView>?
     private var pendingTooltip: DispatchWorkItem?
     private var hostedEnvKey: HostedEnvKey?
+    let interaction = MarkdownDocumentInteraction()
+    private(set) weak var sync: SplitScrollSync?
+    private var lastHeader: MarkdownHeader?
+    private var renderedDocument: MarkdownDocument?
+    private var syncScheduled = false
 
     private struct HostedEnvKey: Equatable {
         let style: MarkdownRenderStyle
@@ -207,6 +232,13 @@ final class MarkdownDocumentController: NSObject, NSTextViewDelegate {
             guard let self else { return }
             self.textView.textLayoutManager?.textViewportLayoutController.layoutViewport()
             self.overlays.layout()
+            // Attachment heights moved the blocks below them.
+            self.scheduleSyncLayout()
+        }
+        tv.onInteraction = { [weak self] in self?.sync?.claim(.preview) }
+        tv.onInternalLink = { [weak self] url, index in
+            guard let self else { return false }
+            return self.handleInternal(url, at: index)
         }
         // Deferred: this fires inside NSTextView.layout(), and the overlay
         // pass forces TextKit layout for the visible rect.
@@ -223,6 +255,78 @@ final class MarkdownDocumentController: NSObject, NSTextViewDelegate {
     @objc private func clipBoundsChanged(_ note: Notification) {
         hideTooltip()
         overlays.layout()
+        sync?.scrolled(.preview)
+    }
+
+    /// Tasks, callouts, footnotes and `#anchors`. True when handled.
+    private func handleInternal(_ url: URL, at index: Int) -> Bool {
+        switch interaction.handle(url, at: index, renderer: renderer) {
+        case .external:
+            return false
+        case .handled:
+            return true
+        case .rerender:
+            if let doc = interaction.document, let style {
+                rerender(document: doc, style: style)
+            }
+            return true
+        case let .scroll(anchor):
+            scrollToAnchor(anchor)
+            return true
+        }
+    }
+
+    private func rerender(document: MarkdownDocument, style: MarkdownRenderStyle) {
+        let transformed = interaction.transform(document)
+        guard let update = renderer.update(header: lastHeader, document: transformed, style: style),
+              let storage = textView.textStorage else { return }
+        apply(update, to: storage)
+    }
+
+    private func apply(_ update: MarkdownDocumentRenderer.Update, to storage: NSTextStorage) {
+        let apply = {
+            storage.replaceCharacters(in: update.range, with: update.replacement)
+        }
+        if let content = textView.textLayoutManager?.textContentManager {
+            content.performEditingTransaction(apply)
+        } else {
+            apply()
+        }
+        overlays.retain(only: Self.liveAttachments(in: storage))
+        textView.needsLayout = true
+        // NSTextView (TextKit 2) doesn't reliably run `layout()` after an
+        // edit, so schedule the overlay pass explicitly.
+        overlays.setNeedsLayout()
+        scheduleSyncLayout()
+    }
+
+    func scrollToAnchor(_ name: String) {
+        guard let storage = textView.textStorage, let tlm = textView.textLayoutManager,
+              let range = MarkdownDocumentInteraction.anchorRange(name, in: storage),
+              let frame = MarkdownDocumentInteraction.frame(of: range, layoutManager: tlm) else { return }
+        let clip = scrollView.contentView
+        let maxY = max(0, textView.frame.height - clip.bounds.height)
+        let y = min(maxY, max(0, frame.minY + textView.textContainerOrigin.y - 24))
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.18
+            clip.animator().setBoundsOrigin(NSPoint(x: 0, y: y))
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
+            }
+        }
+        textView.setSelectedRange(NSRange(location: range.location, length: 0))
+    }
+
+    private func scheduleSyncLayout() {
+        guard sync != nil, !syncScheduled else { return }
+        syncScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.syncScheduled = false
+            if let doc = self.renderedDocument { self.sync?.previewDidLayout(doc) }
+        }
     }
 
     // MARK: Update
@@ -234,10 +338,18 @@ final class MarkdownDocumentController: NSObject, NSTextViewDelegate {
         readingWidth: CGFloat,
         linkAction: MarkdownLinkAction,
         vaultRoot: URL?,
-        embedDepth: Int
+        embedDepth: Int,
+        onToggleTask: ((Int) -> Void)? = nil,
+        sync: SplitScrollSync? = nil
     ) {
         self.linkAction = linkAction
         self.vaultRoot = vaultRoot
+        interaction.onToggleTask = onToggleTask
+        if sync !== self.sync {
+            self.sync = sync
+            sync?.attach(preview: self)
+        }
+        lastHeader = header
         textView.readingWidth = readingWidth
         if style != newStyle {
             style = newStyle
@@ -255,31 +367,20 @@ final class MarkdownDocumentController: NSObject, NSTextViewDelegate {
                 embedDepth: embedDepth
             )
         }
-        guard let update = renderer.update(header: header, document: document, style: newStyle),
+        let transformed = interaction.transform(document)
+        renderedDocument = transformed
+        guard let update = renderer.update(header: header, document: transformed, style: newStyle),
               let storage = textView.textStorage
         else { return }
         hideTooltip()
         textView.clearHover()
-        let apply = {
-            storage.replaceCharacters(in: update.range, with: update.replacement)
-        }
-        if let content = textView.textLayoutManager?.textContentManager {
-            content.performEditingTransaction(apply)
-        } else {
-            apply()
-        }
-        overlays.retain(only: Self.liveAttachments(in: storage))
-        textView.needsLayout = true
-        // NSTextView (TextKit 2) doesn't reliably run `layout()` after an
-        // edit, so schedule the overlay pass explicitly.
-        overlays.setNeedsLayout()
+        apply(update, to: storage)
     }
 
     private func applyChrome(_ style: MarkdownRenderStyle) {
-        let palette = MarkdownPalette(style.theme)
+        // Link colour / underline come from the runs (prose tokens:
+        // primary text, 38% underline, dotted for vault links).
         textView.linkTextAttributes = [
-            .foregroundColor: palette.primary,
-            .underlineStyle: NSUnderlineStyle.single.rawValue,
             .cursor: NSCursor.pointingHand,
         ]
         // Same selection accent as the editor and the explorer row.
@@ -314,6 +415,8 @@ final class MarkdownDocumentController: NSObject, NSTextViewDelegate {
         default: url = nil
         }
         guard let url else { return false }
+        if handleInternal(url, at: charIndex) { return true }
+        if url.scheme?.hasPrefix("lumi-") == true { return true }
         // false → NSTextView hands the URL to NSWorkspace (https, mailto…).
         return linkAction.handle(url)
     }
@@ -376,12 +479,33 @@ final class MarkdownDocumentController: NSObject, NSTextViewDelegate {
     }
 }
 
+extension MarkdownDocumentController: SplitPreviewSurface {
+    func blockTops(blockCount: Int) -> [CGFloat]? {
+        guard let tlm = textView.textLayoutManager else { return nil }
+        let originY = textView.textContainerOrigin.y
+        return MarkdownDocumentInteraction.blockTops(layoutManager: tlm, renderer: renderer, blockCount: blockCount)?
+            .map { $0 + originY }
+    }
+
+    var previewContentHeight: CGFloat { textView.frame.height }
+    var previewViewportHeight: CGFloat { scrollView.contentView.bounds.height }
+    var previewScrollOffset: CGFloat { scrollView.contentView.bounds.minY }
+
+    func setPreviewScrollOffset(_ y: CGFloat) {
+        let clip = scrollView.contentView
+        clip.setBoundsOrigin(NSPoint(x: clip.bounds.minX, y: y))
+        scrollView.reflectScrolledClipView(clip)
+    }
+}
+
 /// SwiftUI entry point for the macOS document surface.
 struct MarkdownDocumentView: NSViewRepresentable {
     let header: MarkdownHeader?
     let document: MarkdownDocument
     let style: MarkdownRenderStyle
     let readingWidth: CGFloat
+    var onToggleTask: ((Int) -> Void)?
+    @Environment(\.splitScrollSync) private var sync
     @Environment(\.markdownLinkAction) private var linkAction
     @Environment(\.markdownVaultRoot) private var vaultRoot
     @Environment(\.markdownScrollViewSink) private var scrollSink
@@ -407,7 +531,8 @@ struct MarkdownDocumentView: NSViewRepresentable {
     private func push(to controller: MarkdownDocumentController) {
         controller.update(
             header: header, document: document, style: style, readingWidth: readingWidth,
-            linkAction: linkAction, vaultRoot: vaultRoot, embedDepth: embedDepth
+            linkAction: linkAction, vaultRoot: vaultRoot, embedDepth: embedDepth,
+            onToggleTask: onToggleTask, sync: sync
         )
         controller.attachSink(scrollSink)
     }

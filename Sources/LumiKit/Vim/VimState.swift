@@ -45,6 +45,10 @@ public struct VimState: Sendable, Hashable {
     /// Monotonic time of the input being handled (nil = no timing).
     public var inputTime: TimeInterval?
 
+    /// The last yank, for the host's yank highlight (purely visual —
+    /// nothing here touches the text). `seq` increments per yank.
+    public var lastYank: VimYank?
+
     /// The unnamed register (`""`): the most recent yank/delete.
     public var defaultRegister: Register
     /// `"0`–`"9`, `"a`–`"z`, `"-`. Upper-case names append to lower-case.
@@ -448,4 +452,15 @@ public struct VimPendingInfo: Sendable, Hashable {
     }
 
     public var isEmpty: Bool { display.isEmpty }
+}
+
+/// One yank, as character-offset spans (one per line for a block yank).
+public struct VimYank: Sendable, Hashable {
+    public var seq: Int
+    public var spans: [Range<Int>]
+
+    public init(seq: Int, spans: [Range<Int>]) {
+        self.seq = seq
+        self.spans = spans
+    }
 }

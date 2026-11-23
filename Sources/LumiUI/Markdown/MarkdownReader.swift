@@ -58,7 +58,15 @@ public struct MarkdownReader: View {
     /// 0.45 s. Pass `nil` to disable.
     public let yankFlashTrigger: Date?
 
+    /// Toggle task checkbox `index` (document order). nil → read-only
+    /// checkboxes.
+    public let onToggleTask: ((Int) -> Void)?
+    /// Title + tags above the body (off in the split preview, which
+    /// mirrors the source only).
+    public let showsHeader: Bool
+
     @Environment(\.theme) private var theme
+    @State private var zoom = MarkdownZoom.shared
     @State private var parsed: MarkdownDocument?
     @State private var parsedFor: String = ""
     @State private var yankFlashOpacity: Double = 0
@@ -76,8 +84,12 @@ public struct MarkdownReader: View {
         contentAnimations: Bool = false,
         readingWidth: CGFloat = 720,
         onInAppLink: ((URL) -> Bool)? = nil,
-        yankFlashTrigger: Date? = nil
+        yankFlashTrigger: Date? = nil,
+        onToggleTask: ((Int) -> Void)? = nil,
+        showsHeader: Bool = true
     ) {
+        self.onToggleTask = onToggleTask
+        self.showsHeader = showsHeader
         self.title = title
         self.tags = tags
         self.text = text
@@ -94,7 +106,16 @@ public struct MarkdownReader: View {
     }
 
     private var style: MarkdownRenderStyle {
-        MarkdownRenderStyle(theme: theme, scale: scale, fontFamily: fontFamily)
+        MarkdownRenderStyle(theme: theme, scale: scale, fontFamily: fontFamily, tasksInteractive: onToggleTask != nil)
+    }
+
+    /// The header, minus the title when the body already opens with the
+    /// same `# Title` (web `startsWithTitle`).
+    private var header: MarkdownHeader? {
+        guard showsHeader else { return nil }
+        let shownTitle = MarkdownText.startsWithTitle(text, title: title) ? "" : title
+        if shownTitle.isEmpty && tags.isEmpty { return nil }
+        return MarkdownHeader(title: shownTitle, tags: tags)
     }
 
     public var body: some View {
@@ -103,10 +124,11 @@ public struct MarkdownReader: View {
         // first parse lands the header renders alone, so opening a note
         // never flashes an empty pane.
         MarkdownDocumentView(
-            header: MarkdownHeader(title: title, tags: tags),
+            header: header,
             document: parsed ?? Self.emptyDocument,
             style: style,
-            readingWidth: readingWidth
+            readingWidth: readingWidth,
+            onToggleTask: onToggleTask
         )
         .environment(\.markdownVaultRoot, vaultRoot)
         .environment(\.markdownLinkAction, MarkdownLinkAction { url in
@@ -118,12 +140,19 @@ public struct MarkdownReader: View {
         .overlay {
             if yankFlashTrigger != nil {
                 Rectangle()
-                    .fill(theme.warning)
+                    .fill(theme.accent)
                     .opacity(yankFlashOpacity)
                     .allowsHitTesting(false)
-                    .animation(.easeOut(duration: 0.45), value: yankFlashOpacity)
+                    .animation(.easeOut(duration: 0.3), value: yankFlashOpacity)
             }
         }
+        .overlay {
+            if let item = zoom.item, showsHeader {
+                MarkdownZoomOverlay(item: item)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.16), value: zoom.item)
         .onAppear { reparseIfNeeded() }
         .onChange(of: text) { _, _ in reparseIfNeeded() }
         .onChange(of: yankFlashTrigger) { _, _ in
@@ -132,7 +161,7 @@ public struct MarkdownReader: View {
             // The modifier's animation curve handles the actual fade —
             // without the tick, SwiftUI coalesces the up + down into a
             // single transition with no visible flash.
-            yankFlashOpacity = 0.28
+            yankFlashOpacity = 0.16
             Task { @MainActor in
                 yankFlashOpacity = 0
             }

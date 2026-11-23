@@ -89,6 +89,10 @@ extension VimEngine {
             fx = .saveAndClose(force: bang)
         case "q", "quit", "qa", "qall", "quita", "quitall", "clo", "close":
             fx = .close(force: bang)
+        case "preview", "prev":
+            fx = .host(args.isEmpty ? "preview" : "preview " + args)
+        case "settings":
+            fx = .host("settings")
 
         case "s", "su", "sub", "substitute":
             substitute(range: range, args: argsRaw, &st, &b)

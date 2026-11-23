@@ -110,9 +110,18 @@ struct MarkdownDocumentRendererTests {
             #expect(storage.attribute(.link, at: linkIndex, effectiveRange: nil) as? URL == URL(string: "https://x.y"))
             #expect(storage.attribute(.foregroundColor, at: linkIndex, effectiveRange: nil) as? NSColor == palette.primary)
 
-            let codeIndex = (storage.string as NSString).range(of: "code").location
-            let decos = try #require(storage.attribute(.lumiDecorations, at: codeIndex, effectiveRange: nil) as? [MarkdownDecoration])
-            #expect(decos.first?.fill == palette.overlayBackground)
+            // Fenced code is a hosted block (header, copy, wrap toggle).
+            var code: MarkdownBlockAttachment?
+            storage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: storage.length)) { value, _, _ in
+                if let a = value as? MarkdownBlockAttachment { code = a }
+            }
+            guard case let .code(language, body)? = code?.payload else {
+                Issue.record("expected a code attachment for \(theme.rawValue)")
+                continue
+            }
+            #expect(language == nil)
+            #expect(body.hasPrefix("code"))
+            #expect(palette.codeBackground != palette.background)
         }
         let light = MarkdownPalette(LumiTheme.defaultLight.tokens).text
         let dark = MarkdownPalette(LumiTheme.defaultDark.tokens).text
@@ -122,23 +131,25 @@ struct MarkdownDocumentRendererTests {
     @Test("structure: code is one paragraph, attachments carry source, copy text is markdown-ish")
     func structureAndCopy() throws {
         let storage = render(source, style: style(), cache: MarkdownFragmentCache(capacity: 100))
-        let ns = storage.string as NSString
-        let codeRange = ns.range(of: "let a = 1\u{2028}let b = 2")
-        #expect(codeRange.location != NSNotFound)
-
         var attachments: [MarkdownBlockAttachment] = []
         storage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: storage.length)) { value, _, _ in
             if let a = value as? MarkdownBlockAttachment { attachments.append(a) }
         }
-        #expect(attachments.count == 1)
-        guard case let .mathBlock(latex)? = attachments.first?.payload else {
+        #expect(attachments.count == 2)
+        guard case let .code(language, code)? = attachments.first?.payload else {
+            Issue.record("expected a code block attachment")
+            return
+        }
+        #expect(language == "swift")
+        #expect(code.contains("let a = 1\nlet b = 2"))
+        guard case let .mathBlock(latex)? = attachments.last?.payload else {
             Issue.record("expected a math block attachment")
             return
         }
         #expect(latex.trimmingCharacters(in: .whitespaces) == "x^2")
 
         let copied = storage.lumiCopyText(in: NSRange(location: 0, length: storage.length))
-        #expect(copied.contains("let a = 1\nlet b = 2"))
+        #expect(copied.contains("```swift\nlet a = 1\nlet b = 2\n```"))
         #expect(copied.contains("$$\(latex)$$"))
         #expect(copied.contains("[ ] "))
         #expect(copied.contains("[x] "))
@@ -174,7 +185,7 @@ struct MarkdownTextKitLayoutTests {
 
     @Test("view runs TextKit 2 with decorated fragments for block chrome")
     func usesTextKit2() throws {
-        let controller = makeView("```\ncode\n```\n\nplain")
+        let controller = makeView("> quoted\n\nplain")
         let tv = controller.textView
         let tlm = try #require(tv.textLayoutManager)
         tlm.ensureLayout(for: tlm.documentRange)
@@ -183,7 +194,7 @@ struct MarkdownTextKitLayoutTests {
             if fragment is MarkdownLayoutFragment { decorated += 1 }
             return true
         }
-        // Header rule + code block.
+        // Header rule + quote bar.
         #expect(decorated >= 2)
     }
 

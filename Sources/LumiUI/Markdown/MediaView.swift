@@ -17,11 +17,37 @@ public struct MediaView: View {
         case .markdown:
             EmbeddedMarkdownView(url: reference.url, alt: reference.alt)
                 .frame(maxWidth: .infinity)
-        case .image, .video, .pdf, .youtube, .vimeo, .unknown:
+        case .image:
+            // Figure (`.md-figure`): rounded image with a hairline ring,
+            // optional caption from the title; click zooms.
+            VStack(spacing: 9) {
+                ImageMediaView(url: reference.url, alt: reference.alt)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(theme.text.opacity(0.13), lineWidth: 1)
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture { MarkdownZoom.shared.present(reference.url, caption: reference.title) }
+                    #if os(macOS)
+                    .onHover { inside in if inside { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() } }
+                    #endif
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityHint("Zoom image")
+                if let caption = reference.title {
+                    Text(caption)
+                        .font(.system(size: 14))
+                        .lineSpacing(2)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(theme.text.opacity(0.82))
+                }
+            }
+            .frame(maxWidth: .infinity)
+        case .video, .pdf, .youtube, .vimeo, .unknown:
             Group {
                 switch reference.kind {
                 case .image:
-                    ImageMediaView(url: reference.url, alt: reference.alt)
+                    EmptyView() // handled in outer switch
                 case .video:
                     VideoMediaView(url: reference.url)
                 case .pdf:

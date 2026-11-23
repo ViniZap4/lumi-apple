@@ -138,12 +138,19 @@ struct VimTextViewBridge: NSViewRepresentable {
             replace: NSColor(theme.warning), inverted: NSColor(theme.background)
         )
         textView.blockCursorPreference = blockCursor
-        // One selection accent app-wide (explorer row, reader, editor).
-        textView.selectedTextAttributes = [.backgroundColor: NSColor(theme.selection)]
+        textView.yankColor = NSColor(theme.accent)
+        // Vim visual selection is drawn as a rendering attribute (like
+        // the block selection) so it shows whatever the focus state —
+        // AppKit greys out an unfocused native selection, which on some
+        // themes all but disappears. The native selection stays (⌘C)
+        // with a clear tint; outside visual mode (mouse drags, plain
+        // editing) it is the normal accent.
+        let visual = controller.vimEnabled && mode.isVisual
+        textView.selectedTextAttributes = [.backgroundColor: visual ? NSColor.clear : NSColor(theme.editorSelection)]
         textView.isEditable = controller.isEditable
         textView.applyRenderingHighlights(
             search: highlights, searchColor: NSColor(theme.warning).withAlphaComponent(0.35),
-            block: blockRanges, blockColor: NSColor(theme.selection)
+            block: blockRanges, blockColor: NSColor(theme.editorSelection)
         )
         textView.updateCursor()
 
@@ -245,6 +252,7 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
         guard let storage = textStorage, let styler else { return }
         applyingEngineChange = true
         lastHighlightedRange = EditorStorage.apply(edits, to: storage, styler: styler)
+        invalidateLineStarts()
         applyingEngineChange = false
         if !appliedHighlights.isEmpty || !appliedBlock.isEmpty { reapplyRenderingHighlights() }
     }
@@ -288,7 +296,18 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
 
     // MARK: Key routing
 
+    override func mouseDown(with event: NSEvent) {
+        controller?.onUserInteraction?()
+        super.mouseDown(with: event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        controller?.onUserInteraction?()
+        super.scrollWheel(with: event)
+    }
+
     override func keyDown(with event: NSEvent) {
+        controller?.onUserInteraction?()
         guard let controller, controller.vimEnabled else { super.keyDown(with: event); return }
         if event.modifierFlags.contains(.command) || hasMarkedText() {
             // Shortcuts bubble up; an IME composition owns every key
@@ -378,6 +397,7 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
 
     override func didChangeText() {
         super.didChangeText()
+        invalidateLineStarts()
         guard let edit = pendingExternalEdit else { return }
         pendingExternalEdit = nil
         controller?.applyExternalEdit(edit)
@@ -585,6 +605,17 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
         return ok
     }
 
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        NotificationCenter.default.removeObserver(self, name: NSView.boundsDidChangeNotification, object: nil)
+        if let clip = enclosingScrollView?.contentView {
+            clip.postsBoundsChangedNotifications = true
+            NotificationCenter.default.addObserver(self, selector: #selector(clipScrolled), name: NSView.boundsDidChangeNotification, object: clip)
+        }
+    }
+
+    @objc private func clipScrolled() { controller?.onViewportScroll?() }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         NotificationCenter.default.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: nil)
@@ -660,6 +691,151 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
         sv.contentView.scroll(to: NSPoint(x: visible.minX, y: y))
         sv.reflectScrolledClipView(sv.contentView)
     }
+
+    // MARK: Split preview scroll sync
+
+    private var lineStartsCache: [Int]?
+
+    /// UTF-16 offset where each source line starts (cached per text).
+    private var lineStarts: [Int] {
+        if let lineStartsCache { return lineStartsCache }
+        var starts = [0]
+        let ns = string as NSString
+        let n = ns.length
+        var i = 0
+        var buf = [unichar](repeating: 0, count: 4096)
+        while i < n {
+            let len = min(4096, n - i)
+            ns.getCharacters(&buf, range: NSRange(location: i, length: len))
+            for k in 0..<len where buf[k] == 10 { starts.append(i + k + 1) }
+            i += len
+        }
+        lineStartsCache = starts
+        return starts
+    }
+
+    func invalidateLineStarts() { lineStartsCache = nil }
+
+    func viewportTopLine() -> Double? {
+        guard let sv = enclosingScrollView, let tlm = textLayoutManager, let tcm = tlm.textContentManager else { return nil }
+        let clip = sv.contentView.bounds
+        if clip.minY <= 1 { return -1 }
+        if clip.maxY >= frame.height - 2 { return .infinity }
+        let y = clip.minY - textContainerOrigin.y
+        guard let frag = tlm.textLayoutFragment(for: CGPoint(x: 0, y: max(0, y))) else { return nil }
+        let offset = tcm.offset(from: tcm.documentRange.location, to: frag.rangeInElement.location)
+        let starts = lineStarts
+        var lo = 0, hi = starts.count - 1
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2
+            if starts[mid] <= offset { lo = mid } else { hi = mid - 1 }
+        }
+        let f = frag.layoutFragmentFrame
+        let frac = f.height > 0 ? min(1, max(0, (y - f.minY) / f.height)) : 0
+        return Double(lo) + Double(frac)
+    }
+
+    func scrollViewport(toLine line: Double) {
+        guard let sv = enclosingScrollView, let tlm = textLayoutManager, let tcm = tlm.textContentManager else { return }
+        let visible = sv.contentView.bounds
+        let maxY = max(0, frame.height - visible.height)
+        var y: CGFloat
+        if line <= 0 {
+            y = 0
+        } else if !line.isFinite {
+            y = maxY
+        } else {
+            let starts = lineStarts
+            let n = min(starts.count - 1, max(0, Int(line.rounded(.down))))
+            let frac = CGFloat(line - Double(n))
+            guard let loc = tcm.location(tcm.documentRange.location, offsetBy: starts[n]) else { return }
+            if let upTo = NSTextRange(location: tcm.documentRange.location, end: loc) { tlm.ensureLayout(for: upTo) }
+            guard let frag = tlm.textLayoutFragment(for: loc) else { return }
+            let f = frag.layoutFragmentFrame
+            y = f.minY + frac * f.height + textContainerOrigin.y
+        }
+        y = max(0, min(y, maxY))
+        guard abs(visible.minY - y) > 1 else { return }
+        sv.contentView.scroll(to: NSPoint(x: visible.minX, y: y))
+        sv.reflectScrolledClipView(sv.contentView)
+    }
+
+    // MARK: Yank highlight
+
+    var yankColor: NSColor = .systemTeal
+    private var yankFlashView: YankFlashView?
+
+    func flashYank(_ ranges: [NSRange]) {
+        guard let tlm = textLayoutManager, let tcm = tlm.textContentManager else { return }
+        let length = (string as NSString).length
+        var rects: [CGRect] = []
+        let origin = textContainerOrigin
+        for r in ranges where r.length > 0 && NSMaxRange(r) <= length {
+            guard let start = tcm.location(tcm.documentRange.location, offsetBy: r.location),
+                  let end = tcm.location(start, offsetBy: r.length),
+                  let range = NSTextRange(location: start, end: end) else { continue }
+            tlm.ensureLayout(for: range)
+            tlm.enumerateTextSegments(in: range, type: .standard, options: []) { _, frame, _, _ in
+                if frame.width > 0.5 { rects.append(frame.offsetBy(dx: origin.x, dy: origin.y)) }
+                return true
+            }
+        }
+        guard !rects.isEmpty else { return }
+        yankFlashView?.removeFromSuperview()
+        let view = YankFlashView(frame: bounds, rects: rects, color: yankColor)
+        addSubview(view, positioned: .below, relativeTo: cursorView)
+        yankFlashView = view
+        view.run(reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion) { [weak self, weak view] in
+            view?.removeFromSuperview()
+            if self?.yankFlashView === view { self?.yankFlashView = nil }
+        }
+    }
+}
+
+/// Neovim-style yank highlight: the yanked text flashes in the accent
+/// tint and fades (220 ms). With Reduce Motion it is a short static
+/// tint (150 ms) instead. Non-interactive overlay; never edits text.
+final class YankFlashView: NSView {
+    static let duration: TimeInterval = 0.22
+    static let staticDuration: TimeInterval = 0.15
+    let rects: [CGRect]
+    let color: NSColor
+
+    init(frame: NSRect, rects: [CGRect], color: NSColor) {
+        self.rects = rects
+        self.color = color
+        super.init(frame: frame)
+        wantsLayer = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("not coded") }
+
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        color.withAlphaComponent(0.42).setFill()
+        for r in rects where r.intersects(dirtyRect) {
+            NSBezierPath(roundedRect: r.insetBy(dx: -1, dy: 0), xRadius: 2, yRadius: 2).fill()
+        }
+    }
+
+    func run(reduceMotion: Bool, completion: @escaping @MainActor () -> Void) {
+        if reduceMotion {
+            alphaValue = 0.8
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.staticDuration) { MainActor.assumeIsolated { completion() } }
+            return
+        }
+        alphaValue = 1
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = Self.duration
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            self.animator().alphaValue = 0
+        } completionHandler: {
+            MainActor.assumeIsolated { completion() }
+        }
+    }
 }
 
 #elseif canImport(UIKit)
@@ -695,6 +871,14 @@ struct VimTextViewBridge: UIViewRepresentable {
 
         func textViewDidChangeSelection(_ textView: UITextView) {
             view?.userChangedSelection()
+        }
+
+        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            view?.controller?.onViewportScroll?()
+        }
+
+        func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+            view?.controller?.onUserInteraction?()
         }
     }
 
@@ -737,9 +921,10 @@ struct VimTextViewBridge: UIViewRepresentable {
         view.blockCursorPreference = blockCursor
         view.applyAccessoryTheme(theme)
         view.isEditable = controller.isEditable
+        view.yankColor = UIColor(theme.accent)
         view.applyRenderingHighlights(
             search: highlights, searchColor: UIColor(theme.warning).withAlphaComponent(0.35),
-            block: blockRanges, blockColor: UIColor(theme.selection)
+            block: blockRanges, blockColor: UIColor(theme.editorSelection)
         )
         view.updateCursor()
 
@@ -1144,6 +1329,85 @@ final class VimUIKitTextView: UITextView, EditorTextSurface {
         let h = bounds.height
         let y = max(-adjustedContentInset.top, min(contentOffset.y + CGFloat(lines) * font.lineHeight, max(0, contentSize.height - h)))
         setContentOffset(CGPoint(x: contentOffset.x, y: y), animated: false)
+    }
+
+    // MARK: Split preview scroll sync
+
+    func viewportTopLine() -> Double? {
+        let maxY = max(0, contentSize.height - bounds.height)
+        if contentOffset.y <= 1 { return -1 }
+        if contentOffset.y >= maxY - 2 { return .infinity }
+        guard let pos = closestPosition(to: CGPoint(x: textContainerInset.left + 1, y: contentOffset.y + 1)) else { return nil }
+        let offset = self.offset(from: beginningOfDocument, to: pos)
+        let ns = text as NSString
+        var line = 0
+        var i = 0
+        while i < min(offset, ns.length) {
+            let r = ns.range(of: "\n", options: [], range: NSRange(location: i, length: min(offset, ns.length) - i))
+            if r.location == NSNotFound { break }
+            line += 1
+            i = r.location + 1
+        }
+        return Double(line)
+    }
+
+    func scrollViewport(toLine line: Double) {
+        let maxY = max(0, contentSize.height - bounds.height)
+        var y: CGFloat
+        if line <= 0 { y = 0 } else if !line.isFinite { y = maxY } else {
+            let ns = text as NSString
+            var start = 0
+            var n = Int(line.rounded(.down))
+            while n > 0 {
+                let r = ns.range(of: "\n", options: [], range: NSRange(location: start, length: ns.length - start))
+                if r.location == NSNotFound { break }
+                start = r.location + 1
+                n -= 1
+            }
+            guard let rect = cellRect(for: NSRange(location: start, length: 0)) else { return }
+            y = rect.minY + CGFloat(line - line.rounded(.down)) * rect.height - textContainerInset.top
+        }
+        y = max(0, min(y, maxY))
+        guard abs(contentOffset.y - y) > 1 else { return }
+        setContentOffset(CGPoint(x: contentOffset.x, y: y), animated: false)
+    }
+
+    // MARK: Yank highlight
+
+    var yankColor: UIColor = .systemTeal
+    private var yankFlashView: UIView?
+
+    func flashYank(_ ranges: [NSRange]) {
+        var rects: [CGRect] = []
+        let length = (text as NSString).length
+        for r in ranges where r.length > 0 && NSMaxRange(r) <= length {
+            guard let start = position(from: beginningOfDocument, offset: r.location),
+                  let end = position(from: start, offset: r.length),
+                  let range = textRange(from: start, to: end) else { continue }
+            for sel in selectionRects(for: range) where sel.rect.width > 0.5 { rects.append(sel.rect) }
+        }
+        guard !rects.isEmpty else { return }
+        yankFlashView?.removeFromSuperview()
+        let overlay = UIView(frame: CGRect(origin: .zero, size: contentSize))
+        overlay.isUserInteractionEnabled = false
+        for r in rects {
+            let v = UIView(frame: r.insetBy(dx: -1, dy: 0))
+            v.backgroundColor = yankColor.withAlphaComponent(0.42)
+            v.layer.cornerRadius = 2
+            overlay.addSubview(v)
+        }
+        addSubview(overlay)
+        yankFlashView = overlay
+        let done: (Bool) -> Void = { [weak self, weak overlay] _ in
+            overlay?.removeFromSuperview()
+            if self?.yankFlashView === overlay { self?.yankFlashView = nil }
+        }
+        if UIAccessibility.isReduceMotionEnabled {
+            overlay.alpha = 0.8
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { done(true) }
+        } else {
+            UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut], animations: { overlay.alpha = 0 }, completion: done)
+        }
     }
 }
 

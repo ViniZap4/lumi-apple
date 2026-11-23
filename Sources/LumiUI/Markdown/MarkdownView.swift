@@ -318,6 +318,21 @@ struct BlockView: View {
 
         case let .mathBlock(latex):
             KaTeXBlockView(latex: latex)
+
+        case let .callout(callout):
+            BlockQuoteView(blocks: [.paragraph(inline: callout.title.isEmpty ? [.text(callout.rawKind.capitalized)] : [.strong(callout.title)])] + callout.blocks)
+
+        case let .table(table):
+            MarkdownTableView(table: table)
+
+        case let .footnotes(items):
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(items, id: \.id) { item in
+                    Text("\(item.number). ") + Text(InlineRenderer.render(item.inline, theme: theme))
+                }
+            }
+            .font(.footnote)
+            .foregroundStyle(theme.textDim)
         }
     }
 

@@ -25,6 +25,8 @@ final class FakeSurface: EditorTextSurface {
     func showSelection(_ range: NSRange, scroll: Bool) { selection = range }
     func discardMarkedText() {}
     func setUserSelection(_ r: NSRange) { selection = r }
+    private(set) var flashes: [[NSRange]] = []
+    func flashYank(_ ranges: [NSRange]) { flashes.append(ranges) }
 }
 
 /// A collaborative document double: records local ops, lets the test

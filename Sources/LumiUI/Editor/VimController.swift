@@ -34,6 +34,14 @@ protocol EditorTextSurface: AnyObject {
     func scrollCursor(to position: VimScrollPosition, cursor: Int)
     /// Scroll by whole lines (negative = up).
     func scrollLines(_ lines: Int)
+    /// Briefly highlight these UTF-16 ranges (yank highlight). Purely
+    /// visual: never touches the storage.
+    func flashYank(_ ranges: [NSRange])
+    /// Source line (fractional, 0-based) at the top of the viewport;
+    /// `-1` at the very top, `.infinity` at the very bottom.
+    func viewportTopLine() -> Double?
+    /// Scroll so source line `line` (fractional) sits at the top.
+    func scrollViewport(toLine line: Double)
 }
 
 extension EditorTextSurface {
@@ -41,6 +49,9 @@ extension EditorTextSurface {
     func displayLineOffset(from: Int, count: Int) -> Int? { nil }
     func scrollCursor(to position: VimScrollPosition, cursor: Int) {}
     func scrollLines(_ lines: Int) {}
+    func flashYank(_ ranges: [NSRange]) {}
+    func viewportTopLine() -> Double? { nil }
+    func scrollViewport(toLine line: Double) {}
 }
 
 /// What the chrome shows about the editor: mode, pending keys (legend /
@@ -123,6 +134,11 @@ public final class VimController {
     /// Local-note sink: receives the full text after every change.
     @ObservationIgnored public var onTextChange: ((String) -> Void)?
     @ObservationIgnored weak var surface: EditorTextSurface?
+    /// The editor's viewport moved (user or programmatic scroll).
+    @ObservationIgnored public var onViewportScroll: (() -> Void)?
+    /// The user touched the editor (key, click, wheel): it leads the
+    /// split preview's scroll sync.
+    @ObservationIgnored public var onUserInteraction: (() -> Void)?
     @ObservationIgnored public private(set) weak var document: CollaborativeDocument?
     @ObservationIgnored private var mapTimer: Task<Void, Never>?
 
@@ -164,12 +180,13 @@ public final class VimController {
 
     /// Install a parsed `.vimrc` (mappings, leader, options).
     public func applyVimrc(_ parsed: ParsedVimrc?) {
-        guard let parsed else {
+        if let parsed {
+            state.apply(vimrc: parsed)
+        } else {
             state.mappings = []
             state.leader = Vimrc.defaultLeader
-            return
         }
-        state.apply(vimrc: parsed)
+        state.addDefaultLeaderMaps()
     }
 
     /// Name of the open note (`"%`, Ctrl-G).
@@ -220,6 +237,7 @@ public final class VimController {
 
     private func run(_ result: VimEngine.Result, old: TextBuffer) {
         let previousRegister = state.defaultRegister
+        let previousYank = state.lastYank?.seq
         state = result.state
         var nb = result.buffer
         let edits = nb.edits
@@ -263,11 +281,18 @@ public final class VimController {
                 scroll = false
             case let .scrollLines(n):
                 surface?.scrollLines(n)
-            case .save, .saveAndClose, .close:
+            case .save, .saveAndClose, .close, .host:
                 break
             }
         }
         showEngineSelection(scroll: scroll)
+        if let yank = state.lastYank, yank.seq != previousYank {
+            let text = buffer.text
+            surface?.flashYank(yank.spans.map { span in
+                let lo = Self.utf16Offset(char: span.lowerBound, in: text)
+                return NSRange(location: lo, length: Self.utf16Offset(char: span.upperBound, in: text) - lo)
+            })
+        }
 
         if state.defaultRegister != previousRegister, !state.defaultRegister.text.isEmpty {
             writeToSystemPasteboard(state.defaultRegister.text)
@@ -275,7 +300,7 @@ public final class VimController {
         scheduleMapTimeout()
         if let effect = result.effect {
             switch effect {
-            case .save, .saveAndClose, .close: onEffect?(effect)
+            case .save, .saveAndClose, .close, .host: onEffect?(effect)
             default: break
             }
         }
@@ -379,6 +404,43 @@ public final class VimController {
         commitLocal([edit], applyToSurface: false)
         document?.breakUndoGroup()
     }
+
+    /// A ranged edit the app makes on the user's behalf (a task checkbox
+    /// toggled in the split preview): applied to the buffer, the text
+    /// view and — for server notes — the CRDT as one ranged op, with
+    /// the cursor and marks mapped through it.
+    public func applyProgrammaticEdit(_ edit: TextEdit) {
+        guard isEditable, !edit.isNoOp else { return }
+        let ns = NSMutableString(string: buffer.text)
+        guard edit.apply(to: ns) else { return }
+        if document == nil, vimEnabled {
+            state.history.push(.init(buffer: buffer))
+        } else {
+            document?.breakUndoGroup()
+        }
+        let oldText = buffer.text
+        let newText = ns as String
+        func map(_ char: Int) -> Int {
+            Self.charOffset(utf16: PositionMapper.map(Self.utf16Offset(char: char, in: oldText), through: [edit]), in: newText)
+        }
+        state.marks = state.marks.mapValues(map)
+        if case let .visual(kind, anchor) = state.mode { state.mode = .visual(kind, anchor: map(anchor)) }
+        let plainSelection = vimEnabled ? nil : surface.map { PositionMapper.map($0.currentSelection, through: [edit]) }
+        buffer = TextBuffer(text: newText, cursor: map(buffer.cursor))
+        buffer.cursor = buffer.clampedCursor(allowPastEnd: !vimEnabled || state.mode.isTyping)
+        commitLocal([edit], applyToSurface: true)
+        document?.breakUndoGroup()
+        if let plainSelection {
+            surface?.showSelection(plainSelection, scroll: false)
+        } else {
+            showEngineSelection(scroll: false)
+        }
+    }
+
+    // MARK: - Viewport (split preview scroll sync)
+
+    public func viewportTopLine() -> Double? { surface?.viewportTopLine() }
+    public func scrollViewport(toLine line: Double) { surface?.scrollViewport(toLine: line) }
 
     /// The user moved the caret with the mouse / touch.
     func userMovedSelection(to range: NSRange) {
@@ -557,6 +619,16 @@ public final class VimController {
         case .block:
             return NSRange(location: cursorUTF16Offset, length: 0)
         }
+    }
+
+    /// What the editor paints as the visual selection: the character /
+    /// line range, or one range per line for a block. Drawn as a
+    /// rendering attribute so it is visible whatever the focus state.
+    public var visualHighlightRanges: [NSRange] {
+        guard case let .visual(kind, _) = state.mode else { return [] }
+        if kind == .block { return blockSelectionRanges }
+        let r = selectionUTF16Range
+        return r.length > 0 ? [r] : []
     }
 
     /// Visual-block selection, one UTF-16 range per line.

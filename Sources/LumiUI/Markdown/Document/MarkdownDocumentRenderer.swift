@@ -137,12 +137,22 @@ final class MarkdownDocumentRenderer {
         let headerOffset = newHeader == nil ? 0 : 1
 
         let styleChanged = newStyle != style
-        let splice: MarkdownBlockIdentity.Splice
-        if styleChanged {
+        var splice: MarkdownBlockIdentity.Splice
+        if styleChanged || (newHeader == nil) != (header == nil) {
             splice = .init(prefix: 0, removed: 0..<segmentIDs.count, inserted: 0..<newIDs.count)
         } else {
             splice = MarkdownBlockIdentity.splice(from: segmentIDs, to: newIDs)
             if splice.isEmpty { return nil }
+            // The first block renders without its top margin (CSS
+            // `:first-child { margin-top: 0 }`): when the change reaches
+            // the first block, the old first block (now further down)
+            // must be rebuilt with its margin back.
+            if splice.removed.lowerBound <= headerOffset, splice.removed.upperBound < segmentIDs.count,
+               splice.inserted.upperBound < newIDs.count {
+                splice = .init(prefix: splice.prefix,
+                               removed: splice.removed.lowerBound..<(splice.removed.upperBound + 1),
+                               inserted: splice.inserted.lowerBound..<(splice.inserted.upperBound + 1))
+            }
         }
 
         let builder = MarkdownAttributedBuilder(style: newStyle)
@@ -159,9 +169,10 @@ final class MarkdownDocumentRenderer {
             } else {
                 let blockIndex = index - headerOffset
                 let before = cache.misses
-                fragment = cache.fragment(id: blockIDs[blockIndex], block: document.blocks[blockIndex], style: newStyle) {
+                let cached = cache.fragment(id: blockIDs[blockIndex], block: document.blocks[blockIndex], style: newStyle) {
                     builder.fragment(for: document.blocks[blockIndex])
                 }
+                fragment = blockIndex == 0 ? Self.withoutLeadingSpace(cached) : cached
                 if cache.misses > before { rebuilt += 1 } else { reused += 1 }
             }
             replacement.append(fragment)
@@ -186,8 +197,43 @@ final class MarkdownDocumentRenderer {
         )
     }
 
+    /// `fragment` with its first paragraph's space-before removed.
+    static func withoutLeadingSpace(_ fragment: NSAttributedString) -> NSAttributedString {
+        guard fragment.length > 0,
+              let ps = fragment.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle,
+              ps.paragraphSpacingBefore > 0,
+              let copy = ps.mutableCopy() as? NSMutableParagraphStyle else { return fragment }
+        // Decorated blocks (callouts, quotes) keep their inner padding.
+        if let decos = fragment.attribute(.lumiDecorations, at: 0, effectiveRange: nil) as? [MarkdownDecoration],
+           decos.contains(where: { $0.kind != .pills && $0.kind != .headingRule }) { return fragment }
+        copy.paragraphSpacingBefore = 0
+        let out = NSMutableAttributedString(attributedString: fragment)
+        let range = (out.string as NSString).paragraphRange(for: NSRange(location: 0, length: 0))
+        out.addAttribute(.paragraphStyle, value: copy, range: range)
+        return out
+    }
+
     /// Total storage length the renderer believes it owns.
     var totalLength: Int { segmentLengths.reduce(0, +) }
+
+    private var headerOffset: Int { header == nil ? 0 : 1 }
+
+    /// Top-level block (document index) whose fragment holds `char`.
+    func blockIndex(atCharacter char: Int) -> Int? {
+        var start = 0
+        for (i, len) in segmentLengths.enumerated() {
+            if char < start + len { return i >= headerOffset ? i - headerOffset : nil }
+            start += len
+        }
+        return nil
+    }
+
+    /// Storage offset where block `index`'s fragment starts.
+    func characterOffset(ofBlock index: Int) -> Int? {
+        let seg = index + headerOffset
+        guard seg < segmentLengths.count else { return nil }
+        return segmentLengths[..<seg].reduce(0, +)
+    }
 
     /// Forget everything (next update is a full build).
     func reset() {

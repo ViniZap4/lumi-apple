@@ -25,6 +25,9 @@ public enum VimEffect: Sendable, Hashable {
     /// moved by logical lines; the host recomputes the target from `from`
     /// (character offset) using its layout and overrides the cursor.
     case displayLines(from: Int, count: Int)
+    /// An ex command the host owns: `:preview` (Reading ⇄ Source),
+    /// `:preview split` (split preview), `:settings`.
+    case host(String)
 }
 
 public enum VimScrollPosition: Sendable, Hashable {

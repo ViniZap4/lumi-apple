@@ -19,6 +19,40 @@ extension NSAttributedString.Key {
     /// `Bool` — run is a tag chip in the note header. The layout fragment
     /// draws a capsule behind it.
     static let lumiChip = NSAttributedString.Key("lumi.chip")
+    /// `MarkdownPill` — rounded background behind an inline run (inline
+    /// code, `<kbd>`, `==mark==`), drawn by the layout fragment.
+    static let lumiPill = NSAttributedString.Key("lumi.pill")
+    /// `String` — in-document anchor (heading slug, `fn-id`, `fnref-id`)
+    /// that `#…` links and footnote refs scroll to.
+    static let lumiAnchor = NSAttributedString.Key("lumi.anchor")
+    /// `Int` — ordinal of a task checkbox inside its top-level block.
+    static let lumiTask = NSAttributedString.Key("lumi.task")
+}
+
+/// Rounded background for an inline run. Value-equal so attribute
+/// dictionaries stay uniquable (see `MarkdownDecoration`).
+final class MarkdownPill: NSObject {
+    enum Kind: Equatable { case code, kbd, mark }
+    let kind: Kind
+    let fill: MarkdownPlatformColor
+    let stroke: MarkdownPlatformColor?
+
+    init(kind: Kind, fill: MarkdownPlatformColor, stroke: MarkdownPlatformColor? = nil) {
+        self.kind = kind
+        self.fill = fill
+        self.stroke = stroke
+    }
+
+    override func isEqual(_ object: Any?) -> Bool {
+        guard let o = object as? MarkdownPill else { return false }
+        return kind == o.kind && fill == o.fill && stroke == o.stroke
+    }
+
+    override var hash: Int {
+        var h = Hasher()
+        h.combine(String(describing: kind))
+        return h.finalize()
+    }
 }
 
 /// Unicode LINE SEPARATOR. Used for hard breaks and for newlines inside
@@ -38,6 +72,15 @@ final class MarkdownDecoration: NSObject {
         case rule
         /// Header tag line: capsule behind every `.lumiChip` run.
         case chips
+        /// Callout box (fill, border, left bar); `foldable` draws a
+        /// chevron on the title line, rotated when `open`.
+        case callout(foldable: Bool, open: Bool)
+        /// Fading hairline under an `h2`.
+        case headingRule
+        /// Paragraph has `.lumiPill` runs (inline code, kbd, mark).
+        case pills
+        /// Footnote list: hairline above.
+        case footnotes
     }
 
     let kind: Kind
@@ -92,6 +135,10 @@ final class MarkdownDecoration: NSObject {
         case .quote: hasher.combine(1)
         case .rule: hasher.combine(2)
         case .chips: hasher.combine(3)
+        case let .callout(f, o): hasher.combine(4); hasher.combine(f); hasher.combine(o)
+        case .headingRule: hasher.combine(5)
+        case .pills: hasher.combine(6)
+        case .footnotes: hasher.combine(7)
         }
         hasher.combine(indent)
         hasher.combine(padding)
@@ -127,6 +174,9 @@ final class MarkdownBlockAttachment: NSTextAttachment {
         case mathHeading(inline: [InlineNode], level: Int)
         case mermaid(code: String)
         case media(MediaReference)
+        /// Fenced code: header (language, copy, wrap) + highlighted body.
+        case code(language: String?, code: String)
+        case table(MarkdownTable)
     }
 
     let payload: Payload
@@ -156,6 +206,11 @@ final class MarkdownBlockAttachment: NSTextAttachment {
         case .mathParagraph: return 26 * scale
         case let .mathHeading(_, level): return (MarkdownRenderStyle.headingBaseSize(level) + 10) * scale
         case .mermaid: return 160
+        case let .code(_, code):
+            let lines = CGFloat(max(1, code.split(separator: "\n", omittingEmptySubsequences: false).count))
+            return (lines * 14.3 * 1.6 + 32 + 28) * scale
+        case let .table(t):
+            return CGFloat(t.rows.count + 1) * 36 * scale + 2
         case let .media(ref):
             switch ref.kind {
             case .image: return 220

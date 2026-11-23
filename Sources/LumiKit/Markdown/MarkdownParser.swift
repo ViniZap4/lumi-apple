@@ -6,21 +6,126 @@ import Markdown
 /// directly — this keeps the renderer tied to a stable internal shape.
 public enum MarkdownParser {
     public static func parse(_ source: String, baseURL: URL? = nil) -> MarkdownDocument {
-        // Math first, wikilinks second. Math extraction replaces `$$ … $$`
-        // and `$ … $` with sentinel tokens so swift-markdown's escape
-        // handling (which would eat `\;`, `\,`, etc.) doesn't touch the
-        // LaTeX source. The wikilink pass runs on the already-tokenised
-        // text — math tokens are inert there.
-        let mathExtraction = extractMath(source)
-        let withWikilinks = preprocessWikilinks(mathExtraction.transformed)
+        let normalized = source.contains("\r") ? source.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n") : source
+        // Footnotes and callout markers are line-level and keep the line
+        // count. Math, footnote refs and `==mark==` are lifted next into
+        // private-use tokens so swift-markdown's escape handling never
+        // touches them (and records which output line came from which
+        // source line — `$$ … $$` spans collapse lines). The wikilink
+        // pass runs on the tokenised text; tokens are inert there.
+        let footnotes = scanFootnotes(normalized)
+        let callouts = markCallouts(footnotes.source)
+        let extraction = extractInline(callouts.source, footnoteIDs: Set(footnotes.order))
+        let withWikilinks = preprocessWikilinks(extraction.transformed)
         let document = Document(parsing: withWikilinks)
-        let context = ParseContext(math: mathExtraction.expressions, baseURL: baseURL)
-        var blocks = document.children.compactMap { convertBlock($0, context: context) }
-        // Lift any paragraph whose only meaningful content is a single
-        // display-mode math expression into a top-level `.mathBlock` so
-        // the renderer can center + size it as a separate block.
-        blocks = liftDisplayMathParagraphs(blocks)
-        return MarkdownDocument(blocks: blocks, baseURL: baseURL)
+        let context = ParseContext(
+            math: extraction.expressions,
+            baseURL: baseURL,
+            footnotes: extraction.footnoteRefs,
+            footnoteNumbers: Dictionary(uniqueKeysWithValues: footnotes.order.enumerated().map { ($1, $0 + 1) }),
+            callouts: callouts.markers
+        )
+        var blocks: [MarkdownBlock] = []
+        var lines: [Int] = []
+        for child in document.children {
+            guard let block = convertBlock(child, context: context) else { continue }
+            blocks.append(liftDisplayMath(in: block))
+            let outLine = max(0, (child.range?.lowerBound.line ?? 1) - 1)
+            lines.append(outLine < extraction.lineMap.count ? extraction.lineMap[outLine] : (extraction.lineMap.last ?? 0))
+        }
+        let lineCount = normalized.reduce(into: 1) { n, c in if c == "\n" { n += 1 } }
+        if !footnotes.order.isEmpty {
+            let items: [MarkdownFootnote] = footnotes.order.enumerated().compactMap { i, id in
+                guard let def = footnotes.defs[id] else { return nil }
+                let inline: [InlineNode]
+                if case let .paragraph(nodes)? = MarkdownParser.parse(def.text, baseURL: baseURL).blocks.first {
+                    inline = nodes
+                } else {
+                    inline = [.text(def.text)]
+                }
+                return MarkdownFootnote(id: id, number: i + 1, inline: inline)
+            }
+            if !items.isEmpty {
+                blocks.append(.footnotes(items))
+                let first = footnotes.order.compactMap { footnotes.defs[$0]?.line }.min() ?? 0
+                lines.append(max(first, lines.last ?? 0))
+            }
+        }
+        return MarkdownDocument(blocks: blocks, baseURL: baseURL, sourceLines: lines, lineCount: lineCount)
+    }
+
+    // MARK: - Footnotes
+
+    struct FootnoteScan {
+        /// Source with definition lines blanked (line count unchanged).
+        var source: String
+        var defs: [String: (text: String, line: Int)]
+        /// Referenced ids that have a definition, in first-reference order.
+        var order: [String]
+    }
+
+    private static let footnoteDef = try! NSRegularExpression(pattern: "^\\[\\^([^\\]\\s]+)\\]:[ \\t]+(.*)$")
+    private static let footnoteRef = try! NSRegularExpression(pattern: "\\[\\^([^\\]\\s]+)\\](?!:)")
+
+    static func scanFootnotes(_ src: String) -> FootnoteScan {
+        guard src.contains("[^") else { return FootnoteScan(source: src, defs: [:], order: []) }
+        var lines = src.components(separatedBy: "\n")
+        let code = MarkdownTasks.codeLines(lines)
+        var defs: [String: (text: String, line: Int)] = [:]
+        var order: [String] = []
+        for i in lines.indices where !code[i] {
+            let ns = lines[i] as NSString
+            if let m = footnoteDef.firstMatch(in: lines[i], range: NSRange(location: 0, length: ns.length)) {
+                let id = ns.substring(with: m.range(at: 1))
+                if defs[id] == nil { defs[id] = (ns.substring(with: m.range(at: 2)), i) }
+                lines[i] = ""
+                continue
+            }
+            for m in footnoteRef.matches(in: lines[i], range: NSRange(location: 0, length: ns.length)) {
+                let id = ns.substring(with: m.range(at: 1))
+                if !order.contains(id) { order.append(id) }
+            }
+        }
+        return FootnoteScan(
+            source: defs.isEmpty ? src : lines.joined(separator: "\n"),
+            defs: defs,
+            order: order.filter { defs[$0] != nil }
+        )
+    }
+
+    // MARK: - Callouts
+
+    struct CalloutMarker: Hashable {
+        var rawKind: String
+        var fold: MarkdownCallout.Fold
+    }
+
+    private static let calloutLine = try! NSRegularExpression(pattern: "^([ ]{0,3}(?:>[ \\t]?)+)[ \\t]*\\[!([A-Za-z][\\w-]*)\\]([+-]?)")
+
+    /// Replaces `[!kind]±` at the start of a quote line with a token the
+    /// block converter recognises (swift-markdown would otherwise read
+    /// it as a link reference and split it into pieces).
+    static func markCallouts(_ src: String) -> (source: String, markers: [Int: CalloutMarker]) {
+        guard src.contains("[!") else { return (src, [:]) }
+        var lines = src.components(separatedBy: "\n")
+        let code = MarkdownTasks.codeLines(lines)
+        var markers: [Int: CalloutMarker] = [:]
+        for i in lines.indices where !code[i] {
+            let ns = lines[i] as NSString
+            guard let m = calloutLine.firstMatch(in: lines[i], range: NSRange(location: 0, length: ns.length)) else { continue }
+            let n = markers.count
+            let fold: MarkdownCallout.Fold
+            switch ns.substring(with: m.range(at: 3)) {
+            case "+": fold = .open
+            case "-": fold = .closed
+            default: fold = .none
+            }
+            markers[n] = CalloutMarker(rawKind: ns.substring(with: m.range(at: 2)).lowercased(), fold: fold)
+            let prefix = ns.substring(with: m.range(at: 1))
+            let rest = ns.substring(from: NSMaxRange(m.range))
+            lines[i] = prefix + "\u{E000}c\(n)\u{E001}" + rest
+        }
+        return (markers.isEmpty ? src : lines.joined(separator: "\n"), markers)
     }
 
     /// Carries everything the recursive AST conversion needs that isn't
@@ -30,6 +135,10 @@ public enum MarkdownParser {
     fileprivate struct ParseContext {
         let math: [String: MathExpression]
         let baseURL: URL?
+        /// Footnote-ref token → footnote id.
+        var footnotes: [String: String] = [:]
+        var footnoteNumbers: [String: Int] = [:]
+        var callouts: [Int: CalloutMarker] = [:]
     }
 
     /// One math expression extracted from the source. The token (a
@@ -44,6 +153,10 @@ public enum MarkdownParser {
     fileprivate struct MathExtraction {
         let transformed: String
         let expressions: [String: MathExpression]
+        /// Footnote-ref token → id.
+        var footnoteRefs: [String: String] = [:]
+        /// Output line → source line (0-based).
+        var lineMap: [Int] = [0]
     }
 
     /// Walks the source and lifts every math span (`$ … $` and `$$ … $$`)
@@ -55,16 +168,32 @@ public enum MarkdownParser {
     /// Newlines inside `$$ … $$` are allowed (display math often spans
     /// multiple lines); a `$ … $` span must close on the same paragraph
     /// to be recognised — anything else stays as plain text.
-    fileprivate static func extractMath(_ source: String) -> MathExtraction {
+    fileprivate static func extractInline(_ source: String, footnoteIDs: Set<String>) -> MathExtraction {
         let chars = Array(source)
         var out = String()
         out.reserveCapacity(source.count)
         var expressions: [String: MathExpression] = [:]
+        var footnoteRefs: [String: String] = [:]
+        var lineMap: [Int] = [0]
+        var srcLine = 0
         var nextIndex = 0
         var i = 0
         var inFence = false
         var inBacktick = false
         var atLineStart = true
+        var markCloses = Set<Int>()
+
+        /// Append one consumed source character.
+        func emit(_ c: Character) {
+            out.append(c)
+            if c == "\n" {
+                srcLine += 1
+                lineMap.append(srcLine)
+            }
+        }
+        func consumedHidden(_ s: ArraySlice<Character>) {
+            for c in s where c == "\n" { srcLine += 1 }
+        }
 
         while i < chars.count {
             let c = chars[i]
@@ -78,7 +207,7 @@ public enum MarkdownParser {
                 continue
             }
             if inFence {
-                out.append(c)
+                emit(c)
                 atLineStart = (c == "\n")
                 i += 1
                 continue
@@ -93,8 +222,9 @@ public enum MarkdownParser {
                 continue
             }
             if inBacktick {
-                out.append(c)
+                emit(c)
                 atLineStart = (c == "\n")
+                if c == "\n", i + 1 < chars.count, chars[i + 1] == "\n" { inBacktick = false }
                 i += 1
                 continue
             }
@@ -103,10 +233,17 @@ public enum MarkdownParser {
             // unchanged so swift-markdown still sees the escape.
             if c == "\\" && i + 1 < chars.count {
                 out.append(c)
-                out.append(chars[i + 1])
-                let advanced = chars[i + 1] == "\n"
-                atLineStart = advanced
+                emit(chars[i + 1])
+                atLineStart = chars[i + 1] == "\n"
                 i += 2
+                continue
+            }
+
+            if markCloses.contains(i) {
+                out.append("\u{E003}")
+                markCloses.remove(i)
+                i += 2
+                atLineStart = false
                 continue
             }
 
@@ -117,6 +254,7 @@ public enum MarkdownParser {
                     let token = makeToken(&nextIndex)
                     expressions[token] = MathExpression(latex: latex, display: .block)
                     out.append(token)
+                    consumedHidden(chars[(i + 2)..<endStart])
                     i = endStart + 2
                     atLineStart = false
                     continue
@@ -138,11 +276,51 @@ public enum MarkdownParser {
                 }
             }
 
-            out.append(c)
+            // Footnote reference `[^id]` (only ids with a definition).
+            if c == "[", !footnoteIDs.isEmpty, i + 2 < chars.count, chars[i + 1] == "^" {
+                var j = i + 2
+                var id = ""
+                while j < chars.count, chars[j] != "]", !chars[j].isWhitespace { id.append(chars[j]); j += 1 }
+                if j < chars.count, chars[j] == "]", !id.isEmpty, footnoteIDs.contains(id),
+                   !(j + 1 < chars.count && chars[j + 1] == ":") {
+                    let token = "\u{E000}f\(nextIndex)\u{E001}"
+                    nextIndex += 1
+                    footnoteRefs[token] = id
+                    out.append(token)
+                    i = j + 1
+                    atLineStart = false
+                    continue
+                }
+            }
+
+            // `==highlight==` on one line, no `=` inside, non-space edges.
+            if c == "=", i + 2 < chars.count, chars[i + 1] == "=", chars[i + 2] != "=", !chars[i + 2].isWhitespace,
+               i == 0 || chars[i - 1] != "=" {
+                var j = i + 2
+                var close: Int?
+                while j + 1 < chars.count, chars[j] != "\n" {
+                    if chars[j] == "=" {
+                        if chars[j + 1] == "=", !chars[j - 1].isWhitespace, !(j + 2 < chars.count && chars[j + 2] == "=") {
+                            close = j
+                        }
+                        break
+                    }
+                    j += 1
+                }
+                if let close {
+                    out.append("\u{E002}")
+                    markCloses.insert(close)
+                    i += 2
+                    atLineStart = false
+                    continue
+                }
+            }
+
+            emit(c)
             atLineStart = (c == "\n")
             i += 1
         }
-        return MathExtraction(transformed: out, expressions: expressions)
+        return MathExtraction(transformed: out, expressions: expressions, footnoteRefs: footnoteRefs, lineMap: lineMap)
     }
 
     private enum MathDelimiter { case inline, block }
@@ -182,21 +360,21 @@ public enum MarkdownParser {
         return "\u{E000}m\(idx)\u{E001}"
     }
 
-    /// Pattern that matches a single math token. Cached so the AST walk
-    /// doesn't recompile the regex per text node.
-    private static let mathTokenRegex: NSRegularExpression = {
+    /// Pattern for every sentinel: `\u{E000}<kind><n>\u{E001}` tokens
+    /// (math, footnote ref, callout) and the `==mark==` delimiters.
+    private static let tokenRegex: NSRegularExpression = {
         // swiftlint:disable:next force_try
-        try! NSRegularExpression(pattern: "\u{E000}m([0-9]+)\u{E001}", options: [])
+        try! NSRegularExpression(pattern: "\u{E000}([mfc])([0-9]+)\u{E001}|[\u{E002}\u{E003}]", options: [])
     }()
 
-    /// Walks a text string for math sentinels and splits it into a
-    /// sequence of `.text` and `.math` inline nodes. Each surviving text
-    /// region keeps its original whitespace; empty runs are skipped so
-    /// the AST stays compact.
-    private static func splitMathTokens(_ s: String, expressions: [String: MathExpression]) -> [InlineNode] {
+    /// Splits a text node at sentinels into `.text`, `.math`,
+    /// `.footnoteRef` and bare mark delimiters (grouped afterwards by
+    /// `groupSpans`). Each surviving text region keeps its whitespace;
+    /// empty runs are skipped so the AST stays compact.
+    private static func splitTokens(_ s: String, context: ParseContext) -> [InlineNode] {
         let ns = s as NSString
         let range = NSRange(location: 0, length: ns.length)
-        let matches = mathTokenRegex.matches(in: s, options: [], range: range)
+        let matches = tokenRegex.matches(in: s, options: [], range: range)
         if matches.isEmpty {
             return s.isEmpty ? [] : [.text(s)]
         }
@@ -209,8 +387,16 @@ public enum MarkdownParser {
                 if !head.isEmpty { out.append(.text(head)) }
             }
             let token = ns.substring(with: r)
-            if let expr = expressions[token] {
+            if token == "\u{E002}" || token == "\u{E003}" {
+                out.append(.text(token))
+            } else if let expr = context.math[token] {
                 out.append(.math(latex: expr.latex, display: expr.display))
+            } else if let id = context.footnotes[token], let n = context.footnoteNumbers[id] {
+                out.append(.footnoteRef(id: id, number: n))
+            } else if m.numberOfRanges > 2, ns.substring(with: m.range(at: 1)) == "c",
+                      let n = Int(ns.substring(with: m.range(at: 2))), let marker = context.callouts[n] {
+                // A callout marker that doesn't open a blockquote: show it.
+                out.append(.text("[!\(marker.rawKind)]"))
             } else {
                 // Unknown token — emit raw so the user sees the placeholder
                 // rather than silently dropping a region.
@@ -225,15 +411,59 @@ public enum MarkdownParser {
         return out
     }
 
+    /// Pairs `==` (E002/E003) and `<kbd>` (E004/E005) delimiters that
+    /// sit in the same inline list into `.mark` / `.kbd`; unpaired
+    /// delimiters fall back to their literal text.
+    static func groupSpans(_ nodes: [InlineNode]) -> [InlineNode] {
+        let open: [String: String] = ["\u{E002}": "\u{E003}", "\u{E004}": "\u{E005}"]
+        let literal: [String: String] = ["\u{E002}": "==", "\u{E003}": "==", "\u{E004}": "", "\u{E005}": ""]
+        var out: [InlineNode] = []
+        var i = 0
+        while i < nodes.count {
+            if case let .text(t) = nodes[i], let closer = open[t] {
+                if let j = nodes[(i + 1)...].firstIndex(where: { if case let .text(u) = $0 { return u == closer } else { return false } }) {
+                    let inner = groupSpans(Array(nodes[(i + 1)..<j]))
+                    if t == "\u{E002}" {
+                        out.append(.mark(inner))
+                    } else {
+                        out.append(.kbd(plainText(inner)))
+                    }
+                    i = j + 1
+                    continue
+                }
+            }
+            if case let .text(t) = nodes[i], let lit = literal[t] {
+                if !lit.isEmpty { out.append(.text(lit)) }
+            } else {
+                out.append(nodes[i])
+            }
+            i += 1
+        }
+        return out
+    }
+
+    /// Visible text of an inline tree (kbd labels, slugs, alt text).
+    public static func plainText(_ nodes: [InlineNode]) -> String {
+        var out = ""
+        for node in nodes {
+            switch node {
+            case let .text(s), let .code(s), let .kbd(s): out += s
+            case let .strong(c), let .emphasis(c), let .strikethrough(c), let .mark(c): out += plainText(c)
+            case let .link(_, c): out += plainText(c)
+            case let .image(_, alt): out += alt
+            case let .math(latex, _): out += latex
+            case .lineBreak, .softBreak: out += " "
+            case let .footnoteRef(_, n): out += "\(n)"
+            }
+        }
+        return out
+    }
+
     /// Lift any paragraph whose visible content is a single display-mode
     /// math expression (optionally surrounded by whitespace text or soft
     /// breaks) up to a top-level `.mathBlock`. Other paragraphs — incl.
     /// those with inline math next to prose — stay as paragraphs and the
     /// renderer dispatches them to the paragraph-level KaTeX WebView.
-    private static func liftDisplayMathParagraphs(_ blocks: [MarkdownBlock]) -> [MarkdownBlock] {
-        blocks.map { liftDisplayMath(in: $0) }
-    }
-
     private static func liftDisplayMath(in block: MarkdownBlock) -> MarkdownBlock {
         switch block {
         case let .paragraph(inline):
@@ -243,6 +473,9 @@ public enum MarkdownParser {
             return .paragraph(inline: inline)
         case let .blockQuote(children):
             return .blockQuote(blocks: children.map { liftDisplayMath(in: $0) })
+        case var .callout(c):
+            c.blocks = c.blocks.map { liftDisplayMath(in: $0) }
+            return .callout(c)
         case let .unorderedList(items):
             return .unorderedList(items: items.map { item in
                 ListItemContent(
@@ -409,7 +642,35 @@ public enum MarkdownParser {
             return .codeBlock(language: codeBlock.language, code: codeBlock.code)
 
         case let blockQuote as BlockQuote:
+            if let callout = convertCallout(blockQuote, context: context) { return .callout(callout) }
             return .blockQuote(blocks: blockQuote.children.compactMap { convertBlock($0, context: context) })
+
+        case let table as Markdown.Table:
+            let alignments: [MarkdownTableAlignment] = table.columnAlignments.map {
+                switch $0 {
+                case .left?: return .left
+                case .center?: return .center
+                case .right?: return .right
+                case nil: return .none
+                }
+            }
+            let header: [[InlineNode]] = Array(table.head.cells.map { convertInline($0.children, context: context) })
+            let rows: [[[InlineNode]]] = Array(table.body.rows.map { row in
+                Array(row.cells.map { convertInline($0.children, context: context) })
+            })
+            let columns = max(header.count, rows.map(\.count).max() ?? 0)
+            func pad(_ r: [[InlineNode]]) -> [[InlineNode]] { r + Array(repeating: [], count: max(0, columns - r.count)) }
+            return .table(MarkdownTable(
+                alignments: alignments + Array(repeating: .none, count: max(0, columns - alignments.count)),
+                header: pad(header),
+                rows: rows.map(pad)
+            ))
+
+        case let html as HTMLBlock:
+            // Only `<kbd>` survives; other raw HTML is not rendered.
+            let raw = html.rawHTML.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard raw.lowercased().contains("<kbd>") else { return nil }
+            return .paragraph(inline: convertInline(Document(parsing: raw.replacingOccurrences(of: "\n", with: " ")).children.flatMap { Array($0.children) }, context: context))
 
         case let list as UnorderedList:
             return .unorderedList(items: list.listItems.map { item in
@@ -431,6 +692,52 @@ public enum MarkdownParser {
         default:
             return nil
         }
+    }
+
+    /// `> [!kind]± Title` + body → callout. The marker token was put in
+    /// by `markCallouts`; the title is the rest of the first line, the
+    /// body everything after it.
+    private static func convertCallout(_ quote: BlockQuote, context: ParseContext) -> MarkdownCallout? {
+        guard !context.callouts.isEmpty,
+              let first = quote.child(at: 0) as? Paragraph,
+              let text = first.child(at: 0) as? Markdown.Text,
+              text.string.hasPrefix("\u{E000}c"),
+              let close = text.string.firstIndex(of: "\u{E001}"),
+              let n = Int(text.string[text.string.index(text.string.startIndex, offsetBy: 2)..<close]),
+              let marker = context.callouts[n]
+        else { return nil }
+        var inline = convertInline(first.children, context: context)
+        // Drop the marker (rendered as "[!kind]" by splitTokens).
+        if case let .text(t)? = inline.first, t == "[!\(marker.rawKind)]" { inline.removeFirst() }
+        var title: [InlineNode] = []
+        var bodyInline: [InlineNode] = []
+        var inTitle = true
+        for node in inline {
+            if inTitle {
+                switch node {
+                case .softBreak, .lineBreak: inTitle = false
+                default: title.append(node)
+                }
+            } else {
+                bodyInline.append(node)
+            }
+        }
+        if case let .text(t)? = title.first {
+            let trimmed = String(t.drop(while: { $0 == " " || $0 == "\t" }))
+            if trimmed.isEmpty { title.removeFirst() } else { title[0] = .text(trimmed) }
+        }
+        var blocks: [MarkdownBlock] = []
+        if !bodyInline.isEmpty { blocks.append(.paragraph(inline: bodyInline)) }
+        for child in quote.children.dropFirst() {
+            if let b = convertBlock(child, context: context) { blocks.append(b) }
+        }
+        return MarkdownCallout(
+            kind: MarkdownCallout.canonicalKind(marker.rawKind),
+            rawKind: marker.rawKind,
+            title: title,
+            fold: marker.fold,
+            blocks: blocks
+        )
     }
 
     /// Convert a swift-markdown `ListItem` into our internal descriptor,
@@ -457,15 +764,16 @@ public enum MarkdownParser {
         let alt = image.plainText
         guard let url = resolve(source: source, baseURL: baseURL) else { return nil }
         let kind = MediaKind.detect(url: url)
-        return MediaReference(url: url, alt: alt, kind: kind)
+        let title = image.title.flatMap { $0.isEmpty ? nil : $0 }
+        return MediaReference(url: url, alt: alt, kind: kind, title: title)
     }
 
     private static func convertInline(_ markups: MarkupChildren, context: ParseContext) -> [InlineNode] {
-        markups.flatMap { convertInlineNode($0, context: context) }
+        groupSpans(markups.flatMap { convertInlineNode($0, context: context) })
     }
 
     private static func convertInline(_ markups: [any Markup], context: ParseContext) -> [InlineNode] {
-        markups.flatMap { convertInlineNode($0, context: context) }
+        groupSpans(markups.flatMap { convertInlineNode($0, context: context) })
     }
 
     /// Returns 0+ nodes for the input. Most cases pass through 1-for-1;
@@ -475,7 +783,14 @@ public enum MarkdownParser {
     private static func convertInlineNode(_ markup: any Markup, context: ParseContext) -> [InlineNode] {
         switch markup {
         case let text as Markdown.Text:
-            return splitMathTokens(text.string, expressions: context.math)
+            return splitTokens(text.string, context: context)
+        case let html as InlineHTML:
+            switch html.rawHTML.lowercased().replacingOccurrences(of: " ", with: "") {
+            case "<kbd>": return [.text("\u{E004}")]
+            case "</kbd>": return [.text("\u{E005}")]
+            case "<br>", "<br/>": return [.lineBreak]
+            default: return []
+            }
         case let strong as Strong:
             return [.strong(convertInline(strong.children, context: context))]
         case let emph as Emphasis:
@@ -512,6 +827,8 @@ public enum MarkdownParser {
     /// URLs relative to the base.
     public static func resolve(source: String, baseURL: URL?) -> URL? {
         let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        // In-document anchors (`#h-intro`, footnotes) stay fragments.
+        if trimmed.hasPrefix("#") { return URL(string: trimmed) }
         if let direct = URL(string: trimmed), direct.scheme != nil {
             return direct
         }

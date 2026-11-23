@@ -542,3 +542,19 @@ public extension VimState {
         options.wrap = o.wrap
     }
 }
+
+public extension VimState {
+    /// Built-in leader mappings (web parity), added unless the vimrc maps
+    /// the same keys: `<leader>p` toggles the split preview.
+    static let defaultLeaderMaps: [VimrcMap] = [
+        VimrcMap(mode: .normal, lhs: "p", rhs: ":preview split<CR>", noremap: true, line: 0, leader: true),
+    ]
+
+    mutating func addDefaultLeaderMaps() {
+        for m in Self.defaultLeaderMaps {
+            guard let mapping = VimMapping(vimrc: m, leader: leader) else { continue }
+            let taken = mappings.contains { $0.exAlias == nil && $0.lhs == mapping.lhs && ($0.mode == .normal || $0.mode == .all) }
+            if !taken { mappings.append(mapping) }
+        }
+    }
+}

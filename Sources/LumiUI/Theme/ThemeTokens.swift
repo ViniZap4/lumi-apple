@@ -67,3 +67,10 @@ public extension ThemeTokens {
     /// The explorer / palette cursor row.
     var selectionRow: Color { accent.opacity(0.16) }
 }
+
+public extension ThemeTokens {
+    /// Editor selection (vim visual mode, mouse selection): the web's
+    /// `--editor-selection` (primary at 30%), strong enough to read on
+    /// every theme (see the contrast tests).
+    var editorSelection: Color { primary.opacity(isDark ? 0.32 : 0.26) }
+}
