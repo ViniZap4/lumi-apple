@@ -59,6 +59,22 @@ public struct VimState: Sendable, Hashable {
     /// (or sets it once and trusts it to stick). Pure data on `VimState`
     /// so the engine stays the source of truth for behavior.
     public var jjEscapeEnabled: Bool
+    /// Insert-mode key sequences that act as `<Esc>` (`jk`, `ff`, …) —
+    /// the web client's `escapeSequences` setting. The first key is typed
+    /// immediately; when the rest of the sequence follows within
+    /// `escapeTimeout` the typed prefix is removed and insert mode ends.
+    public var escapeSequences: [String]
+    /// Seconds allowed between the keys of an escape sequence.
+    public var escapeTimeout: TimeInterval
+    /// Characters typed in a row in insert mode that are a prefix of some
+    /// escape sequence. Reset by any non-character input.
+    public var insertEscapeRun: String
+    /// `inputTime` of the last key in `insertEscapeRun`.
+    public var insertEscapeRunAt: TimeInterval?
+    /// Monotonic time of the input being handled (set by
+    /// `VimEngine.handle(_:state:buffer:at:)`). nil = no timing, so escape
+    /// sequences never time out (tests, macro and `.` replay).
+    public var inputTime: TimeInterval?
     /// Default ("unnamed") register — receives the most recent yank/delete.
     public var defaultRegister: Register
     /// Named registers (`"a` … `"z`, `"A` … `"Z`). Yank/delete writes here in
@@ -149,6 +165,8 @@ public struct VimState: Sendable, Hashable {
         insertModeLastWasJ: Bool = false,
         awaitingReplaceChar: Bool = false,
         jjEscapeEnabled: Bool = false,
+        escapeSequences: [String] = [],
+        escapeTimeout: TimeInterval = 0.2,
         defaultRegister: Register = Register(),
         registers: [Character: Register] = [:],
         pendingRegister: Character? = nil,
@@ -188,6 +206,11 @@ public struct VimState: Sendable, Hashable {
         self.insertModeLastWasJ = insertModeLastWasJ
         self.awaitingReplaceChar = awaitingReplaceChar
         self.jjEscapeEnabled = jjEscapeEnabled
+        self.escapeSequences = escapeSequences
+        self.escapeTimeout = escapeTimeout
+        self.insertEscapeRun = ""
+        self.insertEscapeRunAt = nil
+        self.inputTime = nil
         self.defaultRegister = defaultRegister
         self.registers = registers
         self.pendingRegister = pendingRegister

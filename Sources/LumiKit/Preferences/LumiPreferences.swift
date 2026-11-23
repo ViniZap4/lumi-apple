@@ -177,6 +177,47 @@ public final class LumiPreferences {
         }
     }
 
+    /// Insert-mode key sequences that act as `<Esc>` (`jk`, `ff`, …).
+    /// Same rules as the web client (`EscapeSequences.validate`).
+    public var escapeSequences: [String] {
+        didSet {
+            let clean = EscapeSequences.sanitize(escapeSequences)
+            if clean != escapeSequences {
+                escapeSequences = clean
+                return
+            }
+            store.set(Keys.escapeSequences, EscapeSequences.encode(escapeSequences))
+        }
+    }
+
+    /// Milliseconds the vim engine waits for the next key of an escape
+    /// sequence. Clamped 100…1000 (web parity).
+    public var escapeTimeoutMs: Int {
+        didSet {
+            let clamped = EscapeSequences.clampTimeout(escapeTimeoutMs)
+            if clamped != escapeTimeoutMs {
+                escapeTimeoutMs = clamped
+                return
+            }
+            store.set(Keys.escapeTimeout, escapeTimeoutMs)
+        }
+    }
+
+    /// Soft-wrap long lines in the editor (off = horizontal scroll).
+    public var lineWrapping: Bool {
+        didSet { store.set(Keys.lineWrapping, lineWrapping) }
+    }
+
+    /// Explorer: show dot-files and dot-folders (`.` toggles).
+    public var explorerShowHidden: Bool {
+        didSet { store.set(Keys.explorerShowHidden, explorerShowHidden) }
+    }
+
+    /// Explorer: show the preview column (`zp` toggles).
+    public var explorerShowPreview: Bool {
+        didSet { store.set(Keys.explorerShowPreview, explorerShowPreview) }
+    }
+
     private let store: PreferencesStore
 
     public init(store: PreferencesStore = .shared) {
@@ -200,6 +241,11 @@ public final class LumiPreferences {
         self.readingFontFamily = ReadingFontFamily(rawValue: rawFamily) ?? .system
         self.readingScale = store.double(Keys.readingScale) ?? 1.0
         self.readingWidth = store.double(Keys.readingWidth) ?? 760
+        self.escapeSequences = EscapeSequences.decode(store.string(Keys.escapeSequences))
+        self.escapeTimeoutMs = EscapeSequences.clampTimeout(store.int(Keys.escapeTimeout) ?? EscapeSequences.defaultTimeoutMs)
+        self.lineWrapping = store.bool(Keys.lineWrapping) ?? true
+        self.explorerShowHidden = store.bool(Keys.explorerShowHidden) ?? false
+        self.explorerShowPreview = store.bool(Keys.explorerShowPreview) ?? true
         let rawTheme = store.string(Keys.themeMode) ?? ThemeMode.auto.rawValue
         self.themeMode = ThemeMode(rawValue: rawTheme) ?? .auto
     }
@@ -253,6 +299,11 @@ public final class LumiPreferences {
         static let vimEnabled = "vim_enabled"
         static let contentAnimations = "content_animations"
         static let readingFontFamily = "reading_font_family"
+        static let escapeSequences = "escape_sequences"
+        static let escapeTimeout = "escape_timeout_ms"
+        static let lineWrapping = "line_wrapping"
+        static let explorerShowHidden = "explorer_show_hidden"
+        static let explorerShowPreview = "explorer_show_preview"
     }
 
     /// UserDefaults keys used by builds <= F.36. Kept here only for the

@@ -20,6 +20,17 @@ public enum VimEngine {
         }
     }
 
+    /// Timed variant: `time` is a monotonic clock reading (seconds) used
+    /// by insert-mode escape sequences (`jk`, `ff`) to honour
+    /// `state.escapeTimeout`. Hosts driven by a real keyboard call this.
+    public static func handle(_ input: VimInput, state: VimState, buffer: TextBuffer, at time: TimeInterval?) -> Result {
+        var timed = state
+        timed.inputTime = time
+        var result = handle(input, state: timed, buffer: buffer)
+        result.state.inputTime = nil
+        return result
+    }
+
     public static func handle(_ input: VimInput, state: VimState, buffer: TextBuffer) -> Result {
         // During a `.` replay, bypass recording entirely so the replay can't
         // clobber `lastChange` with the inputs it's replaying.
@@ -1453,6 +1464,7 @@ public enum VimEngine {
         switch input {
         case .escape:
             state.insertModeLastWasJ = false
+            state.insertEscapeRun = ""
             state.mode = .normal
             // vim convention: cursor steps left when leaving insert (unless at line start)
             let line = buffer.cursorLine
@@ -1465,6 +1477,7 @@ public enum VimEngine {
         case .return:
             insertString("\n", state: &state, buffer: &buffer)
             state.insertModeLastWasJ = false
+            state.insertEscapeRun = ""
             return Result(state: state, buffer: buffer)
 
         case .backspace:
@@ -1475,11 +1488,13 @@ public enum VimEngine {
                 buffer.cursor -= 1
             }
             state.insertModeLastWasJ = false
+            state.insertEscapeRun = ""
             return Result(state: state, buffer: buffer)
 
         case .tab:
             insertString("\t", state: &state, buffer: &buffer)
             state.insertModeLastWasJ = false
+            state.insertEscapeRun = ""
             return Result(state: state, buffer: buffer)
 
         case .controlD, .controlU:
@@ -1489,42 +1504,25 @@ public enum VimEngine {
 
         case .controlR, .character:
             if case let .character(char) = input {
-                // jj → Esc mapping. Only fires when the user has opted in
-                // via `state.jjEscapeEnabled`, and only when the previous
-                // input also inserted a literal `j` immediately before.
-                // Removes the buffered first `j` and exits insert mode
-                // (with the standard cursor-step-left).
-                if char == "j", state.jjEscapeEnabled, state.insertModeLastWasJ {
-                    // Drop the previous `j` (the one this handler inserted
-                    // last call). Cursor sits right after it, so step back
-                    // and remove the preceding character.
-                    if buffer.cursor > 0 {
-                        let idx = buffer.text.index(buffer.text.startIndex, offsetBy: buffer.cursor)
-                        let before = buffer.text.index(before: idx)
-                        buffer.text.removeSubrange(before..<idx)
-                        buffer.cursor -= 1
-                    }
-                    state.mode = .normal
-                    state.insertModeLastWasJ = false
-                    // Vim's normal-cursor-after-insert convention: keep
-                    // the cursor where it lands. Matches the existing
-                    // .escape branch, except we don't step left again
-                    // because we already removed the buffered `j`.
-                    return clamp(state: state, buffer: buffer)
+                if let escaped = handleEscapeSequence(char, state: &state, buffer: &buffer) {
+                    return escaped
                 }
                 insertString(String(char), state: &state, buffer: &buffer)
                 state.insertModeLastWasJ = (char == "j")
             } else {
                 state.insertModeLastWasJ = false
+                state.insertEscapeRun = ""
             }
             return Result(state: state, buffer: buffer)
 
         case .historyPrev, .historyNext:
             state.insertModeLastWasJ = false
+            state.insertEscapeRun = ""
             return Result(state: state, buffer: buffer)
 
         case let .arrow(direction):
             state.insertModeLastWasJ = false
+            state.insertEscapeRun = ""
             let line = buffer.cursorLine
             switch direction {
             case .left:
@@ -1539,6 +1537,69 @@ public enum VimEngine {
             }
             return Result(state: state, buffer: buffer)
         }
+    }
+
+    // MARK: Insert-mode escape sequences
+
+    /// The sequences in effect: the user's list plus the legacy `jj`
+    /// toggle. Sequences shorter than two characters are ignored.
+    static func effectiveEscapeSequences(_ state: VimState) -> [String] {
+        var seqs = state.escapeSequences.filter { $0.count >= 2 }
+        if state.jjEscapeEnabled, !seqs.contains("jj") { seqs.append("jj") }
+        return seqs
+    }
+
+    /// Feed one typed character to the escape-sequence matcher. Returns a
+    /// result when the character completed a sequence (the typed prefix is
+    /// removed and insert mode ends); nil when it should be inserted, with
+    /// `state.insertEscapeRun` updated for the next key.
+    private static func handleEscapeSequence(
+        _ char: Character,
+        state: inout VimState,
+        buffer: inout TextBuffer
+    ) -> Result? {
+        let seqs = effectiveEscapeSequences(state)
+        guard !seqs.isEmpty else {
+            state.insertEscapeRun = ""
+            return nil
+        }
+        var run = state.insertEscapeRun
+        if let last = state.insertEscapeRunAt, let now = state.inputTime,
+           now - last > state.escapeTimeout {
+            run = ""
+        }
+        let candidate = run + String(char)
+        if !run.isEmpty, seqs.contains(candidate) {
+            // The run was typed right before the cursor; drop it.
+            let n = run.count
+            if buffer.cursor >= n {
+                let end = buffer.text.index(buffer.text.startIndex, offsetBy: buffer.cursor)
+                let start = buffer.text.index(end, offsetBy: -n)
+                if String(buffer.text[start..<end]) == run {
+                    buffer.text.removeSubrange(start..<end)
+                    buffer.cursor -= n
+                }
+            }
+            state.mode = .normal
+            state.insertModeLastWasJ = false
+            state.insertEscapeRun = ""
+            state.insertEscapeRunAt = nil
+            return clamp(state: state, buffer: buffer)
+        }
+        // Keep the longest suffix of what was typed that can still grow
+        // into a sequence (`jjk` with `jk` keeps `j`).
+        var next = ""
+        var suffix = Substring(candidate)
+        while !suffix.isEmpty {
+            if seqs.contains(where: { $0.count > suffix.count && $0.hasPrefix(suffix) }) {
+                next = String(suffix)
+                break
+            }
+            suffix = suffix.dropFirst()
+        }
+        state.insertEscapeRun = next
+        state.insertEscapeRunAt = state.inputTime
+        return nil
     }
 
     private static func insertString(_ str: String, state: inout VimState, buffer: inout TextBuffer) {

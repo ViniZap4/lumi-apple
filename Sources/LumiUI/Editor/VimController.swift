@@ -97,6 +97,13 @@ public final class VimController {
         state.jjEscapeEnabled = enabled
     }
 
+    /// Insert-mode escape sequences (`jk`, `ff`) and the time allowed
+    /// between their keys, from the per-device editor settings.
+    public func setEscapeSequences(_ sequences: [String], timeout: TimeInterval) {
+        state.escapeSequences = sequences
+        state.escapeTimeout = timeout
+    }
+
     // MARK: - Input
 
     public func send(_ input: VimInput) {
@@ -110,7 +117,7 @@ public final class VimController {
 
         let previousRegister = state.defaultRegister
         let old = buffer
-        let result = VimEngine.handle(input, state: state, buffer: buffer)
+        let result = VimEngine.handle(input, state: state, buffer: buffer, at: ProcessInfo.processInfo.systemUptime)
         state = result.state
         buffer = result.buffer
 
