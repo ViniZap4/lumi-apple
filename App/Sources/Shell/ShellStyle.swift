@@ -55,3 +55,11 @@ struct KeyCap: View {
             .fixedSize()
     }
 }
+
+extension View {
+    /// Editor column capped to a readable measure, centred (web
+    /// `readableWidth`).
+    func readableEditorWidth() -> some View {
+        frame(maxWidth: 880).frame(maxWidth: .infinity)
+    }
+}

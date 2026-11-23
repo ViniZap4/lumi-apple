@@ -173,6 +173,7 @@ struct NoteDetailView: View {
                         relativeLineNumbers: appState.preferences.relativeLineNumbers,
                         options: appState.vimEditorOptions
                     )
+                    .readableEditorWidth()
                 } else {
                     PlainTextEditor(text: Binding(
                         get: { editor.currentText },

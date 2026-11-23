@@ -288,6 +288,7 @@ struct RemoteNoteDetailView: View {
                     relativeLineNumbers: appState.preferences.relativeLineNumbers,
                     options: appState.vimEditorOptions
                 )
+                .readableEditorWidth()
                 // One editor per replica: a new session remounts it.
                 .id(ObjectIdentifier(session))
             } else {
@@ -323,6 +324,7 @@ struct RemoteNoteDetailView: View {
                         relativeLineNumbers: appState.preferences.relativeLineNumbers,
                         options: appState.vimEditorOptions
                     )
+                    .readableEditorWidth()
                 } else {
                     PlainTextEditor(text: $editor.currentText)
                 }
