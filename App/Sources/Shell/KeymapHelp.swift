@@ -28,6 +28,17 @@ struct KeymapHelpOverlay: View {
             ("⌃1–9  g1–9", "book by number"), ("⌘\\", "sidebar"), ("⌥⌘,", "book settings"),
             ("⌘,  ,  :settings", "settings"), ("f  F", "hints: click by label"), ("?", "this help"),
         ]),
+        ("Panes", [
+            ("⌃h  ⌃l", "pane left / right"), ("⌃j  ⌃k", "pane down / up (narrow split)"),
+            ("⌃h", "at the left edge: books"), ("⌃w h j k l", "same, vim style"),
+            ("⌃w w  ⌃w W", "next / previous pane"), ("⌃w p", "last pane"),
+            ("click", "focus that pane"), ("insert mode", "⌃h ⌫  ⌃j newline"),
+        ]),
+        ("Preview (focused)", [
+            ("j k  d u  ␣ b", "scroll (editor follows)"), ("{ }  [[ ]]", "previous / next heading"),
+            ("gg  G", "top / bottom"), ("/  n N", "find"), ("f", "links, boxes, copy"),
+            ("⏎", "follow link at selection"), ("y", "copy selection"), ("q  ⎋  ⌃h  i", "back to the editor"),
+        ]),
     ]
 
     var body: some View {
@@ -49,6 +60,10 @@ struct KeymapHelpOverlay: View {
                 GridRow {
                     section(Self.sections[2])
                     section(Self.sections[3])
+                }
+                GridRow {
+                    section(Self.sections[4])
+                    section(Self.sections[5])
                 }
             }
         }

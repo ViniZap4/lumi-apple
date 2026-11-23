@@ -17,16 +17,37 @@ import AppKit
 final class KeyRouter {
     private weak var appState: AppState?
     nonisolated(unsafe) private var token: Any?
+    nonisolated(unsafe) private var mouseToken: Any?
 
     init(appState: AppState) {
         self.appState = appState
         token = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.handle(event) ?? event
         }
+        // A click focuses the pane under it. The editor and the split
+        // preview report their own focus (first responder); this covers
+        // the sidebar and leaving it. Observes only — never consumes.
+        mouseToken = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            self?.mouseDown(event)
+            return event
+        }
     }
 
     deinit {
         if let token { NSEvent.removeMonitor(token) }
+        if let mouseToken { NSEvent.removeMonitor(mouseToken) }
+    }
+
+    private func mouseDown(_ event: NSEvent) {
+        guard let appState, let window = event.window, window.sheetParent == nil, !(window is NSPanel),
+              let content = window.contentView else { return }
+        var p = content.convert(event.locationInWindow, from: nil)
+        if !content.isFlipped { p.y = content.bounds.height - p.y }
+        if appState.hintRegistry.sidebarGlobalFrame.contains(p) {
+            appState.notePaneFocus(.sidebar)
+        } else if appState.paneFocus == .sidebar {
+            appState.notePaneFocus(nil)
+        }
     }
 
     private func handle(_ event: NSEvent) -> NSEvent? {

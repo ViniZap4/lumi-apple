@@ -238,18 +238,44 @@ extension AppState {
         if explorer.pendingDelete != nil { return handleDeleteConfirm(k) }
         if explorer.prompt != nil { return false }
 
+        keymap.ctrlHJKLPanes = preferences.ctrlHJKLPanes
+        let now = ProcessInfo.processInfo.systemUptime
+        let pane = focusedPane
+        if pane == .sidebar {
+            guard let action = keymap.feed(k, context: .sidebar, now: now) else { return false }
+            return dispatch(action) { self.performShared($0) || self.performSidebar($0) }
+        }
+        if pane == .preview {
+            guard let action = keymap.feed(k, context: .preview, now: now) else { return false }
+            return dispatch(action) { self.performShared($0) || self.performPreview($0) }
+        }
         switch surface {
         case .editor:
             return false
         case .empty:
-            guard let action = keymap.feed(k, context: .explorer, now: ProcessInfo.processInfo.systemUptime) else { return false }
-            return performShared(action)
+            guard let action = keymap.feed(k, context: .explorer, now: now) else { return false }
+            return dispatch(action) { self.performShared($0) }
         case .explorer:
-            guard let action = keymap.feed(k, context: .explorer, now: ProcessInfo.processInfo.systemUptime) else { return false }
-            return performExplorer(action)
+            guard let action = keymap.feed(k, context: .explorer, now: now) else { return false }
+            return dispatch(action) { self.performExplorer($0) }
         case .reader:
-            guard let action = keymap.feed(k, context: .reader, now: ProcessInfo.processInfo.systemUptime) else { return false }
-            return performReader(action)
+            guard let action = keymap.feed(k, context: .reader, now: now) else { return false }
+            return dispatch(action) { self.performReader($0) }
+        }
+    }
+
+    /// Pane keys first: `⌃w …` and `⌃h/j/k/l` move focus; with no pane
+    /// that way the key is consumed (web parity).
+    private func dispatch(_ action: ShellAction, _ perform: (ShellAction) -> Bool) -> Bool {
+        switch action {
+        case let .pane(command):
+            performPane(command)
+            return true
+        case let .paneKey(direction):
+            performPane(.move(direction))
+            return true
+        default:
+            return perform(action)
         }
     }
 
@@ -264,7 +290,7 @@ extension AppState {
     }
 
     /// Keys that mean the same everywhere.
-    private func performShared(_ action: ShellAction) -> Bool {
+    func performShared(_ action: ShellAction) -> Bool {
         switch action {
         case .pending: return true
         case .palette: openPalette()
@@ -338,6 +364,11 @@ extension AppState {
         case .edit: setEditing(true)
         case .yank: performYank()
         case .refresh: refreshBook()
+        case .find: MarkdownReading.find(.show, in: c.scrollView)
+        case .nextMatch: MarkdownReading.find(.next, in: c.scrollView)
+        case .prevMatch: MarkdownReading.find(.previous, in: c.scrollView)
+        case .nextHeading: jumpHeading(next: true, in: c.scrollView, coordinator: c)
+        case .prevHeading: jumpHeading(next: false, in: c.scrollView, coordinator: c)
         default: return false
         }
         return true

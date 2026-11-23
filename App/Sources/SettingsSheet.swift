@@ -304,6 +304,16 @@ struct SettingsSheet: View {
                 detail: "Hold to keep scrolling; ⌃d / ⌃u half-page; gg / G top / bottom.",
                 isOn: $prefs.jkScrollInView
             )
+            toggleRow(
+                title: "⌃h ⌃j ⌃k ⌃l move between panes",
+                detail: "Books ← explorer / note → split preview, like vim windows and vim-tmux-navigator. In the editor: normal and visual mode only, unless your .vimrc maps the key. ⌃w h/j/k/l, ⌃w w and ⌃w p always work.",
+                isOn: $prefs.ctrlHJKLPanes
+            )
+            toggleRow(
+                title: "Leaving the preview moves the cursor",
+                detail: "Back from the focused split preview (q, ⌃h), the editor cursor lands on the first line you were reading.",
+                isOn: $prefs.previewReturnMovesCursor
+            )
         }
     }
 

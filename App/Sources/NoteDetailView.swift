@@ -168,11 +168,13 @@ struct NoteDetailView: View {
                 baseURL: baseURL,
                 vaultRoot: vaultRoot,
                 onToggleTask: { appState.toggleTask($0) },
-                onInAppLink: handleInAppLink
+                onInAppLink: handleInAppLink,
+                focus: appState.splitFocusMarker,
+                onSync: { appState.adoptSplit($0) }
             ) {
                 editorPane(editor: editor)
             }
-            .environment(\.vimControllerSink) { appState.activeEditor = $0 }
+            .environment(\.vimControllerSink) { appState.adoptEditor($0) }
             .id(entry.relativePath)
             .transition(
                 appState.preferences.contentAnimations
@@ -660,7 +662,8 @@ struct NativeScrollHost<Content: View>: View {
 final class ReadModeCoordinator {
     enum Edge { case top, bottom }
 
-    func attach(scrollView: UIScrollView) {}
+    weak var scrollView: UIScrollView?
+    func attach(scrollView: UIScrollView) { self.scrollView = scrollView }
     func scroll(by dy: CGFloat, animated: Bool = true) {}
     func glide(by dy: CGFloat) {}
     func syncTargetWithCurrent() {}

@@ -198,6 +198,22 @@ final class AppState {
     /// Note bar: the title is being renamed inline.
     var renamingTitle = false
 
+    // MARK: Panes (⌃h/j/k/l, ⌃w …)
+
+    /// Pane with keyboard focus; nil = the main area. Resolved against
+    /// what is on screen by `focusedPane`.
+    var paneFocus: PaneID?
+    /// For `⌃w p`.
+    @ObservationIgnored var previousPane: PaneID?
+    /// Keyboard cursor in the sidebar's book list.
+    var sidebarCursor = 0
+    /// ⌃h opened the hidden sidebar: leaving it closes it again.
+    @ObservationIgnored var sidebarAutoShown = false
+    /// The open editor's split (preview focus, keyboard reading).
+    @ObservationIgnored weak var activeSplit: SplitScrollSync?
+    /// Keyboard scrolling of the focused split preview.
+    let previewCoordinator = ReadModeCoordinator()
+
     // MARK: Offline
 
     /// Sign out / remove account while offline edits are pending.

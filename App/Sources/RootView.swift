@@ -63,6 +63,14 @@ struct RootView: View {
             // Pick up books.yaml edits made by the TUI while we were away.
             if phase == .active { appState.books.reload() }
         }
+        .onChange(of: appState.preferences.ctrlHJKLPanes) { _, on in
+            appState.activeEditor?.paneKeys.ctrlHJKL = on
+        }
+        .onChange(of: appState.columnVisibility) { _, visibility in
+            // The sidebar closed under the keyboard (⌘\, toolbar).
+            if visibility == .detailOnly, appState.paneFocus == .sidebar { appState.notePaneFocus(nil) }
+            if visibility == .detailOnly { appState.sidebarAutoShown = false }
+        }
         .onChange(of: appState.remoteVaultsStore.openNotePhase) { _, _ in appState.publishEditorPhase() }
         .onChange(of: appState.remoteEditor.isDirty) { _, _ in appState.publishEditorPhase() }
         .onChange(of: appState.selectedRemoteNoteID) { _, _ in appState.publishEditorPhase() }
@@ -124,6 +132,7 @@ struct ShellMain: View {
             }
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay(alignment: .top) { mainPaneMarker }
             if appState.preferences.showKeybindsBar {
                 ShellLegendLine()
             }
@@ -133,6 +142,9 @@ struct ShellMain: View {
         .coordinateSpace(.named(shellHintSpace))
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(shellHintSpace)) } action: { frame in
             appState.hintRegistry.bounds = frame
+        }
+        .onGeometryChange(for: CGPoint.self) { $0.frame(in: .global).origin } action: { origin in
+            appState.hintRegistry.globalOrigin = origin
         }
         .overlay {
             if let session = appState.hintSession {
@@ -181,6 +193,20 @@ struct ShellMain: View {
             return appState.handleShellKey(k) ? .handled : .ignored
         }
         #endif
+    }
+
+    /// Thin accent line on the main area while it has the keyboard and
+    /// another pane shows (the split marks its own sides).
+    @ViewBuilder
+    private var mainPaneMarker: some View {
+        let pane = appState.focusedPane
+        if appState.showsPaneMarker, let pane, pane == appState.mainPane, appState.splitFocusMarker == nil {
+            Rectangle()
+                .fill(theme.primary.opacity(0.85))
+                .frame(height: 2)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
     }
 
     @ViewBuilder

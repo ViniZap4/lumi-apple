@@ -25,6 +25,12 @@ final class HintRegistry {
     fileprivate(set) var targets: [String: HintTarget] = [:]
     /// Visible shell area (same coordinate space as the frames).
     var bounds: CGRect = .zero
+    /// The shell area's origin in window (SwiftUI `.global`)
+    /// coordinates: maps rects from AppKit views (links in a rendered
+    /// note) into the hint space.
+    var globalOrigin: CGPoint = .zero
+    /// Sidebar frame in window coordinates (clicks focus it).
+    var sidebarGlobalFrame: CGRect = .zero
 
     func set(_ id: String, frame: CGRect, action: @escaping @MainActor () -> Void) {
         targets[id] = HintTarget(id: id, frame: frame, action: action)
@@ -33,11 +39,20 @@ final class HintRegistry {
     func remove(_ id: String) { targets.removeValue(forKey: id) }
 
     /// On-screen targets in reading order (top to bottom, left to right).
-    var visible: [HintTarget] {
+    var visible: [HintTarget] { onScreen(Array(targets.values)) }
+
+    func onScreen(_ list: [HintTarget]) -> [HintTarget] {
         let area = bounds.insetBy(dx: -1, dy: -1)
-        return targets.values
+        return list
             .filter { $0.frame.width > 2 && $0.frame.height > 2 && area.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }
             .sorted { abs($0.frame.minY - $1.frame.minY) > 4 ? $0.frame.minY < $1.frame.minY : $0.frame.minX < $1.frame.minX }
+    }
+
+    /// Links / checkboxes / copy buttons of a rendered note as targets.
+    func markdownTargets(_ items: [MarkdownHintTarget], prefix: String) -> [HintTarget] {
+        items.enumerated().map { i, item in
+            HintTarget(id: "\(prefix).\(i)", frame: item.rect.offsetBy(dx: -globalOrigin.x, dy: -globalOrigin.y), action: item.action)
+        }
     }
 }
 
@@ -75,7 +90,18 @@ private struct HintTargetModifier: ViewModifier {
 
 extension AppState {
     func startHints() {
-        let targets = hintRegistry.visible
+        let targets: [HintTarget]
+        if focusedPane == .preview {
+            // Reading the split preview: its links, checkboxes and copy
+            // buttons only.
+            let items = MarkdownReading.hintTargets(in: activeSplit?.previewScrollView)
+            targets = hintRegistry.onScreen(hintRegistry.markdownTargets(items, prefix: "preview"))
+        } else if surface == .reader {
+            let items = MarkdownReading.hintTargets(in: readCoordinator.scrollView)
+            targets = hintRegistry.onScreen(Array(hintRegistry.targets.values) + hintRegistry.markdownTargets(items, prefix: "reader"))
+        } else {
+            targets = hintRegistry.visible
+        }
         guard !targets.isEmpty else {
             showToast("nothing to click here")
             return

@@ -289,11 +289,13 @@ struct RemoteNoteDetailView: View {
                            set: { appState.preferences.splitPreviewRatio = $0 }),
             scale: appState.preferences.readingScale,
             fontFamily: markdownFontFamilyFromPreferences,
-            onToggleTask: canEditNotes ? { appState.toggleTask($0) } : nil
+            onToggleTask: canEditNotes ? { appState.toggleTask($0) } : nil,
+            focus: appState.splitFocusMarker,
+            onSync: { appState.adoptSplit($0) }
         ) {
             editPane
         }
-        .environment(\.vimControllerSink) { appState.activeEditor = $0 }
+        .environment(\.vimControllerSink) { appState.adoptEditor($0) }
     }
 
     @ViewBuilder

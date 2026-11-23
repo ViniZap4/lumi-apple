@@ -151,6 +151,8 @@ struct ShellStatusLine: View {
     }
 
     private var modeLabel: String {
+        if appState.focusedPane == .preview { return "PREVIEW" }
+        if appState.focusedPane == .sidebar { return "BOOKS" }
         switch appState.surface {
         case .empty: return "LUMI"
         case .explorer: return appState.explorer.prompt != nil ? "PROMPT" : "BROWSE"
@@ -165,6 +167,8 @@ struct ShellStatusLine: View {
     }
 
     private var modeColor: Color {
+        if appState.focusedPane == .preview { return theme.info }
+        if appState.focusedPane == .sidebar { return theme.accent }
         switch appState.surface {
         case .empty: return theme.textDim
         case .explorer: return theme.accent

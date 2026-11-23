@@ -36,11 +36,17 @@ struct VaultSidebar: View {
                                 .padding(.horizontal, 8)
                                 .padding(.bottom, 4)
                             ForEach(group.books) { book in
+                                let index = flat.firstIndex(of: book)
                                 BookRow(book: book,
-                                        shortcut: flat.firstIndex(of: book).map { $0 + 1 }.flatMap { $0 <= 9 ? $0 : nil },
-                                        isActive: appState.openBook?.id == book.id)
+                                        shortcut: index.map { $0 + 1 }.flatMap { $0 <= 9 ? $0 : nil },
+                                        isActive: appState.openBook?.id == book.id,
+                                        isCursor: focused && index == appState.sidebarCursor)
                                     .contentShape(Rectangle())
-                                    .onTapGesture { Task { await appState.selectBook(book) } }
+                                    .onTapGesture {
+                                        if let index { appState.sidebarCursor = index }
+                                        appState.leaveSidebar()
+                                        Task { await appState.selectBook(book) }
+                                    }
                             }
                         }
                     }
@@ -78,7 +84,21 @@ struct VaultSidebar: View {
             .frame(height: ShellMetrics.statusLineHeight + 4)
         }
         .background(theme.overlayBackground.opacity(0.5))
+        .overlay(alignment: .top) {
+            if focused {
+                Rectangle()
+                    .fill(theme.primary.opacity(0.85))
+                    .frame(height: 2)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+            appState.hintRegistry.sidebarGlobalFrame = frame
+        }
+        .onDisappear { appState.hintRegistry.sidebarGlobalFrame = .zero }
     }
+
+    private var focused: Bool { appState.focusedPane == .sidebar }
 
     private func groupTitle(_ group: BookSwitcherOrder.Group) -> String {
         guard let url = group.serverURL else { return "this device" }
@@ -92,6 +112,8 @@ struct BookRow: View {
     let book: Book
     let shortcut: Int?
     let isActive: Bool
+    /// Keyboard cursor (sidebar focused).
+    var isCursor = false
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
 
@@ -116,6 +138,10 @@ struct BookRow: View {
         .background(
             RoundedRectangle(cornerRadius: 4, style: .continuous)
                 .fill(isActive ? theme.accent.opacity(0.14) : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .stroke(isCursor ? theme.accent : Color.clear, lineWidth: 1)
         )
     }
 }

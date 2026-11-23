@@ -12,6 +12,8 @@ extension AppState {
             if case .filter = prompt.kind { return .filter }
             return .prompt
         }
+        if focusedPane == .sidebar { return .sidebar }
+        if focusedPane == .preview { return .preview }
         switch surface {
         case .empty: return .books
         case .explorer: return .explorer
@@ -24,11 +26,14 @@ extension AppState {
     var legendItems: [LegendItem] {
         let ctx = legendContext
         switch ctx {
-        case .explorer, .reader:
-            return CommandLegend.shellItems(ctx, pending: shellPending)
+        case .explorer, .reader, .preview, .sidebar:
+            return CommandLegend.shellItems(ctx, pending: shellPending, pane: ctx == .sidebar ? nil : paneLegendItem)
         default:
             let s = liveVimStatus
             let editor = surface == .editor && !showPalette && !showHelp
+            if editor, activeEditor?.paneKeys.awaitingWindowCommand == true {
+                return CommandLegend.windowCommands
+            }
             let extras = CommandLegend.Extras(
                 leader: s.leader,
                 leaderMaps: s.leaderMaps.map { LegendItem($0.keys, $0.rhs) },
@@ -36,7 +41,10 @@ extension AppState {
                 recording: s.recording
             )
             var items = CommandLegend.items(ctx, pending: editor ? s.pending : VimPendingInfo(), extras: extras)
-            if ctx == .normal, editor { items.append(LegendItem("⌘E", "reading")) }
+            if ctx == .normal, editor {
+                if let pane = paneLegendItem { items.append(pane) }
+                items.append(LegendItem("⌘E", "reading"))
+            }
             if ctx == .insert, !preferences.vimEnabled { items = [LegendItem("⌘E", "reading"), LegendItem("⌘Z", "undo")] }
             return items
         }
@@ -45,8 +53,9 @@ extension AppState {
     /// Pending keys to echo at the start of the legend (`"a2d`, `g`, `5`).
     var legendPending: String {
         switch legendContext {
-        case .explorer, .reader: return shellPending
+        case .explorer, .reader, .preview, .sidebar: return shellPending
         case .normal, .visual, .visualLine, .visualBlock, .operatorPending:
+            if activeEditor?.paneKeys.awaitingWindowCommand == true { return "^W" }
             return liveVimStatus.pending.display
         default: return ""
         }
