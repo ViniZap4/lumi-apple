@@ -38,6 +38,9 @@ public struct ReplicaMeta: Codable, Sendable, Equatable {
     /// Lineage stamp: the server's `notes.created_at` for this id when the
     /// replica was first synced. A delete + recreate gets a new one.
     public var noteCreatedAt: Date?
+    /// Server CRDT lineage (`crdt_epoch`) this replica was synced under;
+    /// nil for replicas persisted before the server exposed it.
+    public var crdtEpoch: String?
     /// lib0-v1 state vector the server provably holds (its SyncStep1 at
     /// join, plus every state acknowledged by a probe round-trip). Inside
     /// one lineage the server's vector only grows (`ReplicaLineage`).
@@ -48,6 +51,7 @@ public struct ReplicaMeta: Codable, Sendable, Equatable {
     public var lastAccess: Date
 
     public init(key: ReplicaKey, title: String? = nil, path: String? = nil, noteCreatedAt: Date? = nil,
+                crdtEpoch: String? = nil,
                 knownServerSV: Data = Data(), dirty: Bool = false, lastAccess: Date = Date()) {
         self.version = Self.currentVersion
         self.serverURL = key.serverURL
@@ -57,6 +61,7 @@ public struct ReplicaMeta: Codable, Sendable, Equatable {
         self.title = title
         self.path = path
         self.noteCreatedAt = noteCreatedAt
+        self.crdtEpoch = crdtEpoch
         self.knownServerSV = knownServerSV
         self.dirty = dirty
         self.lastAccess = lastAccess
@@ -90,11 +95,14 @@ public struct ReplicaState: Codable, Sendable, Equatable {
     public var dirty: Bool
     public var knownServerSV: Data
     public var noteCreatedAt: Date?
+    /// Optional for logs written before the field existed.
+    public var crdtEpoch: String?
 
-    public init(dirty: Bool, knownServerSV: Data, noteCreatedAt: Date?) {
+    public init(dirty: Bool, knownServerSV: Data, noteCreatedAt: Date?, crdtEpoch: String? = nil) {
         self.dirty = dirty
         self.knownServerSV = knownServerSV
         self.noteCreatedAt = noteCreatedAt
+        self.crdtEpoch = crdtEpoch
     }
 }
 
@@ -536,6 +544,7 @@ public final class ReplicaStore: Sendable {
                     stored.meta.dirty = s.dirty
                     stored.meta.knownServerSV = s.knownServerSV
                     stored.meta.noteCreatedAt = s.noteCreatedAt ?? stored.meta.noteCreatedAt
+                    stored.meta.crdtEpoch = s.crdtEpoch ?? stored.meta.crdtEpoch
                 }
             default:
                 break

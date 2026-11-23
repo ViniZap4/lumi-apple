@@ -309,7 +309,7 @@ public final class RemoteVaultsStore {
             #if canImport(YSwift)
             if let session = openSession, session.vaultID == vaultID, session.noteID == noteID,
                let state = snapshot.stateData {
-                session.mergeSnapshotState(state)
+                session.mergeSnapshotState(state, crdtEpoch: snapshot.crdtEpoch)
             }
             #endif
         } catch {
@@ -512,7 +512,8 @@ public final class RemoteVaultsStore {
             path: path,
             title: existing.title,
             createdAt: existing.createdAt,
-            updatedAt: Date()
+            updatedAt: Date(),
+            crdtEpoch: existing.crdtEpoch
         )
     }
 

@@ -17,8 +17,24 @@ public enum TransportEvent: Sendable, Equatable {
 /// isolation domain.
 public protocol SyncTransport: AnyObject, Sendable {
     var events: AsyncStream<TransportEvent> { get }
+    /// CRDT lineage (`crdt_epoch`) of the doc this connection joins, from
+    /// the ws-ticket it was dialled with. Nil without a ticket or on
+    /// servers predating the field.
+    var crdtEpoch: String? { get }
+    /// True when the upgrade authenticated with a single-use ws-ticket
+    /// (a 4401 may then just mean "stale ticket": re-mint once).
+    var usedTicket: Bool { get }
     func send(_ frame: Data)
     func close()
+    /// Close with an application code (e.g. client-side 4409
+    /// `ReplicaLineage.closeLineageChanged`).
+    func close(code: Int, reason: String?)
+}
+
+extension SyncTransport {
+    public var crdtEpoch: String? { nil }
+    public var usedTicket: Bool { false }
+    public func close(code: Int, reason: String?) { close() }
 }
 
 /// Opens connections for a note session: resolves auth (ws-ticket first,
@@ -27,8 +43,9 @@ public protocol SyncTransport: AnyObject, Sendable {
 public protocol SyncConnector: Sendable {
     func connect(vaultID: UUID, noteID: String) async throws(SyncConnectError) -> any SyncTransport
     func probeAuth() async -> AuthProbeResult
-    /// Lineage stamp of the note (`notes.created_at`, `GET …/notes/:id`),
-    /// checked before a persisted replica is merged (`ReplicaLineage`).
+    /// Lineage identity of the note (`crdt_epoch` + `created_at`, from
+    /// `GET …/notes/:id`), checked before a persisted replica is merged
+    /// (`ReplicaLineage`).
     func noteLineage(vaultID: UUID, noteID: String) async -> NoteLineageProbe
 }
 
@@ -40,16 +57,23 @@ extension SyncConnector {
 
 /// Answer of `SyncConnector.noteLineage`.
 public enum NoteLineageProbe: Sendable, Equatable {
-    /// The note row's `created_at` (second resolution on the wire).
-    case createdAt(Date)
+    /// The note exists. `crdtEpoch` is the server's lineage id (nil on
+    /// servers predating it); `createdAt` is the row's stamp (second
+    /// resolution), the fallback identity.
+    case note(createdAt: Date?, crdtEpoch: String?)
     /// 404: the note is gone.
     case notFound
     case unauthorized
     case forbidden
     /// Network failure — retry with backoff.
     case unavailable(String)
-    /// No stamp available (no `created_at`, connector without REST).
+    /// No identity available (connector without REST).
     case unsupported
+
+    /// A pre-epoch server's answer: only the stamp.
+    public static func createdAt(_ date: Date) -> NoteLineageProbe {
+        .note(createdAt: date, crdtEpoch: nil)
+    }
 }
 
 public enum SyncConnectError: Error, Sendable, Equatable {
@@ -75,8 +99,12 @@ public final class WebSocketTransport: SyncTransport {
     private let continuation: AsyncStream<TransportEvent>.Continuation
     private let task: URLSessionWebSocketTask
     private let state = Mutex<(opened: Bool, finished: Bool, loop: Task<Void, Never>?)>((false, false, nil))
+    public let crdtEpoch: String?
+    public let usedTicket: Bool
 
-    public init(url: URL, session: URLSession = .shared) {
+    public init(url: URL, session: URLSession = .shared, crdtEpoch: String? = nil, usedTicket: Bool = false) {
+        self.crdtEpoch = ReplicaLineage.normalized(crdtEpoch)
+        self.usedTicket = usedTicket
         var c: AsyncStream<TransportEvent>.Continuation!
         events = AsyncStream(bufferingPolicy: .unbounded) { c = $0 }
         continuation = c
@@ -125,6 +153,12 @@ public final class WebSocketTransport: SyncTransport {
         finish(code: 1000, reason: nil)
     }
 
+    public func close(code: Int, reason: String?) {
+        let wsCode = URLSessionWebSocketTask.CloseCode(rawValue: code) ?? .normalClosure
+        task.cancel(with: wsCode, reason: reason.flatMap { $0.data(using: .utf8) })
+        finish(code: code, reason: reason)
+    }
+
     fileprivate func markOpened() {
         let first = state.withLock { s -> Bool in
             guard !s.opened, !s.finished else { return false }
@@ -170,10 +204,12 @@ public final class WebSocketConnector: SyncConnector {
               let token = await client.token, !token.isEmpty
         else { throw .notConfigured }
         var auth = SyncAuth.token(token)
+        var epoch: String?
         if !ticketUnsupported.withLock({ $0 }) {
             do {
                 let t = try await client.createWSTicket(vaultID: vaultID, noteID: noteID)
                 auth = .ticket(t.ticket)
+                epoch = t.crdtEpoch
             } catch {
                 switch error {
                 case .server(404, _, _), .invalidResponse(404):
@@ -194,13 +230,17 @@ public final class WebSocketConnector: SyncConnector {
         guard let url = SyncURL.make(baseURL: baseURL, vaultID: vaultID, noteID: noteID, auth: auth) else {
             throw .notConfigured
         }
-        return WebSocketTransport(url: url, session: session)
+        let usedTicket: Bool
+        if case .ticket = auth { usedTicket = true } else { usedTicket = false }
+        return WebSocketTransport(url: url, session: session, crdtEpoch: epoch, usedTicket: usedTicket)
     }
 
     public func noteLineage(vaultID: UUID, noteID: String) async -> NoteLineageProbe {
         do {
             let note = try await client.getNote(vaultID: vaultID, noteID: noteID)
-            return note.createdAt.map(NoteLineageProbe.createdAt) ?? .unsupported
+            let epoch = ReplicaLineage.normalized(note.crdtEpoch)
+            if note.createdAt == nil && epoch == nil { return .unsupported }
+            return .note(createdAt: note.createdAt, crdtEpoch: epoch)
         } catch {
             switch error {
             case .unauthorized, .server(401, _, _): return .unauthorized

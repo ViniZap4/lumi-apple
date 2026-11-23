@@ -25,9 +25,10 @@ extension YrsSerial {
 
         /// Join `room` once, optionally edit live, wait for the ack, close.
         private func primeReplica(_ store: ReplicaStore, _ room: FakeRoom, edit: [TextEdit]? = nil,
-                                  lineage: NoteLineageProbe = .unsupported) async throws {
+                                  lineage: NoteLineageProbe = .unsupported, epoch: String? = nil) async throws {
             let connector = FakeConnector(room: room)
             connector.lineage = lineage
+            connector.ticketEpoch = epoch
             let s = offlineSession(connector, store, key)
             s.start()
             #expect(await eventually { s.phase == .live })
@@ -251,6 +252,137 @@ extension YrsSerial {
             #expect(reported?.reason == .noteDeleted)
             #expect(reported?.text == "keep me!")
             #expect(!store.exists(key))
+            s.destroy()
+            try? FileManager.default.removeItem(at: store.root)
+        }
+
+        // MARK: crdt_epoch (server lineage id)
+
+        /// Prime a replica, then leave a pending offline edit on it.
+        private func primeWithPendingEdit(_ store: ReplicaStore, _ room: FakeRoom, epoch: String?,
+                                          lineage: NoteLineageProbe = .unsupported) async throws {
+            try await primeReplica(store, room, lineage: lineage, epoch: epoch)
+            let offline = FakeConnector(room: room)
+            offline.offline = true
+            let s = offlineSession(offline, store, key)
+            s.applyLocal(Replica.ins(0, "draft "))
+            s.destroy()
+        }
+
+        @Test("the ws-ticket epoch is recorded on first sync and persisted")
+        func epochRecorded() async throws {
+            let store = ReplicaStore(root: tempReplicaRoot())
+            let room = FakeRoom(text: "x")
+            try await primeReplica(store, room, epoch: "e1")
+            #expect(store.load(key)?.meta.crdtEpoch == "e1")
+            try? FileManager.default.removeItem(at: store.root)
+        }
+
+        @Test("recreate inside the same second: created_at matches, crdt_epoch differs → caught before dialing")
+        func epochMismatchBeforeDialing() async throws {
+            let store = ReplicaStore(root: tempReplicaRoot())
+            let stamp = Date(timeIntervalSince1970: 1_700_000_000)
+            let room = FakeRoom(text: "")
+            try await primeWithPendingEdit(store, room, epoch: "e1",
+                                           lineage: .note(createdAt: stamp, crdtEpoch: "e1"))
+            let recreated = FakeRoom(text: "")
+            let connector = FakeConnector(room: recreated)
+            connector.lineage = .note(createdAt: stamp.addingTimeInterval(0.4), crdtEpoch: "e2")
+            connector.ticketEpoch = "e2"
+            let s = offlineSession(connector, store, key)
+            var reported: ReplicaConflict?
+            s.onReplicaConflict = { reported = $0 }
+            s.start()
+            #expect(await eventually { s.termination == .lineageChanged })
+            #expect(connector.transports.isEmpty)
+            #expect(reported?.text == "draft ")
+            #expect(!store.exists(key))
+            try? FileManager.default.removeItem(at: store.root)
+        }
+
+        @Test("ticket epoch differs (note recreated after the lookup): client closes with 4409, never merges")
+        func epochMismatchOnTicket() async throws {
+            let store = ReplicaStore(root: tempReplicaRoot())
+            let room = FakeRoom(text: "hello")
+            try await primeWithPendingEdit(store, room, epoch: "e1")
+            let recreated = FakeRoom(text: "hello")
+            let connector = FakeConnector(room: recreated)
+            connector.ticketEpoch = "e2"
+            let s = offlineSession(connector, store, key)
+            s.start()
+            #expect(await eventually { s.termination == .lineageChanged })
+            #expect(connector.transports.first?.clientCloseCode == ReplicaLineage.closeLineageChanged)
+            #expect(s.replicaConflict?.text == "draft hello")
+            #expect(!recreated.received.contains { $0.type == YProtocol.messageSync })
+            #expect(recreated.doc.text == "hello")
+            try? FileManager.default.removeItem(at: store.root)
+        }
+
+        @Test("equal epochs decide alone: no stamp or state-vector check")
+        func epochEqualDecidesAlone() async throws {
+            let store = ReplicaStore(root: tempReplicaRoot())
+            let room = FakeRoom(text: "hello")
+            try await primeWithPendingEdit(store, room, epoch: "e1",
+                                           lineage: .createdAt(Date(timeIntervalSince1970: 1_700_000_000)))
+            // A stamp that would fail the fallback check; the epoch wins.
+            let connector = FakeConnector(room: room)
+            connector.lineage = .note(createdAt: Date(timeIntervalSince1970: 1_700_009_999), crdtEpoch: "e1")
+            connector.ticketEpoch = "e1"
+            let s = offlineSession(connector, store, key)
+            s.start()
+            #expect(await eventually { s.phase == .live })
+            #expect(s.termination == nil)
+            #expect(await eventually { room.doc.text == "draft hello" && !s.hasPendingLocalChanges })
+            s.destroy()
+            try? FileManager.default.removeItem(at: store.root)
+        }
+
+        @Test("pre-epoch replica: fallback check passes, then the server epoch is adopted")
+        func epochAdoptedAfterFallback() async throws {
+            let store = ReplicaStore(root: tempReplicaRoot())
+            let room = FakeRoom(text: "hello")
+            try await primeWithPendingEdit(store, room, epoch: nil)
+            #expect(store.load(key)?.meta.crdtEpoch == nil)
+            let connector = FakeConnector(room: room)
+            connector.ticketEpoch = "e7"
+            let s = offlineSession(connector, store, key)
+            s.start()
+            #expect(await eventually { s.phase == .live })
+            #expect(await eventually { room.doc.text == "draft hello" })
+            #expect(s.crdtEpoch == "e7")
+            s.destroy()
+            #expect(store.load(key)?.meta.crdtEpoch == "e7")
+            try? FileManager.default.removeItem(at: store.root)
+        }
+
+        @Test("pre-epoch replica of another lineage still fails the fallback even if the server has an epoch")
+        func epochUnknownFallbackStillGuards() async throws {
+            let store = ReplicaStore(root: tempReplicaRoot())
+            try await primeWithPendingEdit(store, FakeRoom(text: "hello world"), epoch: nil)
+            let roomB = FakeRoom(text: "hello world")
+            let connector = FakeConnector(room: roomB)
+            connector.ticketEpoch = "e9"
+            let s = offlineSession(connector, store, key)
+            s.start()
+            #expect(await eventually { s.termination == .lineageChanged })
+            #expect(s.crdtEpoch == nil)
+            try? FileManager.default.removeItem(at: store.root)
+        }
+
+        @Test("a snapshot from another epoch is never merged into the replica")
+        func snapshotOfOtherEpochIgnored() async throws {
+            let store = ReplicaStore(root: tempReplicaRoot())
+            let room = FakeRoom(text: "hello")
+            let connector = FakeConnector(room: room)
+            connector.ticketEpoch = "e1"
+            let s = offlineSession(connector, store, key)
+            s.start()
+            #expect(await eventually { s.phase == .live })
+            let other = FakeRoom(text: "other lineage")
+            s.mergeSnapshotState(other.doc.encodeStateAsUpdate(), crdtEpoch: "e2")
+            #expect(s.text == "hello")
+            s.mergeSnapshotState(room.doc.encodeStateAsUpdate(), crdtEpoch: "e1")
+            #expect(s.text == "hello")
             s.destroy()
             try? FileManager.default.removeItem(at: store.root)
         }

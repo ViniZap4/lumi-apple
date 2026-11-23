@@ -70,12 +70,18 @@ final class FakeTransport: SyncTransport, @unchecked Sendable {
     private let continuation: AsyncStream<TransportEvent>.Continuation
     weak var room: FakeRoom?
     private(set) var closed = false
+    let crdtEpoch: String?
+    let usedTicket: Bool
+    /// Code passed to `close(code:reason:)` (client-side close).
+    private(set) var clientCloseCode: Int?
 
-    init(room: FakeRoom?) {
+    init(room: FakeRoom?, crdtEpoch: String? = nil, usedTicket: Bool = false) {
         var c: AsyncStream<TransportEvent>.Continuation!
         events = AsyncStream { c = $0 }
         continuation = c
         self.room = room
+        self.crdtEpoch = crdtEpoch
+        self.usedTicket = usedTicket
     }
 
     func push(_ e: TransportEvent) { continuation.yield(e) }
@@ -89,6 +95,11 @@ final class FakeTransport: SyncTransport, @unchecked Sendable {
 
     func close() {
         MainActor.assumeIsolated { drop(code: 1000) }
+    }
+
+    func close(code: Int, reason: String?) {
+        clientCloseCode = code
+        MainActor.assumeIsolated { drop(code: code) }
     }
 
     /// Server-side close (network drop = nil code, or a close code).
@@ -110,6 +121,10 @@ final class FakeConnector: SyncConnector, @unchecked Sendable {
     /// Network down: every connect fails transiently (lineage probe too).
     var offline = false
     var lineage: NoteLineageProbe = .unsupported
+    /// `crdt_epoch` of the ws-ticket each connection is dialled with
+    /// (nil = pre-epoch server). Setting it also marks ticket auth.
+    var ticketEpoch: String?
+    var usesTicket = false
     private(set) var lineageProbes = 0
     private(set) var transports: [FakeTransport] = []
     private(set) var probes = 0
@@ -119,7 +134,9 @@ final class FakeConnector: SyncConnector, @unchecked Sendable {
     func connect(vaultID: UUID, noteID: String) async throws(SyncConnectError) -> any SyncTransport {
         if offline { throw .transient("offline") }
         let mode = modes.isEmpty ? .join : modes.removeFirst()
-        let t = await MainActor.run { FakeTransport(room: room) }
+        let epoch = ticketEpoch
+        let ticket = usesTicket || epoch != nil
+        let t = await MainActor.run { FakeTransport(room: room, crdtEpoch: epoch, usedTicket: ticket) }
         transports.append(t)
         switch mode {
         case .join:
@@ -250,6 +267,50 @@ extension YrsSerial {
                 #expect(unauthorized == (expected == .unauthorized))
                 #expect(!s.isEditable)
             }
+        }
+
+        @Test("live session reconnecting into a recreated note (new ticket epoch): lineageChanged, 4409")
+        func reconnectIntoNewEpoch() async throws {
+            let room = FakeRoom(text: "hello")
+            let connector = FakeConnector(room: room)
+            connector.ticketEpoch = "e1"
+            let s = makeSession(connector)
+            s.backoff = { _ in 0.01 }
+            var reported: ReplicaConflict?
+            s.onReplicaConflict = { reported = $0 }
+            s.start()
+            #expect(await eventually { s.phase == .live })
+            #expect(s.crdtEpoch == "e1")
+            connector.ticketEpoch = "e2"
+            connector.transports.last?.drop(code: nil)
+            #expect(await eventually { s.termination == .lineageChanged })
+            #expect(connector.transports.last?.clientCloseCode == ReplicaLineage.closeLineageChanged)
+            #expect(reported?.reason == .lineageChanged)
+            #expect(!s.isEditable)
+        }
+
+        @Test("4401 on a ticket connection re-mints once (stale ticket); a second 4401 is fatal")
+        func staleTicketRetry() async throws {
+            let room = FakeRoom(text: "x")
+            let connector = FakeConnector(room: room)
+            connector.usesTicket = true
+            connector.modes = [.closeBeforeOpen(4401), .join]
+            let s = makeSession(connector)
+            s.backoff = { _ in 0.01 }
+            s.start()
+            #expect(await eventually { s.phase == .live })
+            #expect(s.termination == nil)
+            #expect(connector.transports.count == 2)
+            s.destroy()
+
+            let c2 = FakeConnector(room: room)
+            c2.usesTicket = true
+            c2.modes = [.closeBeforeOpen(4401), .closeBeforeOpen(4401)]
+            let s2 = makeSession(c2)
+            s2.backoff = { _ in 0.01 }
+            s2.start()
+            #expect(await eventually { s2.termination == .unauthorized })
+            #expect(c2.transports.count == 2)
         }
 
         @Test("two never-opened attempts probe auth; a 401 probe terminates as unauthorized")

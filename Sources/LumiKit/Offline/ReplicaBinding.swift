@@ -59,13 +59,17 @@ public final class ReplicaBinding {
         enqueue(.remote(update))
     }
 
-    public func recordState(dirty: Bool, knownServerSV: Data, noteCreatedAt: Date?) {
-        let next = ReplicaState(dirty: dirty, knownServerSV: knownServerSV, noteCreatedAt: noteCreatedAt ?? meta.noteCreatedAt)
-        let cur = ReplicaState(dirty: meta.dirty, knownServerSV: meta.knownServerSV, noteCreatedAt: meta.noteCreatedAt)
+    public func recordState(dirty: Bool, knownServerSV: Data, noteCreatedAt: Date?, crdtEpoch: String? = nil) {
+        let next = ReplicaState(dirty: dirty, knownServerSV: knownServerSV,
+                                noteCreatedAt: noteCreatedAt ?? meta.noteCreatedAt,
+                                crdtEpoch: crdtEpoch ?? meta.crdtEpoch)
+        let cur = ReplicaState(dirty: meta.dirty, knownServerSV: meta.knownServerSV,
+                               noteCreatedAt: meta.noteCreatedAt, crdtEpoch: meta.crdtEpoch)
         guard next != cur else { return }
         meta.dirty = next.dirty
         meta.knownServerSV = next.knownServerSV
         meta.noteCreatedAt = next.noteCreatedAt
+        meta.crdtEpoch = next.crdtEpoch
         guard persisted else { return }
         enqueue(.state(next))
     }

@@ -20,9 +20,14 @@ import Observation
 /// restore that doc"; §11 Apple): with a `ReplicaBinding` the doc is
 /// persisted after the first SyncStep2 and restored on the next open,
 /// which starts editable in `offline` before any network. On connect the
-/// session waits for the server's SyncStep1 and runs the lineage guard
-/// (`ReplicaLineage`) before sending anything: a replica from another
-/// lineage is never merged (`.lineageChanged` + `ReplicaConflict`).
+/// session runs the lineage guard (`ReplicaLineage`) before sending
+/// anything: the server's `crdt_epoch` (note lookup before dialing, then
+/// the ws-ticket of each connection) decides when both sides know one;
+/// otherwise `created_at` + the server SyncStep1's state-vector dominance.
+/// A replica from another lineage is never merged (`.lineageChanged` +
+/// `ReplicaConflict`, socket closed with client-side 4409). The epoch is
+/// also checked on every reconnect of a live session, so an in-memory
+/// doc is never merged into a note recreated while we were offline.
 ///
 /// **Pending** (`hasPendingLocalChanges`): set by every local update,
 /// persisted with the replica, cleared by an acknowledged round-trip —
@@ -76,6 +81,16 @@ public final class NoteSyncSession: CollaborativeDocument {
     @ObservationIgnored private var stampChecked = false
     @ObservationIgnored private var knownServerSV = StateVector()
     @ObservationIgnored private var noteCreatedAt: Date?
+    /// Server lineage (`crdt_epoch`) this replica belongs to; nil until
+    /// learnt (pre-epoch server / replica persisted before the upgrade).
+    @ObservationIgnored public private(set) var crdtEpoch: String?
+    /// Epoch of the current connection's ticket, adopted once the
+    /// lineage is verified.
+    @ObservationIgnored private var pendingEpoch: String?
+    /// The current/last connection authenticated with a ws-ticket.
+    @ObservationIgnored private var lastUsedTicket = false
+    /// One re-mint after a 4401 on a ticket connection (stale ticket).
+    @ObservationIgnored private var ticketRetried = false
     @ObservationIgnored private var localSeq = 0
     @ObservationIgnored private var ackedSeq = 0
     /// Outstanding SyncStep1 probes on the current socket, in send order.
@@ -137,6 +152,7 @@ public final class NoteSyncSession: CollaborativeDocument {
         lineageVerified = false
         knownServerSV = (try? StateVector(decoding: stored.meta.knownServerSV)) ?? StateVector()
         noteCreatedAt = stored.meta.noteCreatedAt
+        crdtEpoch = ReplicaLineage.normalized(stored.meta.crdtEpoch)
         hasPendingLocalChanges = stored.meta.dirty
         // A pending flag from disk counts as one unacknowledged edit.
         localSeq = stored.meta.dirty ? 1 : 0
@@ -263,10 +279,13 @@ public final class NoteSyncSession: CollaborativeDocument {
 
     /// Pull-to-refresh (§5): merge the REST snapshot's full `state` into
     /// the kept replica. Never replaces the doc (V8).
-    public func mergeSnapshotState(_ state: Data) {
+    public func mergeSnapshotState(_ state: Data, crdtEpoch serverEpoch: String? = nil) {
         // A restored replica merges nothing until the lineage guard
         // passed on the socket: the REST state may be another lineage.
         guard !destroyed, hasSynced, lineageVerified, !state.isEmpty else { return }
+        // A snapshot of another lineage is never merged (the socket's
+        // epoch check reports the conflict).
+        guard ReplicaLineage.compareEpoch(replica: crdtEpoch, server: serverEpoch) != .changed else { return }
         applyRemoteUpdate(state)
     }
 
@@ -276,14 +295,27 @@ public final class NoteSyncSession: CollaborativeDocument {
         // Lineage stamp before any frame of a persisted replica is sent.
         if replica != nil, !stampChecked {
             switch await connector.noteLineage(vaultID: vaultID, noteID: noteID) {
-            case .createdAt(let stamp):
+            case .note(let stamp, let epoch):
                 guard !destroyed, !Task.isCancelled else { return }
-                if !lineageVerified, let mine = noteCreatedAt, !ReplicaLineage.sameStamp(mine, stamp) {
+                var mismatch = false
+                switch ReplicaLineage.compareEpoch(replica: crdtEpoch, server: epoch) {
+                case .changed:
+                    mismatch = true
+                case .same:
+                    // Epoch decides alone: no state-vector check needed.
+                    lineageVerified = true
+                case .unknown:
+                    if !lineageVerified, let mine = noteCreatedAt, let stamp,
+                       !ReplicaLineage.sameStamp(mine, stamp) {
+                        mismatch = true
+                    }
+                }
+                if mismatch {
                     connectTask = nil
                     replicaMismatch(.lineageChanged)
                     return
                 }
-                noteCreatedAt = stamp
+                if let stamp { noteCreatedAt = stamp }
                 stampChecked = true
                 persistState()
             case .notFound:
@@ -328,6 +360,22 @@ public final class NoteSyncSession: CollaborativeDocument {
             transport.close()
             return
         }
+        lastUsedTicket = transport.usedTicket
+        // The ticket names the lineage of the doc this socket joins.
+        let ticketEpoch = ReplicaLineage.normalized(transport.crdtEpoch)
+        switch ReplicaLineage.compareEpoch(replica: crdtEpoch, server: ticketEpoch) {
+        case .changed:
+            connectTask = nil
+            transport.close(code: ReplicaLineage.closeLineageChanged, reason: "lineage changed")
+            replicaMismatch(.lineageChanged)
+            return
+        case .same:
+            lineageVerified = true
+        case .unknown:
+            break
+        }
+        pendingEpoch = ticketEpoch
+        if lineageVerified { adoptPendingEpoch() }
         self.transport = transport
         var opened = false
         var closeCode: Int?
@@ -377,7 +425,16 @@ public final class NoteSyncSession: CollaborativeDocument {
         awareness.clearRemotes()
         peers = []
         switch code {
-        case 4401: terminate(.unauthorized); return
+        case 4401:
+            // A ticket connection may just have presented a stale ticket
+            // (lineage changed between mint and redeem): re-mint once. A
+            // dead session then fails at the ticket endpoint (401).
+            if lastUsedTicket && !ticketRetried {
+                ticketRetried = true
+            } else {
+                terminate(.unauthorized)
+                return
+            }
         case 4403: terminate(.forbidden); return
         case 4404: noteGone(); return
         case 1008: terminate(.policy); return
@@ -422,7 +479,7 @@ public final class NoteSyncSession: CollaborativeDocument {
 
     /// The persisted replica belongs to another lineage: never merge.
     private func replicaMismatch(_ reason: ReplicaConflict.Reason) {
-        transport?.close()
+        transport?.close(code: ReplicaLineage.closeLineageChanged, reason: "lineage changed")
         transport = nil
         transportOpen = false
         probes.removeAll()
@@ -461,6 +518,7 @@ public final class NoteSyncSession: CollaborativeDocument {
             switch msg.syncSub {
             case YProtocol.syncStep1:
                 let serverSV = try? StateVector(decoding: msg.body)
+                ticketRetried = false
                 if !lineageVerified {
                     guard let serverSV else {
                         transport.close() // malformed: retry the join
@@ -471,6 +529,7 @@ public final class NoteSyncSession: CollaborativeDocument {
                         return
                     }
                     lineageVerified = true
+                    adoptPendingEpoch()
                 }
                 if let serverSV {
                     knownServerSV = knownServerSV.merged(with: serverSV)
@@ -553,9 +612,18 @@ public final class NoteSyncSession: CollaborativeDocument {
         persistState()
     }
 
+    /// Record the current connection's epoch once the lineage is proven
+    /// (fresh sessions at once; restored pre-epoch replicas after the
+    /// fallback check), so later checks are exact.
+    private func adoptPendingEpoch() {
+        guard crdtEpoch == nil, let e = pendingEpoch else { return }
+        crdtEpoch = e
+        persistState()
+    }
+
     private func persistState() {
         replica?.recordState(dirty: hasPendingLocalChanges, knownServerSV: knownServerSV.encoded(),
-                             noteCreatedAt: noteCreatedAt)
+                             noteCreatedAt: noteCreatedAt, crdtEpoch: crdtEpoch)
     }
 
     private func sendSyncUpdate(_ update: Data) {

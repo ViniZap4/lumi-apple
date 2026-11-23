@@ -13,12 +13,18 @@ public struct RemoteNote: Codable, Sendable, Equatable, Hashable, Identifiable {
     public let title: String
     public let createdAt: Date?
     public let updatedAt: Date?
+    /// Opaque CRDT lineage id (`crdt_epoch`): changes whenever the server
+    /// starts a new CRDT history for this note id (create, delete +
+    /// recreate, init from file). Compare by equality only. Nil on
+    /// servers predating it.
+    public let crdtEpoch: String?
 
     enum CodingKeys: String, CodingKey {
         case id, path, title
         case vaultID = "vault_id"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case crdtEpoch = "crdt_epoch"
     }
 
     public init(
@@ -27,7 +33,8 @@ public struct RemoteNote: Codable, Sendable, Equatable, Hashable, Identifiable {
         path: String,
         title: String,
         createdAt: Date?,
-        updatedAt: Date?
+        updatedAt: Date?,
+        crdtEpoch: String? = nil
     ) {
         self.id = id
         self.vaultID = vaultID
@@ -35,6 +42,7 @@ public struct RemoteNote: Codable, Sendable, Equatable, Hashable, Identifiable {
         self.title = title
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.crdtEpoch = crdtEpoch
     }
 
     public init(from decoder: Decoder) throws {
@@ -53,6 +61,12 @@ public struct RemoteNote: Codable, Sendable, Equatable, Hashable, Identifiable {
         } else {
             self.updatedAt = nil
         }
+        self.crdtEpoch = Self.nonEmpty(try c.decodeIfPresent(String.self, forKey: .crdtEpoch))
+    }
+
+    static func nonEmpty(_ s: String?) -> String? {
+        guard let s, !s.isEmpty else { return nil }
+        return s
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -69,6 +83,7 @@ public struct RemoteNote: Codable, Sendable, Equatable, Hashable, Identifiable {
         if let updatedAt {
             try c.encode(updatedAt.ISO8601Format(), forKey: .updatedAt)
         }
+        try c.encodeIfPresent(crdtEpoch, forKey: .crdtEpoch)
     }
 }
 
@@ -133,18 +148,24 @@ public struct RemoteNoteSnapshot: Decodable, Sendable, Equatable, Identifiable {
     /// merges into a live replica. Absent on `/diff` responses and on
     /// servers predating wave 1b.
     public let state: String?
+    /// CRDT lineage of the doc this snapshot was read from (`crdt_epoch`).
+    /// Nil on servers predating it.
+    public let crdtEpoch: String?
 
     enum CodingKeys: String, CodingKey {
         case id, path, text, state
         case vectorClock = "vector_clock"
+        case crdtEpoch = "crdt_epoch"
     }
 
-    public init(id: String, path: String, text: String, vectorClock: String, state: String? = nil) {
+    public init(id: String, path: String, text: String, vectorClock: String, state: String? = nil,
+                crdtEpoch: String? = nil) {
         self.id = id
         self.path = path
         self.text = text
         self.vectorClock = vectorClock
         self.state = state
+        self.crdtEpoch = crdtEpoch
     }
 
     /// Decoded `state`, nil when absent or malformed.
@@ -159,14 +180,21 @@ public struct RemoteNoteSnapshot: Decodable, Sendable, Equatable, Identifiable {
 public struct WSTicket: Decodable, Sendable, Equatable {
     public let ticket: String
     public let expiresAt: String?
+    /// CRDT lineage the ticket was minted for (`crdt_epoch`). The server
+    /// rejects the upgrade (4401 `ticket_stale`) if the lineage changed
+    /// before redeem, so the doc joined with this ticket IS this epoch.
+    /// Nil on servers predating it.
+    public let crdtEpoch: String?
 
     enum CodingKeys: String, CodingKey {
         case ticket
         case expiresAt = "expires_at"
+        case crdtEpoch = "crdt_epoch"
     }
 
-    public init(ticket: String, expiresAt: String? = nil) {
+    public init(ticket: String, expiresAt: String? = nil, crdtEpoch: String? = nil) {
         self.ticket = ticket
         self.expiresAt = expiresAt
+        self.crdtEpoch = crdtEpoch
     }
 }
