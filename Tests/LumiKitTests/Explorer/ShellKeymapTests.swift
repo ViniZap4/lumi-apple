@@ -113,3 +113,76 @@ struct FuzzyMatchTests {
         #expect(ranked.first == "Book settings")
     }
 }
+
+@Suite("Explorer — pane keys and preview reader")
+struct ShellPaneKeymapTests {
+    private func feed(_ keys: [KeyStroke], context: ShellKeymap.Context = .explorer, panes: Bool = true) -> [ShellAction?] {
+        var map = ShellKeymap()
+        map.ctrlHJKLPanes = panes
+        var t: TimeInterval = 0
+        return keys.map { k in
+            defer { t += 0.05 }
+            return map.feed(k, context: context, now: t)
+        }
+    }
+
+    private func ctrl(_ c: String) -> KeyStroke { .char(c, control: true) }
+    private func chars(_ s: String) -> [KeyStroke] { s.map { .char(String($0)) } }
+
+    @Test("⌃h ⌃j ⌃k ⌃l are pane keys in every shell context")
+    func ctrlHJKL() {
+        for ctx: ShellKeymap.Context in [.explorer, .reader, .preview, .sidebar] {
+            #expect(feed(["h", "j", "k", "l"].map(ctrl), context: ctx) ==
+                [.paneKey(.left), .paneKey(.down), .paneKey(.up), .paneKey(.right)])
+        }
+        // ⌃n / ⌃p still move.
+        #expect(feed([ctrl("n"), ctrl("p")]) == [.move(1), .move(-1)])
+    }
+
+    @Test("setting off: ⌃hjkl unbound, ⌃w chords still work")
+    func settingOff() {
+        #expect(feed([ctrl("h"), ctrl("j")], panes: false) == [nil, nil])
+        #expect(feed([ctrl("w"), .char("l")], panes: false) == [.pending, .pane(.move(.right))])
+    }
+
+    @Test("⌃w chords: h j k l, ⌃h, arrows, w W p, unknown swallowed")
+    func ctrlW() {
+        #expect(feed([ctrl("w"), .char("h")]) == [.pending, .pane(.move(.left))])
+        #expect(feed([ctrl("w"), ctrl("j")]) == [.pending, .pane(.move(.down))])
+        #expect(feed([ctrl("w"), .key(.up)]) == [.pending, .pane(.move(.up))])
+        #expect(feed([ctrl("w"), .char("w")]) == [.pending, .pane(.next)])
+        #expect(feed([ctrl("w"), ctrl("w")]) == [.pending, .pane(.next)])
+        #expect(feed([ctrl("w"), .char("W")]) == [.pending, .pane(.previous)])
+        #expect(feed([ctrl("w"), .char("p")]) == [.pending, .pane(.last)])
+        #expect(feed([ctrl("w"), .char("x"), .char("j")]) == [.pending, .pending, .move(1)])
+    }
+
+    @Test("^W shows as pending")
+    func pendingDisplay() {
+        var map = ShellKeymap()
+        _ = map.feed(ctrl("w"), context: .explorer, now: 0)
+        #expect(map.pendingDisplay == "^W")
+    }
+
+    @Test("preview reader keymap")
+    func preview() {
+        #expect(feed(chars("jkdubGyf/nN{}"), context: .preview) ==
+            [.move(1), .move(-1), .halfPage(1), .halfPage(-1), .page(-1), .bottom, .yank, .hints, .find, .nextMatch, .prevMatch, .prevHeading, .nextHeading])
+        #expect(feed(chars("gg"), context: .preview) == [.pending, .top])
+        #expect(feed(chars("[[]]"), context: .preview) == [.pending, .prevHeading, .pending, .nextHeading])
+        #expect(feed(chars("5j"), context: .preview) == [.pending, .move(5)])
+        #expect(feed(chars(" "), context: .preview) == [.page(1)])
+        #expect(feed([ctrl("d"), ctrl("u")], context: .preview) == [.halfPage(1), .halfPage(-1)])
+        #expect(feed(chars("qhie"), context: .preview) == [.close, .parent, .edit, .edit])
+        #expect(feed([.key(.escape), .key(.enter)], context: .preview) == [.clearOrBack, .open])
+        #expect(feed(chars("?:"), context: .preview) == [.help, .command])
+        // The reader keeps [ ] for books and f for page.
+        #expect(feed(chars("[f/"), context: .reader) == [.prevBook, .page(1), .find])
+    }
+
+    @Test("sidebar: moves and opens, no file ops")
+    func sidebar() {
+        #expect(feed(chars("jkl"), context: .sidebar) == [.move(1), .move(-1), .open])
+        #expect(feed(chars("adr"), context: .sidebar) == [nil, nil, nil])
+    }
+}

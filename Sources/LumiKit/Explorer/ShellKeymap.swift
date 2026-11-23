@@ -71,6 +71,16 @@ public enum ShellAction: Sendable, Equatable {
     case settings        // , (explorer)
     case hints           // f (explorer) / F (explorer, reader)
     case contextMenu     // Shift+F10
+    // Panes (vim windows / vim-tmux-navigator)
+    /// `⌃h ⌃j ⌃k ⌃l`: move focus that way; when no pane lies there the
+    /// key keeps its ordinary meaning (`⌃j`/`⌃k` move / scroll).
+    case paneKey(PaneDirection)
+    /// `⌃w h/j/k/l`, `⌃w w`, `⌃w W`, `⌃w p`.
+    case pane(PaneCommand)
+    // Reading (reader / split preview)
+    case nextHeading     // } ]]
+    case prevHeading     // { [[
+    case find            // / (reader, preview)
     /// First key of a chord (`g`, `z`) or a count digit: consumed, no-op.
     case pending
 }
@@ -80,7 +90,20 @@ public enum ShellAction: Sendable, Equatable {
 /// yazi keymap (`a` create, `r` rename, `d` delete, `y`/`p`, `.`, `~`).
 /// A count prefix (`5j`) multiplies movement.
 public struct ShellKeymap: Sendable {
-    public enum Context: Sendable, Equatable { case explorer, reader }
+    public enum Context: Sendable, Equatable {
+        case explorer, reader
+        /// The split preview beside the editor, focused for reading.
+        case preview
+        /// The books sidebar, focused.
+        case sidebar
+    }
+
+    /// `⌃h ⌃j ⌃k ⌃l` move between panes (setting, default on). `⌃w`
+    /// chords always do.
+    public var ctrlHJKLPanes = true
+
+    /// Prefix sentinel for `⌃w`.
+    static let ctrlW: Character = "\u{17}"
 
     /// Seconds a `g`/`z` prefix stays armed (web: 500 ms).
     public static let chordTimeout: TimeInterval = 0.8
@@ -99,7 +122,7 @@ public struct ShellKeymap: Sendable {
     /// Keys typed but not yet resolved (`5`, `g`, `5g`) — the legend shows
     /// their continuations.
     public var pendingDisplay: String {
-        (count.map(String.init) ?? "") + (prefix.map { String($0) } ?? "")
+        (count.map(String.init) ?? "") + (prefix.map { $0 == Self.ctrlW ? "^W" : String($0) } ?? "")
     }
 
     /// Returns nil when the key is not bound in `context` (the caller lets
@@ -108,10 +131,22 @@ public struct ShellKeymap: Sendable {
         // Command-modified keys belong to the menu bar.
         if k.command || k.option { reset(); return nil }
 
+        // Second key of `⌃w` (vim waits for it; no timeout).
+        if prefix == Self.ctrlW {
+            reset()
+            return Self.windowCommand(k).map { .pane($0) } ?? .pending
+        }
+
         if k.control {
             reset()
             guard let c = k.chars?.lowercased() else { return nil }
             if let n = Int(c), (1...9).contains(n) { return .book(n) }
+            if c == "w" {
+                prefix = Self.ctrlW
+                prefixAt = now
+                return .pending
+            }
+            if ctrlHJKLPanes, let d = Self.direction(c) { return .paneKey(d) }
             switch c {
             case "d": return .halfPage(1)
             case "u": return .halfPage(-1)
@@ -156,6 +191,8 @@ public struct ShellKeymap: Sendable {
                     case "e": count = nil; return .bottom
                     default: break
                     }
+                } else if p == "[" || p == "]" {
+                    if ch == p { count = nil; return p == "[" ? .prevHeading : .nextHeading }
                 } else if p == "z" {
                     switch ch {
                     case "h": count = nil; return .home
@@ -170,6 +207,13 @@ public struct ShellKeymap: Sendable {
         // Count prefix (no digit is bound on its own; `0` only extends).
         if let d = Int(String(ch)), ch.isASCII, d > 0 || count != nil {
             count = min(9999, (count ?? 0) * 10 + d)
+            return .pending
+        }
+
+        if context == .preview, ch == " " { count = nil; return .page(1) }
+        if context == .preview, ch == "[" || ch == "]" {
+            prefix = ch
+            prefixAt = now
             return .pending
         }
 
@@ -224,8 +268,64 @@ public struct ShellKeymap: Sendable {
             case "f": return .page(1)
             case "b": return .page(-1)
             case "y": return .yank
+            case "/": return .find
+            case "n": return .nextMatch
+            case "N": return .prevMatch
+            case "{": return .prevHeading
+            case "}": return .nextHeading
             default: return nil
             }
+        case .preview:
+            count = nil
+            switch ch {
+            case "q": return .close
+            case "d": return .halfPage(1)
+            case "u": return .halfPage(-1)
+            case "b": return .page(-1)
+            case "y": return .yank
+            case "f": return .hints
+            case "/": return .find
+            case "n": return .nextMatch
+            case "N": return .prevMatch
+            case "{": return .prevHeading
+            case "}": return .nextHeading
+            default: return nil
+            }
+        case .sidebar:
+            count = nil
+            return nil
+        }
+    }
+
+    static func direction(_ c: String) -> PaneDirection? {
+        switch c {
+        case "h": return .left
+        case "j": return .down
+        case "k": return .up
+        case "l": return .right
+        default: return nil
+        }
+    }
+
+    /// The key after `⌃w` (vim `CTRL-W h` …, also with ⌃ held).
+    static func windowCommand(_ k: KeyStroke) -> PaneCommand? {
+        if let special = k.special {
+            switch special {
+            case .left, .backspace: return .move(.left)
+            case .right: return .move(.right)
+            case .up: return .move(.up)
+            case .down: return .move(.down)
+            default: return nil
+            }
+        }
+        guard let s = k.chars, s.count == 1 else { return nil }
+        let c = k.control ? s.lowercased() : s
+        if let d = direction(c) { return .move(d) }
+        switch c {
+        case "w": return .next
+        case "W": return .previous
+        case "p": return .last
+        default: return nil
         }
     }
 

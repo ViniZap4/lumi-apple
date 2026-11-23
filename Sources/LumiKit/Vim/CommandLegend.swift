@@ -3,6 +3,10 @@ import Foundation
 /// Where the keyboard is: decides which keys the command legend shows.
 public enum LegendContext: String, Sendable, Hashable, CaseIterable {
     case explorer, reader
+    /// The split preview, focused for keyboard reading.
+    case preview
+    /// The books sidebar, focused.
+    case sidebar
     case normal, insert, replace
     case visual, visualLine, visualBlock
     case operatorPending
@@ -51,30 +55,53 @@ public enum CommandLegend {
         .init("gg", "top"), .init("ge", "bottom"), .init("gh", "book root"), .init("g1–9", "book n"),
     ]
     static let shellZ: [LegendItem] = [.init("zp", "preview"), .init("zh", "book root")]
+    /// After `⌃w` (shell or editor).
+    public static let windowCommands: [LegendItem] = [
+        .init("h j k l", "pane that way"), .init("w W", "next/prev pane"), .init("p", "last pane"), .init("Esc", "cancel"),
+    ]
+    static let headingChord: [LegendItem] = [.init("[[", "prev heading"), .init("]]", "next heading")]
 
-    /// Explorer / reader legend; `pending` is the shell keymap's pending
-    /// keys (`g`, `z`, a count).
-    public static func shellItems(_ ctx: LegendContext, pending: String = "") -> [LegendItem] {
+    /// Explorer / reader / preview / sidebar legend; `pending` is the
+    /// shell keymap's pending keys (`g`, `z`, `^W`, a count). `pane` is
+    /// the pane hint the host adds (`⌃h⌃l panes`) when it applies.
+    public static func shellItems(_ ctx: LegendContext, pending: String = "", pane: LegendItem? = nil) -> [LegendItem] {
         let digits = pending.prefix(while: { $0.isASCII && $0.isNumber })
         let chord = pending.dropFirst(digits.count)
+        if chord == "^W" { return windowCommands }
         if chord == "g" { return shellG }
         if chord == "z" { return shellZ }
+        if chord == "[" || chord == "]" { return headingChord }
         if !digits.isEmpty {
             return ctx == .explorer
                 ? [.init("\(digits)j", "down \(digits)"), .init("\(digits)k", "up \(digits)"), .init("Esc", "cancel")]
                 : [.init("\(digits)j", "scroll \(digits)"), .init("\(digits)k", "scroll \(digits) up")]
         }
-        if ctx == .explorer {
-            return [
+        var out: [LegendItem]
+        switch ctx {
+        case .explorer:
+            out = [
                 .init("j k", "move"), .init("h l", "folder"), .init("⏎", "open"), .init("e", "edit"),
                 .init("/", "filter"), .init("a", "new"), .init("r", "rename"), .init("d", "delete"),
                 .init("y p", "copy"), .init("H L", "history"), .init("f", "hints"), .init("space", "commands"), .init("?", "keys"),
             ]
+        case .preview:
+            out = [
+                .init("j k", "scroll"), .init("d u", "half page"), .init("{ }", "heading"), .init("gg G", "top/end"),
+                .init("/ n", "find"), .init("f", "links"), .init("y", "copy"), .init("q ⌃h", "editor"), .init("?", "keys"),
+            ]
+        case .sidebar:
+            out = [
+                .init("j k", "move"), .init("⏎ l", "open book"), .init("gg G", "top/end"), .init("g1–9", "book n"),
+                .init("Esc ⌃l", "back"), .init("?", "keys"),
+            ]
+        default:
+            out = [
+                .init("j k", "scroll"), .init("d u", "half page"), .init("gg G", "top/end"), .init("e i", "edit"),
+                .init("/ n", "find"), .init("q h", "back"), .init("y", "copy"), .init("F", "hints"), .init("space", "commands"), .init("?", "keys"),
+            ]
         }
-        return [
-            .init("j k", "scroll"), .init("d u", "half page"), .init("gg G", "top/end"), .init("e i", "edit"),
-            .init("q h", "back"), .init("y", "copy"), .init("F", "hints"), .init("space", "commands"), .init("?", "keys"),
-        ]
+        if let pane { out.insert(pane, at: out.count - 1) }
+        return out
     }
 
     // MARK: Editor (vim)
@@ -105,7 +132,7 @@ public enum CommandLegend {
     /// Legend for the editor (and the generic overlays: palette, prompt …).
     public static func items(_ ctx: LegendContext, pending: VimPendingInfo = VimPendingInfo(), extras: Extras = Extras()) -> [LegendItem] {
         switch ctx {
-        case .explorer, .reader:
+        case .explorer, .reader, .preview, .sidebar:
             return shellItems(ctx, pending: pending.display)
         default:
             break
@@ -174,7 +201,7 @@ public enum CommandLegend {
             return [.init("j k", "move"), .init("⏎ l", "open"), .init("g1–9", "book n"), .init("R", "refresh"), .init("Esc", "back")]
         case .help:
             return [.init("any key", "close")]
-        case .explorer, .reader:
+        case .explorer, .reader, .preview, .sidebar:
             return []
         }
     }

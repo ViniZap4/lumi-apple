@@ -224,6 +224,21 @@ public final class LumiPreferences {
         didSet { store.set(Keys.splitPreview, splitPreview) }
     }
 
+    /// `⌃h ⌃j ⌃k ⌃l` move focus between panes (sidebar, explorer /
+    /// reader / editor, split preview) — vim-tmux-navigator. In the
+    /// editor only in normal / visual mode and only when no `.vimrc`
+    /// mapping claims the key; `⌃w h/j/k/l` always works.
+    public var ctrlHJKLPanes: Bool {
+        didSet { store.set(Keys.ctrlHJKLPanes, ctrlHJKLPanes) }
+    }
+
+    /// Leaving the focused split preview puts the editor cursor on the
+    /// source line at the top of the preview (the editor viewport follows
+    /// the preview's scroll). Off by default (web parity).
+    public var previewReturnMovesCursor: Bool {
+        didSet { store.set(Keys.previewReturnMovesCursor, previewReturnMovesCursor) }
+    }
+
     /// Split preview: the editor's share of the width (0.25…0.75).
     public var splitPreviewRatio: Double {
         didSet {
@@ -286,6 +301,8 @@ public final class LumiPreferences {
         self.explorerShowPreview = store.bool(Keys.explorerShowPreview) ?? true
         self.splitPreview = store.bool(Keys.splitPreview) ?? false
         self.splitPreviewRatio = ScrollSync.clampRatio(store.double(Keys.splitPreviewRatio) ?? 0.5)
+        self.ctrlHJKLPanes = store.bool(Keys.ctrlHJKLPanes) ?? true
+        self.previewReturnMovesCursor = store.bool(Keys.previewReturnMovesCursor) ?? false
         let rawTheme = store.string(Keys.themeMode) ?? ThemeMode.auto.rawValue
         self.themeMode = ThemeMode(rawValue: rawTheme) ?? .auto
         let rc = (try? String(contentsOf: store.vimrcURL, encoding: .utf8)).map(Vimrc.sanitize) ?? ""
@@ -349,6 +366,8 @@ public final class LumiPreferences {
         static let explorerShowPreview = "explorer_show_preview"
         static let splitPreview = "split_preview"
         static let splitPreviewRatio = "split_preview_ratio"
+        static let ctrlHJKLPanes = "ctrl_hjkl_panes"
+        static let previewReturnMovesCursor = "preview_return_moves_cursor"
     }
 
     /// UserDefaults keys used by builds <= F.36. Kept here only for the

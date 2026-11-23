@@ -39,3 +39,30 @@ struct VimrcPreferenceTests {
         #expect(reloaded.parsedVimrc.leader == ",")
     }
 }
+
+@Suite("Legend — panes and preview")
+struct PaneLegendTests {
+    @Test("preview and sidebar contexts have their own lines")
+    func contexts() {
+        let preview = CommandLegend.shellItems(.preview).map(\.keys)
+        #expect(preview.contains("{ }"))
+        #expect(preview.contains("q ⌃h"))
+        #expect(preview.last == "?")
+        let sidebar = CommandLegend.shellItems(.sidebar).map(\.keys)
+        #expect(sidebar.contains("⏎ l"))
+        #expect(CommandLegend.items(.preview).map(\.keys) == preview)
+    }
+
+    @Test("^W pending shows the window commands; [ shows heading jumps")
+    func chords() {
+        #expect(CommandLegend.shellItems(.explorer, pending: "^W") == CommandLegend.windowCommands)
+        #expect(CommandLegend.shellItems(.preview, pending: "[").map(\.keys) == ["[[", "]]"])
+    }
+
+    @Test("the pane hint lands before ?")
+    func paneItem() {
+        let items = CommandLegend.shellItems(.reader, pane: LegendItem("⌃h ⌃l", "panes"))
+        #expect(items[items.count - 2] == LegendItem("⌃h ⌃l", "panes"))
+        #expect(items.last?.keys == "?")
+    }
+}
