@@ -44,8 +44,8 @@ struct NoteBar: View {
                 }
                 .font(ShellFont.chrome)
                 .foregroundStyle(theme.textDim)
-                .frame(maxWidth: 220, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
+                // The title wins the space; a long folder path truncates.
+                .layoutPriority(-1)
             }
             if appState.renamingTitle {
                 TextField("title", text: $draft)
