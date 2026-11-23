@@ -62,10 +62,12 @@ public struct RemoteNote: Codable, Sendable, Equatable, Hashable, Identifiable {
         try c.encode(path, forKey: .path)
         try c.encode(title, forKey: .title)
         if let createdAt {
-            try c.encode(createdAt.ISO8601Format(.iso8601(timeZone: .gmt)), forKey: .createdAt)
+            // `.iso8601(timeZone:)` alone drops the `Z`, which the decoder
+            // then rejects; the default style round-trips.
+            try c.encode(createdAt.ISO8601Format(), forKey: .createdAt)
         }
         if let updatedAt {
-            try c.encode(updatedAt.ISO8601Format(.iso8601(timeZone: .gmt)), forKey: .updatedAt)
+            try c.encode(updatedAt.ISO8601Format(), forKey: .updatedAt)
         }
     }
 }
