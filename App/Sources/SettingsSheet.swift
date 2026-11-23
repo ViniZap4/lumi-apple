@@ -250,7 +250,7 @@ struct SettingsSheet: View {
             )
             toggleRow(
                 title: "Block cursor in normal mode",
-                detail: "Tinted block over the character under the cursor, like terminal vim.",
+                detail: "The cursor follows the mode: block in normal and visual, half block while an operator waits, underline in replace, bar in insert. Off keeps a bar everywhere.",
                 isOn: $prefs.vimBlockCursor
             )
             toggleRow(
@@ -275,6 +275,7 @@ struct SettingsSheet: View {
                 detail: "Soft wrap in the editor (vim's `wrap`). Off scrolls horizontally.",
                 isOn: $prefs.lineWrapping
             )
+            VimrcEditorRow(prefs: appState.preferences)
         }
     }
 
@@ -311,8 +312,8 @@ struct SettingsSheet: View {
         @Bindable var prefs = appState.preferences
         VStack(alignment: .leading, spacing: 14) {
             toggleRow(
-                title: "Key hints in the status line",
-                detail: "A short reminder (? keys, i edit, q back) at the right of the status line.",
+                title: "Command legend",
+                detail: "One line above the status bar with the keys that matter right now — explorer, reader, each vim mode, prompts — and the continuations while a key sequence is pending (g, z, d, \", counts, leader).",
                 isOn: $prefs.showKeybindsBar
             )
         }
@@ -481,6 +482,97 @@ private struct EscapeSequencesRow: View {
             error = nil
         case let .failure(e):
             error = e.message
+        }
+    }
+}
+
+/// Per-device `.vimrc` editor: live per-line diagnostics while typing,
+/// applied to every editor on Save (web parity). The text is parsed by
+/// `Vimrc` — a safe subset that never executes anything.
+private struct VimrcEditorRow: View {
+    @Bindable var prefs: LumiPreferences
+    @Environment(\.theme) private var theme
+    @State private var draft = ""
+    @State private var loaded = false
+
+    var body: some View {
+        let parsed = Vimrc.parse(draft)
+        let dirty = draft != prefs.vimrc
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(".vimrc")
+                    .font(.system(.body, design: .monospaced).weight(.semibold))
+                    .foregroundStyle(theme.text)
+                Spacer()
+                Text(dirty ? "unsaved" : "applied")
+                    .font(.caption)
+                    .foregroundStyle(dirty ? theme.warning : theme.textDim)
+            }
+            Text("Mappings (map, nnoremap, inoremap, vnoremap … unmap), let mapleader, and set number / relativenumber / wrap / expandtab / tabstop / shiftwidth. Parsed, never executed; saved on this device only.")
+                .font(.caption)
+                .foregroundStyle(theme.text.opacity(0.7))
+                .fixedSize(horizontal: false, vertical: true)
+            TextEditor(text: $draft)
+                .font(.system(size: 12, design: .monospaced))
+                .autocorrectionDisabled()
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                #endif
+                .scrollContentBackground(.hidden)
+                .padding(6)
+                .frame(minHeight: 150, maxHeight: 260)
+                .background(RoundedRectangle(cornerRadius: 6).fill(theme.background))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(theme.border, lineWidth: 0.5))
+            if !parsed.diagnostics.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(Array(parsed.diagnostics.enumerated()), id: \.offset) { _, d in
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text("L\(d.line)")
+                                .font(.system(.caption, design: .monospaced).weight(.semibold))
+                                .foregroundStyle(theme.textDim)
+                                .frame(minWidth: 30, alignment: .trailing)
+                            Text(d.severity.rawValue)
+                                .font(.system(.caption2, design: .monospaced).weight(.bold))
+                                .foregroundStyle(color(d.severity))
+                            Text(d.message)
+                                .font(.caption)
+                                .foregroundStyle(theme.text)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+            HStack(spacing: 10) {
+                Button("Save") { prefs.vimrc = draft }
+                    .disabled(!dirty)
+                    .keyboardShortcut("s", modifiers: .command)
+                Button("Revert") { draft = prefs.vimrc }
+                    .disabled(!dirty)
+                Button("Insert example") { draft = Vimrc.example }
+                    .disabled(!draft.isEmpty)
+                Spacer()
+                Text("\(parsed.maps.count) mapping\(parsed.maps.count == 1 ? "" : "s") · leader \(parsed.leader)\(parsed.errorCount > 0 ? " · \(parsed.errorCount) error\(parsed.errorCount == 1 ? "" : "s")" : "")")
+                    .font(.caption)
+                    .foregroundStyle(parsed.errorCount > 0 ? theme.error : theme.textDim)
+            }
+            .font(.callout)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(theme.overlayBackground))
+        .onAppear {
+            if !loaded {
+                draft = prefs.vimrc
+                loaded = true
+            }
+        }
+    }
+
+    private func color(_ s: VimrcDiagnostic.Severity) -> Color {
+        switch s {
+        case .error: return theme.error
+        case .warning: return theme.warning
+        case .info: return theme.info
         }
     }
 }

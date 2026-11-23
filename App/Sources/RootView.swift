@@ -121,6 +121,9 @@ struct ShellMain: View {
             #endif
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if appState.preferences.showKeybindsBar {
+                ShellLegendLine()
+            }
             ShellStatusLine()
         }
         .background(theme.background)

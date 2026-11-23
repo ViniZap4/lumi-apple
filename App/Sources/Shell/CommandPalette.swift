@@ -235,7 +235,10 @@ struct CommandPalette: View {
         }
         cmd("sidebar", "Toggle sidebar", "⌘\\", aliases: "panel") { appState.toggleSidebar() }
         cmd("theme", "Theme…", aliases: "colorscheme appearance") { appState.query(paletteFor: .themes) }
-        cmd("settings", "Settings", "⌘,", aliases: "preferences vim escape") { appState.showSettings = true }
+        cmd("settings", "Settings", "⌘,", aliases: "preferences vim escape vimrc") { appState.showSettings = true }
+        cmd("legend", appState.preferences.showKeybindsBar ? "Hide command legend" : "Show command legend", aliases: "view keys hints which-key") {
+            appState.preferences.showKeybindsBar.toggle()
+        }
         cmd("keys", "Keyboard shortcuts", "?", aliases: "help keymap") { appState.showHelp = true }
         cmd("offline-copies", "Offline copies…", aliases: "recover conflict pending export offline") {
             appState.showRecoveredNotes()

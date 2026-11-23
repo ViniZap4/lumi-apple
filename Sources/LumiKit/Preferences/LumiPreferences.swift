@@ -218,6 +218,26 @@ public final class LumiPreferences {
         didSet { store.set(Keys.explorerShowPreview, explorerShowPreview) }
     }
 
+    /// Per-device `.vimrc` — the safe subset (mappings, leader, a few
+    /// `set` options), parsed and never executed (`Vimrc`). Saved to
+    /// `~/.config/lumi/apple.vimrc`; editors pick up `parsedVimrc`.
+    public var vimrc: String {
+        didSet {
+            let clean = Vimrc.sanitize(vimrc)
+            if clean != vimrc {
+                vimrc = clean
+                return
+            }
+            parsedVimrc = Vimrc.parse(vimrc)
+            let url = store.vimrcURL
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? Data(vimrc.utf8).write(to: url, options: .atomic)
+        }
+    }
+
+    /// `vimrc`, parsed (diagnostics per line, mappings, options).
+    public private(set) var parsedVimrc: ParsedVimrc
+
     private let store: PreferencesStore
 
     public init(store: PreferencesStore = .shared) {
@@ -248,6 +268,9 @@ public final class LumiPreferences {
         self.explorerShowPreview = store.bool(Keys.explorerShowPreview) ?? true
         let rawTheme = store.string(Keys.themeMode) ?? ThemeMode.auto.rawValue
         self.themeMode = ThemeMode(rawValue: rawTheme) ?? .auto
+        let rc = (try? String(contentsOf: store.vimrcURL, encoding: .utf8)).map(Vimrc.sanitize) ?? ""
+        self.vimrc = rc
+        self.parsedVimrc = Vimrc.parse(rc)
     }
 
     /// One-shot migration of legacy `UserDefaults` values into the yaml

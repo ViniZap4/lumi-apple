@@ -34,6 +34,12 @@ public final class PreferencesStore: @unchecked Sendable {
         self.cache = [:]
     }
 
+    /// The per-device `.vimrc` lives next to this file (`apple.vimrc`):
+    /// multi-line text doesn't fit the flat yaml.
+    public var vimrcURL: URL {
+        fileURL.deletingLastPathComponent().appendingPathComponent("apple.vimrc", isDirectory: false)
+    }
+
     // MARK: - Typed reads
 
     public func string(_ key: String) -> String? {

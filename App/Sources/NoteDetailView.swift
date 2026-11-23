@@ -171,7 +171,11 @@ struct NoteDetailView: View {
                         jjEscapeEnabled: appState.preferences.jjEscapeMapping,
                         showLineNumbers: appState.preferences.showLineNumbers,
                         relativeLineNumbers: appState.preferences.relativeLineNumbers,
-                        options: appState.vimEditorOptions
+                        options: appState.vimEditorOptions,
+                        vimrc: appState.preferences.parsedVimrc,
+                        blockCursor: appState.preferences.vimBlockCursor,
+                        fileName: entry.relativePath,
+                        onStatusChange: { appState.liveVimStatus = $0 }
                     )
                     .readableEditorWidth()
                 } else {
@@ -202,12 +206,7 @@ struct NoteDetailView: View {
     }
 
     private var editModeColor: Color {
-        switch appState.liveVimMode {
-        case .insert: return theme.primary
-        case .visual: return theme.warning
-        case .commandLine: return theme.accent
-        case .normal: return theme.info
-        }
+        appState.liveVimMode.chromeColor(theme)
     }
 
     private func handleVimEffect(_ effect: VimEffect, editor: EditorState) {
@@ -234,6 +233,8 @@ struct NoteDetailView: View {
         case .close(force: true):
             editor.discard()
             appState.editorMode = .view
+        case .scrollCursor, .scrollLines, .displayLines:
+            break // handled by the editor view
         }
     }
 }
@@ -673,6 +674,8 @@ private struct VimModeBadge: View {
             return (vimMode.label, theme.background, theme.primary)
         case .visual:
             return (vimMode.label, theme.background, theme.warning)
+        case .replace:
+            return (vimMode.label, theme.background, theme.error)
         case .commandLine:
             return (vimMode.label, theme.background, theme.accent)
         }

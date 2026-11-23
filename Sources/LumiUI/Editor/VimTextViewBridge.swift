@@ -575,13 +575,13 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
 
     override func becomeFirstResponder() -> Bool {
         let ok = super.becomeFirstResponder()
-        DispatchQueue.main.async { [weak self] in self?.updateCursor() }
+        scheduleCursorUpdate()
         return ok
     }
 
     override func resignFirstResponder() -> Bool {
         let ok = super.resignFirstResponder()
-        DispatchQueue.main.async { [weak self] in self?.updateCursor() }
+        scheduleCursorUpdate()
         return ok
     }
 
@@ -599,9 +599,23 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
 
     @objc private func windowKeyChanged() { updateCursor() }
 
+    private var cursorUpdateScheduled = false
+
+    /// Coalesced, deferred update for layout-time callbacks (never force
+    /// TextKit layout from inside a layout pass).
+    private func scheduleCursorUpdate() {
+        guard !cursorUpdateScheduled else { return }
+        cursorUpdateScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.cursorUpdateScheduled = false
+            self.updateCursor()
+        }
+    }
+
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        if controller != nil { updateCursor() }
+        if controller != nil { scheduleCursorUpdate() }
     }
 
     // MARK: Viewport (H M L, page keys, zz, gj gk)
@@ -1078,10 +1092,19 @@ final class VimUIKitTextView: UITextView, EditorTextSurface {
         return ok
     }
 
+    private var lastLayoutWidth: CGFloat = 0
+    private var cursorUpdateScheduled = false
+
     override func layoutSubviews() {
         super.layoutSubviews()
-        if controller != nil, let c = controller, let rect = cellRect(for: c.cursorCharacterRange), cursorView.frame != rect, !cursorView.isHidden {
-            cursorView.frame = rect
+        // Re-place the cursor when the width (wrapping) changes — deferred,
+        // so TextKit layout is never forced from inside a layout pass.
+        guard controller != nil, bounds.width != lastLayoutWidth, !cursorUpdateScheduled else { return }
+        lastLayoutWidth = bounds.width
+        cursorUpdateScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            self?.cursorUpdateScheduled = false
+            self?.updateCursor()
         }
     }
 

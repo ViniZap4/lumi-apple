@@ -216,6 +216,13 @@ extension AppState {
     /// Route one key press. Returns false to let it through (text fields,
     /// the vim editor, sheets).
     func handleShellKey(_ k: KeyStroke) -> Bool {
+        let handled = routeShellKey(k)
+        let pending = keymap.pendingDisplay
+        if shellPending != pending { shellPending = pending }
+        return handled
+    }
+
+    private func routeShellKey(_ k: KeyStroke) -> Bool {
         if showPalette { return false }
         if showHelp {
             if k.command { return false }

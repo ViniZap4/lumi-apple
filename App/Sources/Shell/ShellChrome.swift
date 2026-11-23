@@ -140,12 +140,6 @@ struct ShellStatusLine: View {
                         .fixedSize()
                 }
             }
-            if appState.preferences.showKeybindsBar {
-                Text(hint)
-                    .font(ShellFont.small)
-                    .foregroundStyle(theme.textDim.opacity(0.8))
-                    .fixedSize()
-            }
         }
         .padding(.leading, 6)
         .padding(.trailing, 12)
@@ -160,7 +154,11 @@ struct ShellStatusLine: View {
         case .explorer: return appState.explorer.prompt != nil ? "PROMPT" : "BROWSE"
         case .reader: return "READ"
         case .editor:
-            return appState.preferences.vimEnabled ? appState.liveVimMode.shortLabel : "EDIT"
+            guard appState.preferences.vimEnabled else { return "EDIT" }
+            let s = appState.liveVimStatus
+            if s.insertOneShot, s.mode == .normal { return "(INSERT)" }
+            if s.mode == .normal, s.pending.op != nil { return "O-PENDING" }
+            return s.mode.shortLabel
         }
     }
 
@@ -170,12 +168,7 @@ struct ShellStatusLine: View {
         case .explorer: return theme.accent
         case .reader: return theme.info
         case .editor:
-            switch appState.liveVimMode {
-            case .insert: return theme.primary
-            case .visual: return theme.warning
-            case .commandLine: return theme.accent
-            case .normal: return theme.info
-            }
+            return appState.liveVimMode.chromeColor(theme)
         }
     }
 
@@ -209,6 +202,9 @@ struct ShellStatusLine: View {
             return out
         case .reader, .editor:
             var out: [String] = []
+            if appState.surface == .editor, let r = appState.liveVimStatus.recording {
+                out.append("recording @\(r)")
+            }
             if appState.selectedRemoteNoteID != nil {
                 out.append(livePhase)
                 if !appState.can("note.write") { out.append("read-only") }
@@ -228,15 +224,6 @@ struct ShellStatusLine: View {
         case .connecting: return "connecting"
         case .offline: return s.hasPendingLocalChanges ? "offline · pending" : "offline"
         case .closed: return "closed"
-        }
-    }
-
-    private var hint: String {
-        switch appState.surface {
-        case .empty: return "⌘K palette · ? keys"
-        case .explorer: return "? keys"
-        case .reader: return "i edit · q back · ? keys"
-        case .editor: return "⌘E read"
         }
     }
 
@@ -262,8 +249,25 @@ extension VimMode {
         switch self {
         case .normal: return "NORMAL"
         case .insert: return "INSERT"
-        case let .visual(kind, _): return kind == .linewise ? "V-LINE" : "VISUAL"
+        case .replace: return "REPLACE"
+        case let .visual(kind, _):
+            switch kind {
+            case .characterwise: return "VISUAL"
+            case .linewise: return "V-LINE"
+            case .block: return "V-BLOCK"
+            }
         case .commandLine: return "COMMAND"
+        }
+    }
+
+    /// Mode colour for the status badge and the edit stripe.
+    func chromeColor(_ theme: ThemeTokens) -> Color {
+        switch self {
+        case .insert: return theme.primary
+        case .replace: return theme.error
+        case .visual: return theme.warning
+        case .commandLine: return theme.accent
+        case .normal: return theme.info
         }
     }
 }

@@ -91,6 +91,12 @@ public struct ShellKeymap: Sendable {
         count = nil
     }
 
+    /// Keys typed but not yet resolved (`5`, `g`, `5g`) — the legend shows
+    /// their continuations.
+    public var pendingDisplay: String {
+        (count.map(String.init) ?? "") + (prefix.map { String($0) } ?? "")
+    }
+
     /// Returns nil when the key is not bound in `context` (the caller lets
     /// it through to the system).
     public mutating func feed(_ k: KeyStroke, context: Context, now: TimeInterval) -> ShellAction? {

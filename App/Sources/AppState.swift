@@ -40,6 +40,14 @@ final class AppState {
     /// COMMAND from anywhere in the chrome.
     var liveVimMode: VimMode = .normal
 
+    /// Live editor status (mode, pending keys, recording, leader maps) —
+    /// drives the command legend and the status line.
+    var liveVimStatus = VimStatus()
+
+    /// Keys pending in the explorer / reader keymap (`g`, `z`, a count),
+    /// for the legend's which-key completions.
+    var shellPending = ""
+
     /// Notes scanned from the currently selected vault. Cached here so the
     /// detail view can resolve a selection by id without re-walking the disk.
     /// (Legacy field — the lazy tree replaces it for new flows but a few

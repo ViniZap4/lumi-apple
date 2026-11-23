@@ -292,7 +292,11 @@ struct RemoteNoteDetailView: View {
                     jjEscapeEnabled: appState.preferences.jjEscapeMapping,
                     showLineNumbers: appState.preferences.showLineNumbers,
                     relativeLineNumbers: appState.preferences.relativeLineNumbers,
-                    options: appState.vimEditorOptions
+                    options: appState.vimEditorOptions,
+                    vimrc: appState.preferences.parsedVimrc,
+                    blockCursor: appState.preferences.vimBlockCursor,
+                    fileName: appState.openNotePath,
+                    onStatusChange: { appState.liveVimStatus = $0 }
                 )
                 .readableEditorWidth()
                 // One editor per replica: a new session remounts it.
@@ -331,7 +335,11 @@ struct RemoteNoteDetailView: View {
                         jjEscapeEnabled: appState.preferences.jjEscapeMapping,
                         showLineNumbers: appState.preferences.showLineNumbers,
                         relativeLineNumbers: appState.preferences.relativeLineNumbers,
-                        options: appState.vimEditorOptions
+                        options: appState.vimEditorOptions,
+                        vimrc: appState.preferences.parsedVimrc,
+                        blockCursor: appState.preferences.vimBlockCursor,
+                        fileName: appState.openNotePath,
+                        onStatusChange: { appState.liveVimStatus = $0 }
                     )
                     .readableEditorWidth()
                 } else {
@@ -386,12 +394,7 @@ struct RemoteNoteDetailView: View {
     }
 
     private var editModeColor: Color {
-        switch appState.liveVimMode {
-        case .insert: return theme.primary
-        case .visual: return theme.warning
-        case .commandLine: return theme.accent
-        case .normal: return theme.info
-        }
+        appState.liveVimMode.chromeColor(theme)
     }
 
     @ViewBuilder
@@ -530,6 +533,7 @@ struct RemoteNoteDetailView: View {
             switch effect {
             case .save: break
             case .saveAndClose, .close: appState.remoteEditorMode = .view
+            case .scrollCursor, .scrollLines, .displayLines: break
             }
             return
         }
@@ -547,6 +551,8 @@ struct RemoteNoteDetailView: View {
         case .close(force: true):
             editor.discard()
             appState.remoteEditorMode = .view
+        case .scrollCursor, .scrollLines, .displayLines:
+            break // handled by the editor view
         }
     }
 
