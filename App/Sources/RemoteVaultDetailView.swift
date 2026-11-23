@@ -2,11 +2,10 @@ import SwiftUI
 import LumiKit
 import LumiUI
 
-/// Read-only overview of a server-hosted vault: name + slug, member list with
-/// roles, role list with capabilities, invite management for users with
-/// `members.invite`, audit log for users with `audit.read`, and a read-only
-/// note list for users with `note.read`. Note open / create / edit lands in
-/// a subsequent E.1.2 slice.
+/// Book settings for a server book (shown in `BookSettingsSheet`): name,
+/// rename / send copy / transfer / delete, members, and — only when the
+/// signed-in member holds the capability — roles, invites and the audit
+/// log. Notes are not here: the explorer is the book's home.
 struct RemoteVaultDetailView: View {
     let vault: RemoteVault
     @Environment(AppState.self) private var appState
@@ -28,13 +27,12 @@ struct RemoteVaultDetailView: View {
             VStack(alignment: .leading, spacing: 24) {
                 header
                 memberSection
-                roleSection
-                inviteSection
-                auditSection
-                noteSection
+                if canManageMembers { roleSection }
+                if canCreateInvites { inviteSection }
+                if canReadAudit { auditSection }
             }
-            .padding(.horizontal, 32)
-            .padding(.vertical, 24)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 20)
             .frame(maxWidth: 820, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -82,6 +80,14 @@ struct RemoteVaultDetailView: View {
         } message: {
             Text("This permanently removes the vault on the server, including all notes and member rows. This action cannot be undone.")
         }
+    }
+
+    /// Roles are an admin concern: shown with `members.manage` / `roles.*`.
+    private var canManageMembers: Bool {
+        guard let account = appState.activeAccount else { return false }
+        let me = appState.remoteVaultsStore.members.first { $0.username == account.username }
+        guard let caps = me?.capabilities else { return false }
+        return caps.contains { ["*", "vault.*", "members.*", "members.manage", "roles.*", "roles.manage"].contains($0) }
     }
 
     /// `vault.manage` capability check against the current session's member row.
@@ -421,8 +427,6 @@ struct RemoteVaultDetailView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 10) {
-                Image(systemName: "cloud.fill")
-                    .foregroundStyle(theme.primary)
                 if isEditingName {
                     TextField("Vault name", text: $editedName, onCommit: { Task { await commitRename() } })
                         .textFieldStyle(.roundedBorder)
@@ -439,7 +443,7 @@ struct RemoteVaultDetailView: View {
                     .buttonStyle(.borderless)
                 } else {
                     Text(vault.name)
-                        .font(.system(size: 32, weight: .semibold))
+                        .font(.system(size: 20, weight: .semibold, design: .monospaced))
                         .foregroundStyle(theme.text)
                 }
                 Spacer()
@@ -782,9 +786,9 @@ struct RemoteVaultDetailView: View {
     }
 
     private func sectionTitle(_ text: String) -> some View {
-        Text(text)
-            .font(.system(.title3, design: .monospaced).weight(.semibold))
-            .foregroundStyle(theme.text)
+        Text(text.uppercased())
+            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+            .foregroundStyle(theme.accent)
     }
 
     /// Crown chip marking the vault owner (SPEC-V3 ownership). The owner

@@ -23,16 +23,6 @@ final class AppState {
     /// reference into the lazy folder tree. `nil` means no note open.
     var selectedNoteID: String?
 
-    /// Lazy file-system root for the active vault. Folders enumerate their
-    /// children on demand (FolderNode.loadIfNeeded) so vault-open stays
-    /// cheap even when the vault has millions of notes.
-    var rootFolder: FolderNode?
-
-    /// Three-column browser state — drives the parent / current / preview
-    /// columns when no note is open. Created fresh each time the active
-    /// vault changes (so the cursor/path stack reset cleanly).
-    var browserState: TreeBrowserState?
-
     /// Currently selected note's lightweight handle. Set by tree row taps
     /// (or quick-switcher selection); read by the detail view to drive the
     /// editor load. Holding the entry here means the detail view doesn't
@@ -140,10 +130,6 @@ final class AppState {
     /// toolbar button share state without dueling `@State` containers.
     var showSettings: Bool = false
 
-    /// Quick-switcher modal visibility. ⌘O opens a floating tree-over-note
-    /// overlay so users can jump notes without leaving the current one.
-    var showQuickSwitcher: Bool = false
-
     /// Column visibility for the navigation split. Default is
     /// `.detailOnly` so the app opens straight onto the home pane (ASCII
     /// logo + vault picker) like the TUI / web clients. Users can pop
@@ -170,8 +156,30 @@ final class AppState {
     /// NSEvent dispatch order. Marked private; only its lifetime
     /// matters here.
     #if canImport(AppKit)
-    private var readKeyMonitor: ReadKeyMonitor?
+    private var keyRouter: KeyRouter?
     #endif
+
+    // MARK: Shell (explorer, palette, help, book settings)
+
+    /// Explorer for the open book (miller columns over the note tree).
+    let explorer = ExplorerModel()
+    /// Command palette (⌘K, `space`, `:`).
+    var showPalette = false
+    /// `:` opened the palette: commands rank before notes.
+    var paletteCommandMode = false
+    /// Text the palette opens with ("book ", "theme ").
+    var paletteSeed = ""
+    /// Folder picker for "Link folder…".
+    var showLinkFolder = false
+    /// `?` keymap overlay.
+    var showHelp = false
+    /// Members / roles / invites / audit / rename / delete for the open book.
+    var showBookSettings = false
+    /// Small transient message (bottom of the window). Never wraps per
+    /// syllable: one or two lines, fixed max width.
+    var toast: ShellToast?
+    /// Key → action reader for the explorer and reader.
+    @ObservationIgnored var keymap = ShellKeymap()
 
     init() {
         let accounts = AccountsStore()
@@ -188,7 +196,7 @@ final class AppState {
         // attempts (NSEvent monitor returning nil) were racing
         // SwiftUI's internal monitors that beeped *before* yielding.
         BeepSilencer.install()
-        installReadKeyMonitor()
+        keyRouter = KeyRouter(appState: self)
         #endif
         // Kick the math/diagram render service awake at launch so the
         // hidden KaTeX/Mermaid WebView finishes loading scripts in
@@ -198,60 +206,6 @@ final class AppState {
         // latency on the first request.
         MathRenderService.shared.prewarm()
     }
-
-    #if canImport(AppKit)
-    private func installReadKeyMonitor() {
-        let coord = readCoordinator
-        readKeyMonitor = ReadKeyMonitor(
-            isActive: { [weak self] in
-                guard let self else { return false }
-                guard self.preferences.jkScrollInView else { return false }
-                let localOpen = self.editorMode == .view && self.selectedEntry != nil
-                let remoteOpen = self.remoteEditorMode == .view && self.selectedRemoteNoteID != nil
-                return localOpen || remoteOpen
-            },
-            glide: { coord.glide(by: CGFloat($0)) },
-            halfPage: { coord.scrollHalfPage(direction: CGFloat($0)) },
-            fullPage: { coord.scrollFullPage(direction: CGFloat($0)) },
-            scrollToEdge: { coord.scrollTo($0) },
-            closeNote: { [weak self] in
-                guard let self else { return }
-                // Branch by which note kind is open. Local-vault path
-                // auto-saves dirty edits; server-vault path triggers the
-                // same auto-save in the server editor before clearing.
-                if self.selectedEntry != nil {
-                    if self.editor.isDirty { self.editor.save() }
-                    self.selectedEntry = nil
-                    self.selectedNoteID = nil
-                } else if self.selectedRemoteNoteID != nil {
-                    // Live (CRDT) edits are already on the server; only the
-                    // REST fallback (visionOS) has anything to save.
-                    if self.remoteEditor.isDirty {
-                        let client = self.remoteVaultsStore.apiClient
-                        let store = self.remoteVaultsStore
-                        // `beginSave` captures vault/note/text before
-                        // returning, so the reset() below can't race it.
-                        if let vaultID = self.remoteEditor.vaultID,
-                           let save = self.remoteEditor.beginSave(via: client) {
-                            Task {
-                                if let snapshot = await save.value {
-                                    store.recordSavedSnapshot(snapshot, vaultID: vaultID)
-                                }
-                            }
-                        }
-                    }
-                    self.selectedRemoteNoteID = nil
-                    self.remoteVaultsStore.closeOpenNote()
-                    self.remoteEditor.reset()
-                    self.remoteEditorMode = .view
-                }
-            },
-            yankSelected: { [weak self] in
-                self?.performYank()
-            }
-        )
-    }
-    #endif
 
     // MARK: Books
 
@@ -291,6 +245,9 @@ final class AppState {
             remoteEditor.reset()
             selectedRemoteNoteID = nil
         }
+        keymap.reset()
+        explorer.prompt = nil
+        explorer.pendingDelete = nil
         if markOpened { books.setActive(book.id) } else if books.activeBookID == nil { books.setActive(book.id) }
 
         switch book.kind {
@@ -298,32 +255,35 @@ final class AppState {
             selectedRemoteVaultID = nil
             guard let session = VaultSession.open(book: book, bookmark: books.bookmarks.bookmark(for: book.id)) else {
                 setSession(nil)
-                rootFolder = nil
-                browserState = nil
+                explorer.reset()
                 selectedVaultID = book.id // shows the "folder unavailable" state
                 return
             }
             setSession(session)
-            let root = session.rootFolder()
-            rootFolder = root
-            browserState = TreeBrowserState(root: root)
             selectedVaultID = book.id
-            Task { await root.loadIfNeededAsync() }
+            explorer.openLocal(root: session.rootURL, showHidden: preferences.explorerShowHidden)
         case .bound:
             setSession(nil)
-            rootFolder = nil
-            browserState = nil
             selectedVaultID = nil
             selectedRemoteVaultID = book.vaultUUID
             sync.openEditor = nil
             guard let key = book.accountKey, accounts.state(key).isSignedIn,
                   let client = accounts.client(for: key), let vault = book.vaultUUID else {
+                explorer.reset()
                 remoteVaultsStore.clear()
                 return
             }
+            explorer.openRemote(vaultID: vault)
             remoteVaultsStore.setClient(client)
             await remoteVaultsStore.refresh()
             await remoteVaultsStore.selectVault(vault)
+            // The explorer needs the whole tree, not the first page.
+            var pages = 0
+            while remoteVaultsStore.notesHasMore, remoteVaultsStore.selectedVaultID == vault, pages < 200 {
+                await remoteVaultsStore.loadMoreNotes()
+                pages += 1
+            }
+            explorer.updateRemote(notes: remoteVaultsStore.notes, loading: false)
         }
     }
 

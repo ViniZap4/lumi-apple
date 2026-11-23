@@ -3,257 +3,88 @@ import UniformTypeIdentifiers
 import LumiKit
 import LumiUI
 
-/// Sidebar: book switcher at the top (SPEC-LIVROS §5), then every book
-/// grouped by server (local first) with its status dot and ⌃⌘ number.
+/// Optional sidebar (⌘\): accounts → books with status dots. No cards, no
+/// toasts — those live in the main area.
 struct VaultSidebar: View {
-    let onAdd: (URL) -> Void
-
-    @State private var showImporter = false
     @Environment(\.theme) private var theme
     @Environment(AppState.self) private var appState
 
     var body: some View {
-        @Bindable var bound = appState
-        VStack(spacing: 0) {
-            BookSwitcherButton()
-                .padding(.horizontal, 10)
-                .padding(.top, 8)
-                .padding(.bottom, 4)
-            if let reason = appState.books.readOnlyReason {
-                banner(reason, systemImage: "lock", color: theme.warning) {}
-            }
-            if !appState.books.onboardingShown {
-                onboardingCard
-            }
-            if let notice = appState.sync.pendingNotices.first {
-                federationBanner(notice)
-            }
-            if let added = appState.sync.addedBanner {
-                banner(added, systemImage: "books.vertical", color: theme.info) { appState.sync.addedBanner = nil }
-            }
-            bookList
-        }
-        .background(theme.overlayBackground)
-        .fileImporter(
-            isPresented: $showImporter,
-            allowedContentTypes: [.folder],
-            allowsMultipleSelection: false
-        ) { result in
-            if case let .success(urls) = result, let url = urls.first {
-                onAdd(url)
-            }
-        }
-    }
-
-    private var bookList: some View {
-        List {
-            if appState.books.books.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("no books yet")
-                        .font(.system(.callout, design: .monospaced))
-                        .foregroundStyle(theme.textDim)
-                    Button("New book…") { appState.showNewBook = true }
-                    Button("Add server…") { appState.showAddServer = true }
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(theme.primary)
-                .font(.system(.callout, design: .monospaced))
-                .padding(.vertical, 6)
-            }
-            let flat = BookSwitcherOrder.flattened(appState.books.books)
-            ForEach(appState.books.switcherGroups) { group in
-                Section {
-                    ForEach(group.books) { book in
-                        BookRow(book: book,
-                                shortcut: flat.firstIndex(of: book).map { $0 + 1 }.flatMap { $0 <= 9 ? $0 : nil },
-                                isActive: appState.openBook?.id == book.id)
-                            .contentShape(Rectangle())
-                            .onTapGesture { Task { await appState.selectBook(book) } }
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if let reason = appState.books.readOnlyReason {
+                        Label(reason, systemImage: "lock")
+                            .font(ShellFont.small)
+                            .foregroundStyle(theme.warning)
+                            .lineLimit(3)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                } header: {
-                    Text(group.serverURL.map(ServerURL.displayHost) ?? "this device")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(theme.textDim)
-                }
-            }
-            Section {
-                sidebarButton("New book…", systemImage: "plus.circle") { appState.showNewBook = true }
-                sidebarButton("Link folder…", systemImage: "folder.badge.plus") { showImporter = true }
-                sidebarButton("Add server…", systemImage: "server.rack") { appState.showAddServer = true }
-                sidebarButton("Manage books…", systemImage: "list.bullet") { appState.showManageBooks = true }
-            }
-        }
-        .listStyle(.sidebar)
-        .scrollContentBackground(.hidden)
-    }
-
-    private func sidebarButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .font(.system(.callout, design: .monospaced))
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(theme.primary)
-    }
-
-    private var onboardingCard: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("books")
-                .font(.system(.caption, design: .monospaced).weight(.semibold))
-                .foregroundStyle(theme.text)
-            Text("Each book is a separate space of notes. It can live only on this device or be linked to a server, and each linked book syncs with a single server.")
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(theme.textDim)
-                .fixedSize(horizontal: false, vertical: true)
-            Button("Got it") { appState.books.onboardingShown = true }
-                .buttonStyle(.plain)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(theme.primary)
-        }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(theme.background))
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-    }
-
-    private func federationBanner(_ notice: FederationNotice) -> some View {
-        let also = notice.alsoOn.map { ServerURL.displayHost($0.serverURL) }.joined(separator: ", ")
-        let via = ServerURL.displayHost(notice.syncsVia.serverURL)
-        return VStack(alignment: .leading, spacing: 6) {
-            Text("This book is also on \(also). It syncs through \(via).")
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(theme.text)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack {
-                Button("Keep") { appState.sync.pendingNotices.removeFirst() }
-                Menu("Switch server…") {
-                    ForEach(notice.alsoOn, id: \.self) { alt in
-                        Button(alt.description) {
-                            appState.sync.pendingNotices.removeFirst()
-                            Task { await appState.sync.switchServer(notice.bookID, to: alt) }
+                    if appState.books.books.isEmpty {
+                        Text("no books yet")
+                            .font(ShellFont.chrome)
+                            .foregroundStyle(theme.textDim)
+                    }
+                    let flat = BookSwitcherOrder.flattened(appState.books.books)
+                    ForEach(appState.books.switcherGroups) { group in
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(groupTitle(group))
+                                .font(ShellFont.small)
+                                .foregroundStyle(theme.textDim)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .padding(.horizontal, 8)
+                                .padding(.bottom, 4)
+                            ForEach(group.books) { book in
+                                BookRow(book: book,
+                                        shortcut: flat.firstIndex(of: book).map { $0 + 1 }.flatMap { $0 <= 9 ? $0 : nil },
+                                        isActive: appState.openBook?.id == book.id)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { Task { await appState.selectBook(book) } }
+                            }
                         }
                     }
                 }
-                .fixedSize()
+                .padding(.horizontal, 10)
+                .padding(.top, 12)
             }
-            .font(.system(.caption, design: .monospaced))
-            .controlSize(.small)
-        }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(theme.background))
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-    }
-
-    private func banner(_ text: String, systemImage: String, color: Color, dismiss: @escaping () -> Void) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: systemImage).foregroundStyle(color)
-            Text(text)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(theme.text)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-            Button { dismiss() } label: { Image(systemName: "xmark").font(.caption2) }
-                .buttonStyle(.plain)
-                .foregroundStyle(theme.textDim)
-        }
-        .padding(8)
-        .padding(.horizontal, 10)
-    }
-}
-
-/// Button at the top of the sidebar: active book + its status; opens the
-/// grouped list with the management entries at the bottom.
-struct BookSwitcherButton: View {
-    @Environment(AppState.self) private var appState
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        @Bindable var bound = appState
-        let active = appState.openBook ?? appState.books.activeBook
-        Button {
-            appState.showBookSwitcher.toggle()
-        } label: {
-            HStack(spacing: 8) {
-                if let active {
-                    BookStatusDot(status: appState.sync.status(for: active))
-                    Text(active.name)
-                        .font(.system(.body, design: .monospaced).weight(.semibold))
-                        .foregroundStyle(theme.text)
-                        .lineLimit(1)
-                } else {
-                    Text("no book")
-                        .font(.system(.body, design: .monospaced))
+            Hairline()
+            HStack(spacing: 12) {
+                Menu {
+                    Button("New book…") { appState.showNewBook = true }
+                    Button("Link folder…") { appState.showLinkFolder = true }
+                    Button("Add server…") {
+                        appState.signInPrefill = nil
+                        appState.showAddServer = true
+                    }
+                    Divider()
+                    Button("Manage books…") { appState.showManageBooks = true }
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(theme.textDim)
                 }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("New book, link folder, add server")
                 Spacer()
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.caption)
-                    .foregroundStyle(theme.textDim)
+                Text("⌘\\")
+                    .font(ShellFont.small)
+                    .foregroundStyle(theme.textDim.opacity(0.7))
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(RoundedRectangle(cornerRadius: 7).fill(theme.background))
-            .contentShape(Rectangle())
+            .padding(.horizontal, 14)
+            .frame(height: ShellMetrics.statusLineHeight + 4)
         }
-        .buttonStyle(.plain)
-        .help("Switch book (⌃⌘0)")
-        .popover(isPresented: $bound.showBookSwitcher, arrowEdge: .bottom) {
-            BookSwitcherList()
-                .environment(appState)
-                .environment(\.theme, theme)
-        }
-    }
-}
-
-struct BookSwitcherList: View {
-    @Environment(AppState.self) private var appState
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        let flat = BookSwitcherOrder.flattened(appState.books.books)
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(appState.books.switcherGroups) { group in
-                Text(group.serverURL.map(ServerURL.displayHost) ?? "this device")
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(theme.textDim)
-                    .padding(.top, 6)
-                ForEach(group.books) { book in
-                    Button {
-                        appState.showBookSwitcher = false
-                        Task { await appState.selectBook(book) }
-                    } label: {
-                        BookRow(book: book,
-                                shortcut: flat.firstIndex(of: book).map { $0 + 1 }.flatMap { $0 <= 9 ? $0 : nil },
-                                isActive: appState.openBook?.id == book.id)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            Divider().padding(.vertical, 4)
-            entry("New book…") { appState.showNewBook = true }
-            entry("Link folder…") { appState.showNewBook = true }
-            entry("Add server…") { appState.showAddServer = true }
-            entry("Manage books…") { appState.showManageBooks = true }
-        }
-        .padding(12)
-        .frame(width: 300)
-        .background(theme.background)
+        .background(theme.overlayBackground.opacity(0.5))
     }
 
-    private func entry(_ title: String, action: @escaping () -> Void) -> some View {
-        Button {
-            appState.showBookSwitcher = false
-            action()
-        } label: {
-            Text(title)
-                .font(.system(.callout, design: .monospaced))
-                .foregroundStyle(theme.primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
+    private func groupTitle(_ group: BookSwitcherOrder.Group) -> String {
+        guard let url = group.serverURL else { return "this device" }
+        let accounts = Set(group.books.compactMap(\.account)).sorted()
+        let host = ServerURL.displayHost(url)
+        return accounts.isEmpty ? host : accounts.joined(separator: ",") + "@" + host
     }
 }
 
@@ -266,25 +97,25 @@ struct BookRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            BookStatusDot(status: appState.sync.status(for: book))
-            VStack(alignment: .leading, spacing: 1) {
-                Text(book.name)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(isActive ? theme.accent : theme.text)
-                    .lineLimit(1)
-                if let account = book.account {
-                    Text(account)
-                        .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(theme.textDim)
-                }
-            }
-            Spacer()
+            BookStatusDot(status: appState.sync.status(for: book), size: 6)
+            Text(book.name)
+                .font(isActive ? ShellFont.rowBold : ShellFont.row)
+                .foregroundStyle(isActive ? theme.text : theme.text.opacity(0.85))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 6)
             if let shortcut {
-                Text("⌃⌘\(shortcut)")
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(theme.textDim)
+                Text("⌃\(shortcut)")
+                    .font(ShellFont.small)
+                    .foregroundStyle(theme.textDim.opacity(0.8))
+                    .fixedSize()
             }
         }
-        .padding(.vertical, 2)
+        .padding(.horizontal, 8)
+        .frame(height: ShellMetrics.rowHeight)
+        .background(
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(isActive ? theme.accent.opacity(0.14) : Color.clear)
+        )
     }
 }

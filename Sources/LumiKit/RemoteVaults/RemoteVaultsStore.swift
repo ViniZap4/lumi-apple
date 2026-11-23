@@ -330,6 +330,33 @@ public final class RemoteVaultsStore {
         }
     }
 
+    /// `PATCH` a note's title and/or path (explorer rename / move) in the
+    /// selected vault and merge the returned row into `notes`. A move can
+    /// change the note id; the old row is replaced either way. Metadata
+    /// only — the body (CRDT) is never touched.
+    @discardableResult
+    public func updateNoteMeta(noteID: String, title: String? = nil, path: String? = nil) async throws(LumiAPIError) -> RemoteNote {
+        guard let vaultID = selectedVaultID else {
+            throw LumiAPIError.network(message: "no vault selected")
+        }
+        let updated = try await client.updateNote(vaultID: vaultID, noteID: noteID, title: title, path: path)
+        if let idx = notes.firstIndex(where: { $0.id == noteID }) {
+            notes[idx] = updated
+            if updated.id != noteID { notes.removeAll { $0.id == updated.id && $0 != updated } }
+        } else if !notes.contains(where: { $0.id == updated.id }) {
+            notes.insert(updated, at: 0)
+        }
+        return updated
+    }
+
+    /// Body of a note (REST `/content`), e.g. to duplicate it.
+    public func noteBody(noteID: String) async throws(LumiAPIError) -> String {
+        guard let vaultID = selectedVaultID else {
+            throw LumiAPIError.network(message: "no vault selected")
+        }
+        return try await client.getNoteContent(vaultID: vaultID, noteID: noteID).body
+    }
+
     /// Create a new note in the currently-selected vault and prepend it to
     /// the cached `notes` list. Returns the new row on success so the host
     /// can navigate to it (e.g. auto-open in edit mode).

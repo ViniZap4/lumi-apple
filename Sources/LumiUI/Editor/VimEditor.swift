@@ -17,6 +17,9 @@ public struct VimEditor: View {
     let jjEscapeEnabled: Bool
     let showLineNumbers: Bool
     let relativeLineNumbers: Bool
+    /// Per-device editor settings (web parity): escape sequences, their
+    /// timeout, font size and soft wrap.
+    let options: VimEditorOptions
 
     @State private var controller: VimController
 
@@ -26,8 +29,10 @@ public struct VimEditor: View {
         onEffect: ((VimEffect) -> Void)? = nil,
         jjEscapeEnabled: Bool = false,
         showLineNumbers: Bool = false,
-        relativeLineNumbers: Bool = false
+        relativeLineNumbers: Bool = false,
+        options: VimEditorOptions = VimEditorOptions()
     ) {
+        self.options = options
         self.text = text
         self.onModeChange = onModeChange
         self.onEffect = onEffect
@@ -46,8 +51,10 @@ public struct VimEditor: View {
         onEffect: ((VimEffect) -> Void)? = nil,
         jjEscapeEnabled: Bool = false,
         showLineNumbers: Bool = false,
-        relativeLineNumbers: Bool = false
+        relativeLineNumbers: Bool = false,
+        options: VimEditorOptions = VimEditorOptions()
     ) {
+        self.options = options
         self.text = nil
         self.onModeChange = onModeChange
         self.onEffect = onEffect
@@ -67,7 +74,9 @@ public struct VimEditor: View {
                 highlights: controller.searchHighlights,
                 theme: theme,
                 showLineNumbers: showLineNumbers,
-                relativeLineNumbers: relativeLineNumbers
+                relativeLineNumbers: relativeLineNumbers,
+                fontSize: options.fontSize,
+                lineWrapping: options.lineWrapping
             )
             if case let .commandLine(prefix, buffer) = controller.state.mode {
                 VimCommandLineOverlay(prefix: prefix, buffer: buffer)
@@ -90,12 +99,36 @@ public struct VimEditor: View {
                 controller.onTextChange = { text.wrappedValue = $0 }
             }
             controller.setJJEscapeEnabled(jjEscapeEnabled)
+            controller.setEscapeSequences(options.escapeSequences, timeout: options.escapeTimeout)
             onModeChange?(controller.state.mode)
         }
         .onChange(of: jjEscapeEnabled) { _, newValue in
             controller.setJJEscapeEnabled(newValue)
         }
+        .onChange(of: options) { _, new in
+            controller.setEscapeSequences(new.escapeSequences, timeout: new.escapeTimeout)
+        }
         .background(theme.background)
+    }
+}
+
+/// Editor settings that come from per-device preferences.
+public struct VimEditorOptions: Equatable, Sendable {
+    public var escapeSequences: [String]
+    /// Seconds between the keys of an escape sequence.
+    public var escapeTimeout: TimeInterval
+    public var fontSize: CGFloat
+    public var lineWrapping: Bool
+
+    public init(escapeSequences: [String] = [], escapeTimeout: TimeInterval = 0.2, fontSize: CGFloat? = nil, lineWrapping: Bool = true) {
+        self.escapeSequences = escapeSequences
+        self.escapeTimeout = escapeTimeout
+        #if os(macOS)
+        self.fontSize = fontSize ?? 13
+        #else
+        self.fontSize = fontSize ?? 16
+        #endif
+        self.lineWrapping = lineWrapping
     }
 }
 

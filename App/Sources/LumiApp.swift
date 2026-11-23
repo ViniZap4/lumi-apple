@@ -39,14 +39,34 @@ struct LumiApp: App {
         .modelContainer(Self.sharedContainer)
         #if os(macOS)
         .windowStyle(.hiddenTitleBar)
+        .windowBackgroundDragBehavior(.enabled)
         .defaultSize(width: 1200, height: 760)
         .commands {
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { appState.showSettings = true }
                     .keyboardShortcut(",", modifiers: [.command])
             }
-            // SPEC-LIVROS §5: ⌃⌘1–9 switch books in switcher order,
-            // ⌃⌘0 opens the switcher.
+            CommandGroup(replacing: .sidebar) {
+                Button("Toggle Sidebar") { appState.toggleSidebar() }
+                    .keyboardShortcut("\\", modifiers: [.command])
+            }
+            CommandMenu("Go") {
+                Button("Command Palette…") { appState.openPalette() }
+                    .keyboardShortcut("k", modifiers: [.command])
+                Button("Open Note…") { appState.openPalette() }
+                    .keyboardShortcut("o", modifiers: [.command])
+                Divider()
+                Button(appState.isEditing ? "Read Mode" : "Edit Mode") { appState.toggleEditing() }
+                    .keyboardShortcut("e", modifiers: [.command])
+                    .disabled(appState.openBook == nil)
+                Button("Back to Explorer") { appState.closeNote() }
+                    .disabled(!appState.isNoteOpen)
+                Divider()
+                Button("Keyboard Shortcuts") { appState.showHelp.toggle() }
+                    .keyboardShortcut("/", modifiers: [.command])
+            }
+            // SPEC-LIVROS §5: ⌃⌘1–9 switch books in switcher order (⌃1–9
+            // and g1–g9 also work in the explorer).
             CommandMenu("Book") {
                 let shortcutBooks = appState.books.shortcutBooks
                 ForEach(Array(shortcutBooks.enumerated()), id: \.element.id) { index, book in
@@ -54,68 +74,17 @@ struct LumiApp: App {
                         .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: [.control, .command])
                 }
                 if !shortcutBooks.isEmpty { Divider() }
-                Button("Switch Book…") {
-                    appState.columnVisibility = .all
-                    appState.showBookSwitcher = true
-                }
-                .keyboardShortcut("0", modifiers: [.control, .command])
+                Button("Switch Book…") { appState.query(paletteFor: .books) }
+                    .keyboardShortcut("0", modifiers: [.control, .command])
+                Button("Book Settings…") { appState.showBookSettings = true }
+                    .keyboardShortcut(",", modifiers: [.command, .option])
+                    .disabled(appState.openBook == nil)
+                Divider()
                 Button("New Book…") { appState.showNewBook = true }
+                Button("Link Folder…") { appState.showLinkFolder = true }
                 Button("Manage Books…") { appState.showManageBooks = true }
                 Divider()
                 Button("Add Server…") { appState.showAddServer = true }
-            }
-            // A real top-level "View" menu in the menu bar, so users
-            // discover the read/edit toggle without keyboard-shortcut
-            // tribal knowledge. Explicit show/hide variants make the
-            // command's effect obvious.
-            CommandMenu("View") {
-                Button("Read Mode") {
-                    appState.editorMode = .view
-                }
-                .keyboardShortcut("e", modifiers: [.command, .shift])
-                .disabled(appState.selectedEntry == nil)
-
-                Button("Edit Mode") {
-                    appState.editorMode = .edit
-                }
-                .keyboardShortcut("e", modifiers: [.command])
-                .disabled(appState.selectedEntry == nil)
-
-                Divider()
-
-                Button("Toggle Read / Edit") {
-                    appState.editorMode = appState.editorMode == .view ? .edit : .view
-                }
-                .keyboardShortcut("d", modifiers: [.command])
-                .disabled(appState.selectedEntry == nil)
-
-                Divider()
-
-                Button("Back to Vault") {
-                    if appState.editor.isDirty { appState.editor.save() }
-                    appState.selectedEntry = nil
-                    appState.selectedNoteID = nil
-                }
-                .keyboardShortcut(.escape, modifiers: [])
-                .disabled(appState.selectedEntry == nil)
-
-                Button("Home") {
-                    if appState.editor.isDirty { appState.editor.save() }
-                    appState.selectedEntry = nil
-                    appState.selectedNoteID = nil
-                    appState.selectedVaultID = nil
-                    appState.selectedRemoteVaultID = nil
-                    appState.browserState = nil
-                    appState.rootFolder = nil
-                    appState.setSession(nil)
-                }
-                .keyboardShortcut("h", modifiers: [.command, .shift])
-
-                Button("Quick Switcher…") {
-                    appState.showQuickSwitcher = true
-                }
-                .keyboardShortcut("o", modifiers: [.command])
-                .disabled(appState.rootFolder == nil)
             }
         }
         #endif

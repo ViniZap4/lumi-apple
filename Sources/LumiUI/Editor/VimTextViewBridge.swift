@@ -82,10 +82,12 @@ struct VimTextViewBridge: NSViewRepresentable {
     let theme: ThemeTokens
     let showLineNumbers: Bool
     let relativeLineNumbers: Bool
+    var fontSize: CGFloat = 13
+    var lineWrapping: Bool = true
 
     func makeNSView(context: Context) -> NSScrollView {
         let textView = VimAppKitTextView(usingTextLayoutManager: true)
-        textView.styler = EditorStyler(theme: theme, fontSize: 13)
+        textView.styler = EditorStyler(theme: theme, fontSize: fontSize)
         textView.isRichText = false
         textView.importsGraphics = false
         textView.allowsUndo = false
@@ -125,7 +127,8 @@ struct VimTextViewBridge: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? VimAppKitTextView else { return }
         let isInsert = mode == .insert || !controller.vimEnabled
-        textView.updateTheme(EditorStyler(theme: theme, fontSize: 13))
+        textView.updateTheme(EditorStyler(theme: theme, fontSize: fontSize))
+        textView.applyWrapping(lineWrapping, in: scrollView)
         textView.insertionPointColor = isInsert ? NSColor(theme.primary) : NSColor(theme.accent)
         textView.selectedTextAttributes = [
             .backgroundColor: isInsert
@@ -176,12 +179,37 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
     }
 
     func updateTheme(_ styler: EditorStyler) {
-        guard self.styler?.theme != styler.theme else { return }
+        let fontChanged = self.styler?.fontSize != styler.fontSize
+        guard self.styler?.theme != styler.theme || fontChanged else { return }
         self.styler = styler
         typingAttributes = styler.baseAttributes
         if let storage = textStorage {
-            styler.highlight(storage, range: NSRange(location: 0, length: storage.length))
+            let full = NSRange(location: 0, length: storage.length)
+            if fontChanged {
+                storage.beginEditing()
+                storage.setAttributes(styler.baseAttributes, range: full)
+                storage.endEditing()
+            }
+            styler.highlight(storage, range: full)
         }
+    }
+
+    private var wrapsLines = true
+
+    /// Soft wrap on/off (`set wrap`): off lets long lines run and adds a
+    /// horizontal scroller.
+    func applyWrapping(_ wrap: Bool, in scrollView: NSScrollView) {
+        guard wrap != wrapsLines else { return }
+        wrapsLines = wrap
+        scrollView.hasHorizontalScroller = !wrap
+        isHorizontallyResizable = !wrap
+        autoresizingMask = wrap ? [.width] : []
+        textContainer?.widthTracksTextView = wrap
+        textContainer?.containerSize = NSSize(
+            width: wrap ? scrollView.contentSize.width : CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        if wrap { frame.size.width = scrollView.contentSize.width }
     }
 
     func focusOnce() {
@@ -387,6 +415,8 @@ struct VimTextViewBridge: UIViewRepresentable {
     let theme: ThemeTokens
     let showLineNumbers: Bool
     let relativeLineNumbers: Bool
+    var fontSize: CGFloat = 16
+    var lineWrapping: Bool = true
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -408,7 +438,7 @@ struct VimTextViewBridge: UIViewRepresentable {
 
     func makeUIView(context: Context) -> UITextView {
         let textView = VimUIKitTextView(usingTextLayoutManager: true)
-        textView.styler = EditorStyler(theme: theme, fontSize: 16)
+        textView.styler = EditorStyler(theme: theme, fontSize: fontSize)
         textView.delegate = context.coordinator
         context.coordinator.view = textView
         textView.autocorrectionType = .no
@@ -436,7 +466,7 @@ struct VimTextViewBridge: UIViewRepresentable {
     func updateUIView(_ textView: UITextView, context: Context) {
         guard let view = textView as? VimUIKitTextView else { return }
         let isInsert = mode == .insert || !controller.vimEnabled
-        view.updateTheme(EditorStyler(theme: theme, fontSize: 16))
+        view.updateTheme(EditorStyler(theme: theme, fontSize: fontSize))
         view.tintColor = UIColor(isInsert ? theme.primary : theme.accent)
         view.applyAccessoryTheme(theme)
         view.isEditable = controller.isEditable
@@ -487,10 +517,13 @@ final class VimUIKitTextView: UITextView, EditorTextSurface {
     }
 
     func updateTheme(_ styler: EditorStyler) {
-        guard self.styler?.theme != styler.theme else { return }
+        let fontChanged = self.styler?.fontSize != styler.fontSize
+        guard self.styler?.theme != styler.theme || fontChanged else { return }
         self.styler = styler
         typingAttributes = styler.baseAttributes
-        styler.highlight(textStorage, range: NSRange(location: 0, length: textStorage.length))
+        let full = NSRange(location: 0, length: textStorage.length)
+        if fontChanged { textStorage.setAttributes(styler.baseAttributes, range: full) }
+        styler.highlight(textStorage, range: full)
     }
 
     func applyAccessoryTheme(_ theme: ThemeTokens) {

@@ -42,6 +42,15 @@ public struct ExplorerEntry: Sendable, Hashable, Identifiable {
     /// The note (notes only).
     public var note: ExplorerNote?
 
+    public init(kind: Kind, key: String, name: String, path: String, count: Int = 0, note: ExplorerNote? = nil) {
+        self.kind = kind
+        self.key = key
+        self.name = name
+        self.path = path
+        self.count = count
+        self.note = note
+    }
+
     public var id: String { key }
     public var isFolder: Bool { kind == .folder }
     /// Dot-files / dot-folders, hidden unless the user toggles `.`.

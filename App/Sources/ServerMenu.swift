@@ -2,61 +2,6 @@ import SwiftUI
 import LumiKit
 import LumiUI
 
-/// Toolbar accounts menu: every (server, username) this device knows,
-/// its sign-in state, and "Add server…". Several accounts per server are
-/// allowed (SPEC-LIVROS §2.2).
-struct ServerMenu: View {
-    @Environment(AppState.self) private var appState
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        let accounts = appState.accounts.accounts
-        Menu {
-            if accounts.isEmpty {
-                Text("no accounts on this device")
-            }
-            ForEach(accounts) { acc in
-                let state = appState.accounts.state(acc.key)
-                Menu {
-                    Text(acc.displayName.isEmpty ? acc.username : acc.displayName)
-                    Text(acc.serverURL)
-                    Divider()
-                    if state.isSignedIn {
-                        Button("Sign out on this device") {
-                            Task {
-                                await appState.accounts.signOut(acc.key)
-                                await appState.accountsChanged()
-                            }
-                        }
-                    } else {
-                        Button("Sign in…") {
-                            appState.signInPrefill = acc.key
-                            appState.showAddServer = true
-                        }
-                    }
-                    Button("Remove account from this device", role: .destructive) {
-                        Task {
-                            await appState.accounts.remove(acc.key)
-                            await appState.accountsChanged()
-                        }
-                    }
-                } label: {
-                    Label(acc.key.description, systemImage: state.isSignedIn ? "person.crop.circle.fill" : "exclamationmark.circle")
-                }
-            }
-            Divider()
-            Button("Add server…") {
-                appState.signInPrefill = nil
-                appState.showAddServer = true
-            }
-        } label: {
-            Image(systemName: accounts.contains { appState.accounts.state($0.key).isSignedIn } ? "cloud.fill" : "cloud")
-                .foregroundStyle(theme.primary)
-        }
-        .help("Accounts")
-    }
-}
-
 /// "Add server…" / sign-in flow: URL → `GET /api/info` → credentials or
 /// invite. Also used to re-sign-in an existing account.
 struct SignInSheet: View {

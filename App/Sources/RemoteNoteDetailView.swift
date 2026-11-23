@@ -22,152 +22,41 @@ struct RemoteNoteDetailView: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-                .padding(.horizontal, 32)
-                .padding(.top, 18)
-                .padding(.bottom, 12)
-
-            errorBanner
-                .padding(.horizontal, 32)
-                .padding(.bottom, 8)
-
-            conflictBanner
-                .padding(.horizontal, 32)
-                .padding(.bottom, 8)
-
-            reconnectBanner
-                .padding(.horizontal, 32)
-                .padding(.bottom, 8)
-
-            sessionBanner
-                .padding(.horizontal, 32)
-                .padding(.bottom, 8)
-
-            Divider().background(theme.border)
-
+        // Chrome lives in the shell: breadcrumb + presence in the top line,
+        // live phase / read-only / words in the status line. Only banners
+        // that need a decision render here.
+        VStack(alignment: .leading, spacing: 6) {
+            Group {
+                errorBanner
+                conflictBanner
+                reconnectBanner
+                sessionBanner
+            }
+            .padding(.horizontal, 16)
             content
         }
+        .padding(.top, hasBanner ? 8 : 0)
         .background(theme.background)
+        .background {
+            // ⌘S for the REST fallback editor (visionOS: no live replica).
+            if canEditNotes && liveSession == nil {
+                Button("Save", action: requestSave)
+                    .keyboardShortcut("s", modifiers: .command)
+                    .hidden()
+            }
+        }
         .onAppear(perform: ensureLoaded)
         .onChange(of: appState.remoteVaultsStore.openNoteSnapshot) { _, newSnapshot in
             handleSnapshotChange(newSnapshot)
         }
     }
 
-    // MARK: - Header
-
-    @ViewBuilder
-    private var header: some View {
-        @Bindable var bound = appState
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 10) {
-                Button(action: close) {
-                    Label("Back", systemImage: "chevron.left")
-                        .font(.system(.body, design: .monospaced))
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(theme.textDim)
-                .keyboardShortcut(.escape, modifiers: [])
-
-                Spacer()
-
-                if canEditNotes {
-                    Picker("", selection: $bound.remoteEditorMode) {
-                        Image(systemName: "book").tag(NoteDisplayMode.view)
-                        Image(systemName: "pencil").tag(NoteDisplayMode.edit)
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 110)
-                    .labelsHidden()
-                }
-
-                if let session = liveSession {
-                    Text(phaseLabel(session))
-                        .font(.caption2)
-                        .foregroundStyle(session.phase == .live ? theme.accent : theme.warning)
-                } else if appState.remoteEditor.isDirty {
-                    Text("modified")
-                        .font(.caption2)
-                        .foregroundStyle(theme.warning)
-                } else if case .saving = appState.remoteEditor.status {
-                    Text("saving…")
-                        .font(.caption2)
-                        .foregroundStyle(theme.textDim)
-                } else if case .saved = appState.remoteEditor.status {
-                    Text("saved")
-                        .font(.caption2)
-                        .foregroundStyle(theme.accent)
-                }
-
-                if canEditNotes && liveSession == nil {
-                    Button(action: requestSave) {
-                        Label("Save", systemImage: "checkmark")
-                            .labelStyle(.iconOnly)
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(appState.remoteEditor.isDirty ? theme.primary : theme.textDim)
-                    .disabled(!appState.remoteEditor.isDirty || isSaving)
-                    .keyboardShortcut("s", modifiers: .command)
-                }
-
-                Button(action: refresh) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                        .labelStyle(.iconOnly)
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(theme.textDim)
-                .disabled(appState.remoteVaultsStore.openNoteIsLoading)
-            }
-            Text(displayTitle)
-                .font(.system(size: 28, weight: .semibold))
-                .foregroundStyle(theme.text)
-            HStack(spacing: 8) {
-                Image(systemName: "cloud")
-                    .foregroundStyle(theme.textDim)
-                Text("\(vault.name) · \(listRow.path)")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(theme.textDim)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if !canEditNotes {
-                    Text("· read-only (note.write required)")
-                        .font(.caption2)
-                        .foregroundStyle(theme.textDim)
-                }
-                presencePill
-            }
-        }
-    }
-
-    /// "+N viewing: alice, bob" pill. Visible only when at least one
-    /// other peer is on this note. Each peer renders as a small filled
-    /// circle in their assigned color followed by their display name;
-    /// long lists truncate at 3 names + a "+M more" tail. Phase H slice 4.
-    @ViewBuilder
-    private var presencePill: some View {
-        let peers = appState.remoteVaultsStore.openNotePresence
-        if !peers.isEmpty {
-            HStack(spacing: 6) {
-                Text("·")
-                    .foregroundStyle(theme.textDim)
-                ForEach(peers.prefix(3)) { peer in
-                    HStack(spacing: 3) {
-                        Circle()
-                            .fill(Color(hex: peer.color))
-                            .frame(width: 6, height: 6)
-                        Text(peer.name)
-                            .font(.caption2)
-                            .foregroundStyle(theme.text)
-                    }
-                }
-                if peers.count > 3 {
-                    Text("+\(peers.count - 3) more")
-                        .font(.caption2)
-                        .foregroundStyle(theme.textDim)
-                }
-            }
-        }
+    private var hasBanner: Bool {
+        if case .conflict = appState.remoteEditor.status { return true }
+        if case .error = appState.remoteEditor.status { return true }
+        if appState.remoteVaultsStore.reconnectStatus != nil { return true }
+        if let s = liveSession, s.termination != nil || s.connectionNotice != nil { return true }
+        return false
     }
 
     /// `note.write` capability check. Mirrors the audit/invite checks in
@@ -396,9 +285,9 @@ struct RemoteNoteDetailView: View {
                     onEffect: handleVimEffect,
                     jjEscapeEnabled: appState.preferences.jjEscapeMapping,
                     showLineNumbers: appState.preferences.showLineNumbers,
-                    relativeLineNumbers: appState.preferences.relativeLineNumbers
+                    relativeLineNumbers: appState.preferences.relativeLineNumbers,
+                    options: appState.vimEditorOptions
                 )
-                .overlay(alignment: .top) { editModeStripe }
                 // One editor per replica: a new session remounts it.
                 .id(ObjectIdentifier(session))
             } else {
@@ -431,9 +320,9 @@ struct RemoteNoteDetailView: View {
                         onEffect: handleVimEffect,
                         jjEscapeEnabled: appState.preferences.jjEscapeMapping,
                         showLineNumbers: appState.preferences.showLineNumbers,
-                        relativeLineNumbers: appState.preferences.relativeLineNumbers
+                        relativeLineNumbers: appState.preferences.relativeLineNumbers,
+                        options: appState.vimEditorOptions
                     )
-                    .overlay(alignment: .top) { editModeStripe }
                 } else {
                     PlainTextEditor(text: $editor.currentText)
                 }
@@ -530,7 +419,6 @@ struct RemoteNoteDetailView: View {
     // MARK: - Lifecycle / actions
 
     private func ensureLoaded() {
-        appState.remoteEditorMode = .view
         let store = appState.remoteVaultsStore
         let vaultID = vault.id
         let noteID = listRow.id

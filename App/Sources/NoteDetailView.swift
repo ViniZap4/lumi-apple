@@ -112,8 +112,14 @@ struct NoteDetailView: View {
                 : nil,
             value: entry.relativePath
         )
-        .navigationTitle(displayTitle)
+        .background {
+            // ⌘S saves (local notes write to disk; vim :w does the same).
+            Button("Save") { editor.save() }
+                .keyboardShortcut("s", modifiers: .command)
+                .hidden()
+        }
         #if os(iOS) || os(visionOS)
+        .navigationTitle(displayTitle)
         .navigationBarTitleDisplayMode(.inline)
         #endif
     }
@@ -164,9 +170,9 @@ struct NoteDetailView: View {
                         },
                         jjEscapeEnabled: appState.preferences.jjEscapeMapping,
                         showLineNumbers: appState.preferences.showLineNumbers,
-                        relativeLineNumbers: appState.preferences.relativeLineNumbers
+                        relativeLineNumbers: appState.preferences.relativeLineNumbers,
+                        options: appState.vimEditorOptions
                     )
-                    .overlay(alignment: .top) { editModeStripe }
                 } else {
                     PlainTextEditor(text: Binding(
                         get: { editor.currentText },
@@ -321,201 +327,6 @@ struct ReadModeScroll<Content: View>: View {
             .environment(\.markdownKeyboardScrolling, jkEnabled)
     }
 }
-
-#if canImport(AppKit)
-/// Single NSEvent local monitor for every read-mode scroll key.
-/// Handles both plain-key bindings (j/k/g/G/d/u/f/b) and Ctrl-letter
-/// shortcuts (⌃D/U/F/B/T/G).
-///
-/// Installed at App init (before SwiftUI's view tree builds its own
-/// monitors for List typeahead etc.), which puts it first in the
-/// NSEvent dispatch order. Without that, when the sidebar held focus
-/// SwiftUI's typeahead monitor would fire first on `j`, beep on "no
-/// matching item", then yield to our monitor — the beep we couldn't
-/// silence by returning nil because it already played.
-///
-/// `isActive` is consulted on every event so the monitor only consumes
-/// while a note is open in read mode. It passes everything through
-/// otherwise. The closures call into a shared ReadModeCoordinator on
-/// AppState so the monitor never has a stale scrollView reference.
-@MainActor
-final class ReadKeyMonitor {
-    private let isActive: @MainActor () -> Bool
-    private let glide: (Int) -> Void
-    private let halfPage: (Int) -> Void
-    private let fullPage: (Int) -> Void
-    private let scrollToEdge: (ReadModeCoordinator.Edge) -> Void
-    private let closeNote: () -> Void
-    private let yankSelected: () -> Void
-    nonisolated(unsafe) private var token: Any?
-
-    init(
-        isActive: @escaping @MainActor () -> Bool,
-        glide: @escaping @MainActor (Int) -> Void,
-        halfPage: @escaping @MainActor (Int) -> Void,
-        fullPage: @escaping @MainActor (Int) -> Void,
-        scrollToEdge: @escaping @MainActor (ReadModeCoordinator.Edge) -> Void,
-        closeNote: @escaping @MainActor () -> Void,
-        yankSelected: @escaping @MainActor () -> Void
-    ) {
-        self.isActive = isActive
-        self.glide = glide
-        self.halfPage = halfPage
-        self.fullPage = fullPage
-        self.scrollToEdge = scrollToEdge
-        self.closeNote = closeNote
-        self.yankSelected = yankSelected
-        token = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            self?.handle(event) ?? event
-        }
-    }
-
-    deinit {
-        if let token { NSEvent.removeMonitor(token) }
-    }
-
-    private func handle(_ event: NSEvent) -> NSEvent? {
-        // Editable text input always wins — we never want to shadow
-        // typing into the quick switcher / settings / etc.
-        if let textResponder = NSApp.keyWindow?.firstResponder as? NSText,
-           textResponder.isEditable {
-            return event
-        }
-
-        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let hasCmd = mods.contains(.command)
-        let hasOpt = mods.contains(.option)
-        let hasCtrl = mods.contains(.control)
-        let hasShift = mods.contains(.shift)
-
-        // Cmd-C in read mode: trigger the yank flash *alongside* the system
-        // copy. We let the event pass through so AppKit's responder-chain
-        // copy still runs — meaning we don't have to reach into the text
-        // host for the selection ourselves. Only fires when the read pane
-        // is active so we don't blink the flash on every Cmd-C in
-        // settings / sign-in / etc.
-        if hasCmd && !hasCtrl && !hasOpt {
-            let charsForKey = event.charactersIgnoringModifiers?.lowercased() ?? ""
-            if charsForKey == "c" && isActive() {
-                yankSelected()
-                return event
-            }
-        }
-
-        if hasCmd || hasOpt { return event }
-
-        // The scroll bindings get consumed *regardless* of whether
-        // we'd actually scroll right now — passing them through to the
-        // sidebar's NSCollectionView meant typeahead beeped on "no
-        // matching item", which is what the user heard when they
-        // clicked the sidebar then pressed ⌃U. We just won't *do*
-        // anything when there's no note open in read mode.
-        let active = isActive()
-
-        // Resolve the "letter" the user pressed in a way that survives
-        // non-US layouts AND the Ctrl-letter quirk where
-        // `charactersIgnoringModifiers` can return an empty string or a
-        // dead-key character. Order of trust:
-        //   1. event.charactersIgnoringModifiers — gives the layout-
-        //      resolved letter when present (most reliable for plain
-        //      keys).
-        //   2. event.characters → ASCII control code → letter. For
-        //      Ctrl+U the ASCII control is 0x15; subtracting 0x40 from
-        //      the uppercase form gives 0x15 → 'u'. Covers cases where
-        //      step 1 returns "" because AppKit didn't synthesize a
-        //      layout char for the Ctrl combo.
-        let letter: String? = {
-            if let s = event.charactersIgnoringModifiers?.lowercased(), !s.isEmpty, s.count == 1 {
-                return s
-            }
-            if hasCtrl,
-               let firstScalar = event.characters?.unicodeScalars.first {
-                let v = firstScalar.value
-                if v >= 0x01 && v <= 0x1A {
-                    return String(Unicode.Scalar(v + 0x60)!) // 0x01 → 'a' …
-                }
-            }
-            return nil
-        }()
-
-        // Escape / Backspace — handled specially: in read mode either
-        // one closes the note and returns to the tree browser. Outside
-        // read mode they pass through so the system handles them
-        // (cancel buttons, sheet dismissal, text-field deletion).
-        if event.keyCode == 53 || event.keyCode == 51 {
-            if active {
-                closeNote()
-                return nil
-            }
-            return event
-        }
-
-        // Other structural keys pass through.
-        let passThroughKeyCodes: Set<UInt16> = [
-            36, 76,        // return / keypad enter
-            48,            // tab
-            123, 124, 125, 126 // arrows
-        ]
-        if passThroughKeyCodes.contains(event.keyCode) { return event }
-
-        // If we couldn't resolve a letter, only consume when active
-        // (a note is open in read mode). Outside read mode unknown
-        // keys flow through so the rest of the app behaves normally.
-        guard let letter else { return active ? nil : event }
-
-        // Plain `y` in read mode is the vim-style yank shortcut. Fires
-        // the same code path as ⌘C — sends `copy:` down the responder
-        // chain (picks up the active text selection) and bumps the
-        // yank-flash timestamp so the read pane animates a brief
-        // highlight to confirm. Only when active so the rest of the
-        // app keeps `y` as a normal letter key.
-        if active && !hasCtrl && !hasShift && letter == "y" {
-            yankSelected()
-            return nil
-        }
-
-        // Scroll-key set the monitor "owns". Outside read mode we
-        // still consume them — performing no scroll — so the sidebar
-        // typeahead doesn't beep on them.
-        let isScrollKey: Bool
-        if hasCtrl {
-            isScrollKey = ["d", "u", "f", "b", "t", "g"].contains(letter)
-            if active {
-                switch letter {
-                case "d": halfPage(1)
-                case "u": halfPage(-1)
-                case "f": fullPage(1)
-                case "b": fullPage(-1)
-                case "t": halfPage(1)
-                case "g": scrollToEdge(hasShift ? .bottom : .top)
-                default: break
-                }
-            }
-        } else {
-            isScrollKey = ["j", "k", "d", "u", "f", "b", "g"].contains(letter)
-            if active {
-                let lineStep = 22
-                switch letter {
-                case "j": glide(lineStep)
-                case "k": glide(-lineStep)
-                case "d": halfPage(1)
-                case "u": halfPage(-1)
-                case "f": fullPage(1)
-                case "b": fullPage(-1)
-                case "g": scrollToEdge(hasShift ? .bottom : .top)
-                default: break
-                }
-            }
-        }
-
-        if isScrollKey { return nil }
-        // Other letters: in read mode swallow (no input destination
-        // for a read-only note); otherwise pass through so the rest
-        // of the app sees them.
-        return active ? nil : event
-    }
-}
-#endif
 
 #if os(macOS)
 import AppKit

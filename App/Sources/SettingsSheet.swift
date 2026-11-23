@@ -258,15 +258,22 @@ struct SettingsSheet: View {
                 detail: "Typing j j in quick succession exits insert and removes the buffered j.",
                 isOn: $prefs.jjEscapeMapping
             )
-            toggleRow(
-                title: "Vim keys in note tree",
-                detail: "j/k move · l or ↩ opens · h collapses · gg / G top / bottom.",
-                isOn: $prefs.vimNavigationInList
+            EscapeSequencesRow(prefs: appState.preferences)
+            stepperRow(
+                title: "Escape sequence timeout",
+                detail: "How long the editor waits for the next key of a sequence.",
+                value: Binding<Double>(
+                    get: { Double(prefs.escapeTimeoutMs) },
+                    set: { prefs.escapeTimeoutMs = Int($0) }
+                ),
+                in: Double(EscapeSequences.timeoutMinMs)...Double(EscapeSequences.timeoutMaxMs),
+                step: 50,
+                format: { "\(Int($0)) ms" }
             )
             toggleRow(
-                title: "j / k scroll in read mode",
-                detail: "Hold to keep scrolling; ⌃d / ⌃u half-page; g / G top / bottom.",
-                isOn: $prefs.jkScrollInView
+                title: "Wrap long lines",
+                detail: "Soft wrap in the editor (vim's `wrap`). Off scrolls horizontally.",
+                isOn: $prefs.lineWrapping
             )
         }
     }
@@ -275,16 +282,26 @@ struct SettingsSheet: View {
     private var navigationSection: some View {
         @Bindable var prefs = appState.preferences
         VStack(alignment: .leading, spacing: 14) {
-            stepperRow(
-                title: "Preview body lines",
-                detail: "Max lines shown in the three-column browser's preview pane.",
-                value: Binding<Double>(
-                    get: { Double(prefs.previewLines) },
-                    set: { prefs.previewLines = Int($0) }
-                ),
-                in: 5.0...80.0,
-                step: 5.0,
-                format: { "\(Int($0)) lines" }
+            toggleRow(
+                title: "Preview column",
+                detail: "Render the note under the cursor in the explorer's third column (zp).",
+                isOn: $prefs.explorerShowPreview
+            )
+            toggleRow(
+                title: "Show hidden files",
+                detail: "List dot-files and dot-folders in the explorer (.).",
+                isOn: Binding(
+                    get: { prefs.explorerShowHidden },
+                    set: {
+                        prefs.explorerShowHidden = $0
+                        appState.explorer.setShowHidden($0)
+                    }
+                )
+            )
+            toggleRow(
+                title: "j / k scroll in read mode",
+                detail: "Hold to keep scrolling; ⌃d / ⌃u half-page; gg / G top / bottom.",
+                isOn: $prefs.jkScrollInView
             )
         }
     }
@@ -294,8 +311,8 @@ struct SettingsSheet: View {
         @Bindable var prefs = appState.preferences
         VStack(alignment: .leading, spacing: 14) {
             toggleRow(
-                title: "Keybinds bar",
-                detail: "Contextual key hints along the bottom of the window — same idea as TUI's status bar.",
+                title: "Key hints in the status line",
+                detail: "A short reminder (? keys, i edit, q back) at the right of the status line.",
                 isOn: $prefs.showKeybindsBar
             )
         }
@@ -406,5 +423,64 @@ private extension String {
     func capitalizedFirst() -> String {
         guard let first = self.first else { return self }
         return first.uppercased() + dropFirst()
+    }
+}
+
+/// Insert-mode escape sequences (`jk`, `ff`), same rules as the web.
+private struct EscapeSequencesRow: View {
+    @Bindable var prefs: LumiPreferences
+    @Environment(\.theme) private var theme
+    @State private var draft = ""
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Escape sequences")
+                .font(.system(.body, design: .monospaced).weight(.semibold))
+                .foregroundStyle(theme.text)
+            Text("Keys typed quickly in insert mode that act as Esc (e.g. jk, ff). Up to \(EscapeSequences.maxCount).")
+                .font(.caption)
+                .foregroundStyle(theme.text.opacity(0.7))
+            HStack(spacing: 6) {
+                ForEach(prefs.escapeSequences, id: \.self) { seq in
+                    HStack(spacing: 4) {
+                        Text(seq).font(.system(.callout, design: .monospaced))
+                        Button {
+                            prefs.escapeSequences.removeAll { $0 == seq }
+                        } label: { Image(systemName: "xmark").font(.caption2) }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(RoundedRectangle(cornerRadius: 4).stroke(theme.border, lineWidth: 0.5))
+                }
+                TextField("add…", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.callout, design: .monospaced))
+                    .frame(width: 90)
+                    .onSubmit(add)
+            }
+            if let error {
+                Text(error).font(.caption).foregroundStyle(theme.error)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(theme.overlayBackground))
+    }
+
+    private func add() {
+        switch EscapeSequences.validate(draft) {
+        case let .success(v):
+            if prefs.escapeSequences.count >= EscapeSequences.maxCount {
+                error = "At most \(EscapeSequences.maxCount) sequences."
+                return
+            }
+            if !prefs.escapeSequences.contains(v) { prefs.escapeSequences.append(v) }
+            draft = ""
+            error = nil
+        case let .failure(e):
+            error = e.message
+        }
     }
 }

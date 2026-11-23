@@ -126,7 +126,7 @@ struct BookDetailsPanel: View {
             actions(status)
         }
         .padding(14)
-        .frame(width: 340)
+        .frame(minWidth: 340, alignment: .leading)
         .background(theme.background)
     }
 
