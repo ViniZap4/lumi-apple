@@ -18,6 +18,7 @@ public final class UnavailableNoteSession: CollaborativeDocument {
     public var vaultID: UUID { UUID() }
     public var noteID: String { "" }
     public var hasPendingLocalChanges: Bool { false }
+    public var restoredFromReplica: Bool { false }
     public var hasSynced: Bool { false }
     public var emptyAtSync: Bool { false }
     public var termination: SessionTermination? { nil }
@@ -88,6 +89,27 @@ public final class RemoteVaultsStore {
     public private(set) var isLoading: Bool = false
     public private(set) var lastError: LumiAPIError?
 
+    // MARK: Offline
+
+    /// Persisted per-note replicas + listing caches. nil disables offline
+    /// support (tests, visionOS). Set by the host.
+    @ObservationIgnored public var replicaStore: ReplicaStore?
+    /// Account the current client signs in as (replica / cache scope).
+    public private(set) var replicaAccount: AccountKey?
+    /// The last listing fetch failed for lack of network; `notes` (and
+    /// capabilities) come from the on-disk cache.
+    public private(set) var isOffline = false
+    /// When the cached listing in use was fetched (nil = live listing).
+    public private(set) var staleListingDate: Date?
+    /// Our own capabilities from the cached listing, used while offline.
+    public private(set) var cachedCapabilities: [String]?
+    /// Recovered offline texts of the current account (conflict copies
+    /// waiting for upload, or export-only after access was lost).
+    public private(set) var recoveredNotes: [RecoveredNote] = []
+    /// Transient message for the host (toast): conflict copy saved, etc.
+    public var offlineNotice: String?
+    @ObservationIgnored private var flushingPending = false
+
     /// The cached row for the currently-selected vault, if any. Derived so
     /// it stays consistent with `vaults` after a transfer-ownership or
     /// rename replaces the row in place.
@@ -126,10 +148,22 @@ public final class RemoteVaultsStore {
     /// nothing from one account leaks into another.
     public var apiClient: LumiAPIClient { client }
 
-    public func setClient(_ newClient: LumiAPIClient) {
-        guard newClient !== client else { return }
-        clear()
-        client = newClient
+    public func setClient(_ newClient: LumiAPIClient, account: AccountKey? = nil) {
+        if newClient !== client {
+            clear()
+            client = newClient
+        }
+        if account != replicaAccount {
+            replicaAccount = account
+            reloadRecovered()
+        }
+    }
+
+    /// Capabilities of `username` in the selected vault: the live member
+    /// row, else (offline) the cached one.
+    public func capabilities(forUsername username: String) -> [String]? {
+        if let me = members.first(where: { $0.username == username }) { return me.capabilities }
+        return isOffline ? cachedCapabilities : nil
     }
 
     /// Merge a feed catch-up into the visible note list (only when that
@@ -144,6 +178,7 @@ public final class RemoteVaultsStore {
             return
         }
         notes = CatchUp.apply(outcome, to: notes)
+        saveListingCache()
     }
 
     /// Pull the vault list from the server. Replaces the current `vaults`
@@ -223,10 +258,41 @@ public final class RemoteVaultsStore {
                 notesHasMore = false
                 _ = error
             }
+            isOffline = false
+            staleListingDate = nil
+            cachedCapabilities = nil
+            saveListingCache()
         } catch {
-            lastError = error
+            if case .network = error, selectedVaultID == id, loadListingCache(vaultID: id) {
+                isOffline = true
+            } else {
+                lastError = error
+            }
         }
         isLoading = false
+    }
+
+    // MARK: - Offline listing cache
+
+    /// Persist the visible listing + our capabilities for offline use.
+    /// Only a fully online listing is cached.
+    public func saveListingCache() {
+        guard !isOffline, let store = replicaStore, let account = replicaAccount, let vault = selectedVaultID else { return }
+        let caps = members.first { $0.username == account.username }?.capabilities
+        store.saveListing(BookListingCache(notes: notes.filter { $0.vaultID == vault }, capabilities: caps),
+                          account: account, vaultID: vault)
+    }
+
+    /// Use the cached listing (explorer works offline, marked stale).
+    @discardableResult
+    func loadListingCache(vaultID: UUID) -> Bool {
+        guard let store = replicaStore, let account = replicaAccount,
+              let cache = store.loadListing(account: account, vaultID: vaultID) else { return false }
+        notes = cache.notes
+        notesHasMore = false
+        cachedCapabilities = cache.capabilities
+        staleListingDate = cache.fetchedAt
+        return true
     }
 
     /// Fetch the REST snapshot of a server note: the read-only preview
@@ -288,10 +354,141 @@ public final class RemoteVaultsStore {
             return
         }
         destroyOpenSession()
-        let session = NoteSyncSession(vaultID: vaultID, noteID: noteID, connector: makeConnector(client), user: user)
+        let session = makeSession(vaultID: vaultID, noteID: noteID, user: user)
         openSession = session
+        session.onReplicaConflict = { [weak self, weak session] conflict in
+            guard let self, let session else { return }
+            self.handleReplicaConflict(conflict, from: session, user: user)
+        }
         session.start()
         #endif
+    }
+
+    /// True when the open note has a persisted replica (editable offline).
+    public func hasReplica(vaultID: UUID, noteID: String) -> Bool {
+        guard let store = replicaStore, let account = replicaAccount else { return false }
+        return store.exists(ReplicaKey(account: account, vaultID: vaultID, noteID: noteID))
+    }
+
+    #if canImport(YSwift)
+    private func makeSession(vaultID: UUID, noteID: String, user: AwarenessUser?) -> NoteSyncSession {
+        var binding: ReplicaBinding?
+        if let store = replicaStore, let account = replicaAccount {
+            let key = ReplicaKey(account: account, vaultID: vaultID, noteID: noteID)
+            let row = notes.first { $0.id == noteID && $0.vaultID == vaultID }
+            binding = ReplicaBinding(store: store, key: key, title: row?.title, path: row?.path)
+            store.evict(protecting: [key])
+        }
+        return NoteSyncSession(vaultID: vaultID, noteID: noteID, connector: makeConnector(client),
+                               user: user, replica: binding)
+    }
+
+    /// A replica that could not be merged: keep pending text as a
+    /// recoverable copy, drop the replica, and (lineage change) rejoin the
+    /// server's doc fresh — never merge across lineages.
+    private func handleReplicaConflict(_ conflict: ReplicaConflict, from session: NoteSyncSession, user: AwarenessUser?) {
+        recordConflict(conflict)
+        guard conflict.reason == .lineageChanged, openSession === session else { return }
+        destroyOpenSession()
+        openLiveSession(vaultID: conflict.vaultID, noteID: conflict.noteID, user: user)
+    }
+
+    private func recordConflict(_ conflict: ReplicaConflict) {
+        guard conflict.hadPendingChanges, let store = replicaStore, let account = replicaAccount else { return }
+        let key = ReplicaKey(account: account, vaultID: conflict.vaultID, noteID: conflict.noteID)
+        let rec = RecoveredNote(key: key, title: conflict.title, path: conflict.path, text: conflict.text,
+                                reason: conflict.recoveredReason, uploadable: true)
+        try? store.saveRecovered(rec)
+        reloadRecovered()
+        offlineNotice = conflict.reason == .noteDeleted
+            ? "note was deleted on the server — offline edits kept as “\(rec.conflictTitle)”"
+            : "note changed history on the server — offline edits kept as “\(rec.conflictTitle)”"
+        Task { await uploadRecoveredNotes() }
+    }
+    #endif
+
+    // MARK: - Recovered offline texts
+
+    public func reloadRecovered() {
+        guard let store = replicaStore, let account = replicaAccount else {
+            recoveredNotes = []
+            return
+        }
+        recoveredNotes = store.recovered(account: account)
+    }
+
+    /// Upload uploadable conflict copies of the selected vault as new
+    /// notes ("<title> (conflito offline)"). Failures keep the record
+    /// (retried on the next online listing; exportable meanwhile).
+    public func uploadRecoveredNotes() async {
+        guard let store = replicaStore, let account = replicaAccount, let vault = selectedVaultID, !isOffline else { return }
+        for rec in store.recovered(account: account, vaultID: vault) where rec.uploadable {
+            do {
+                let created = try await client.createNote(vaultID: vault, title: rec.conflictTitle, body: rec.text, tags: [])
+                store.deleteRecovered(rec.id)
+                if selectedVaultID == vault, !notes.contains(where: { $0.id == created.id }) {
+                    notes.insert(created, at: 0)
+                }
+                offlineNotice = "offline edits saved as “\(rec.conflictTitle)”"
+            } catch {
+                if case .network = error { break }
+            }
+        }
+        reloadRecovered()
+    }
+
+    /// Drop recovered records (after export or an explicit discard).
+    public func deleteRecovered(_ ids: [UUID]) {
+        guard let store = replicaStore else { return }
+        for id in ids { store.deleteRecovered(id) }
+        reloadRecovered()
+    }
+
+    /// Notes of the selected vault with unsent offline edits.
+    public func pendingReplicaNoteIDs() -> Set<String> {
+        guard let store = replicaStore, let account = replicaAccount, let vault = selectedVaultID else { return [] }
+        return Set(store.pending(account: account, vaultID: vault).map(\.key.noteID))
+    }
+
+    /// Push the offline edits of closed notes: join each pending replica
+    /// headless until the server acknowledged it (or `timeout`), one at a
+    /// time. The open note syncs through its own session.
+    public func flushPendingReplicas(timeout: Double = 15) async {
+        #if canImport(YSwift)
+        guard !flushingPending, !isOffline, let store = replicaStore, let account = replicaAccount,
+              let vault = selectedVaultID else { return }
+        flushingPending = true
+        defer { flushingPending = false }
+        for summary in store.pending(account: account, vaultID: vault) {
+            guard selectedVaultID == vault, replicaAccount == account, !isOffline else { return }
+            if let open = openSession, open.noteID == summary.key.noteID, open.vaultID == vault { continue }
+            let session = makeSession(vaultID: vault, noteID: summary.key.noteID, user: nil)
+            session.onReplicaConflict = { [weak self] conflict in self?.recordConflict(conflict) }
+            session.start()
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if session.termination != nil { break }
+                if session.phase == .live, !session.hasPendingLocalChanges { break }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            session.destroy()
+        }
+        #endif
+    }
+
+    /// LGPD wipe of replicas + listing caches for an account (or one
+    /// book). Pending texts become export-only recovered records, which
+    /// are returned so the host can offer an export first.
+    @discardableResult
+    public func purgeReplicas(account: AccountKey, vaultID: UUID? = nil, reason: RecoveredNote.Reason) -> [RecoveredNote] {
+        guard let store = replicaStore else { return [] }
+        if replicaAccount == account, vaultID == nil || openSession?.vaultID == vaultID {
+            destroyOpenSession()
+        }
+        let recovered = store.purge(account: account, vaultID: vaultID, reason: reason,
+                                    materialize: ReplicaText.materialize)
+        reloadRecovered()
+        return recovered
     }
 
     /// Tear down the open note's session (if any).
@@ -403,6 +600,7 @@ public final class RemoteVaultsStore {
             )
             notes.append(contentsOf: resp.notes)
             notesHasMore = resp.notes.count >= notesPageSize
+            saveListingCache()
         } catch let error where isForbidden(error) {
             notesHasMore = false
         } catch {
@@ -558,6 +756,9 @@ public final class RemoteVaultsStore {
     /// Wipe all state. Call on sign-out so the next sign-in starts clean.
     public func clear() {
         destroyOpenSession()
+        isOffline = false
+        staleListingDate = nil
+        cachedCapabilities = nil
         vaults = []
         selectedVaultID = nil
         members = []

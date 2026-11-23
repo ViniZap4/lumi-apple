@@ -104,15 +104,20 @@ final class FakeTransport: SyncTransport, @unchecked Sendable {
 /// Connector whose behaviour each test scripts.
 final class FakeConnector: SyncConnector, @unchecked Sendable {
     enum Mode { case join, closeBeforeOpen(Int?), fail(SyncConnectError) }
-    let room: FakeRoom
+    var room: FakeRoom
     var modes: [Mode] = []
     var probe: AuthProbeResult = .unknown
+    /// Network down: every connect fails transiently (lineage probe too).
+    var offline = false
+    var lineage: NoteLineageProbe = .unsupported
+    private(set) var lineageProbes = 0
     private(set) var transports: [FakeTransport] = []
     private(set) var probes = 0
 
     @MainActor init(room: FakeRoom) { self.room = room }
 
     func connect(vaultID: UUID, noteID: String) async throws(SyncConnectError) -> any SyncTransport {
+        if offline { throw .transient("offline") }
         let mode = modes.isEmpty ? .join : modes.removeFirst()
         let t = await MainActor.run { FakeTransport(room: room) }
         transports.append(t)
@@ -131,10 +136,15 @@ final class FakeConnector: SyncConnector, @unchecked Sendable {
         probes += 1
         return probe
     }
+
+    func noteLineage(vaultID: UUID, noteID: String) async -> NoteLineageProbe {
+        lineageProbes += 1
+        return offline ? .unavailable("offline") : lineage
+    }
 }
 
 @MainActor
-private func eventually(_ timeout: Double = 2, _ condition: () -> Bool) async -> Bool {
+func eventually(_ timeout: Double = 2, _ condition: () -> Bool) async -> Bool {
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
         if condition() { return true }

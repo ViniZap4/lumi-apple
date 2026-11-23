@@ -27,6 +27,29 @@ public protocol SyncTransport: AnyObject, Sendable {
 public protocol SyncConnector: Sendable {
     func connect(vaultID: UUID, noteID: String) async throws(SyncConnectError) -> any SyncTransport
     func probeAuth() async -> AuthProbeResult
+    /// Lineage stamp of the note (`notes.created_at`, `GET …/notes/:id`),
+    /// checked before a persisted replica is merged (`ReplicaLineage`).
+    func noteLineage(vaultID: UUID, noteID: String) async -> NoteLineageProbe
+}
+
+extension SyncConnector {
+    /// Connectors that cannot look the note up skip the stamp check; the
+    /// state-vector half of the lineage guard still runs.
+    public func noteLineage(vaultID: UUID, noteID: String) async -> NoteLineageProbe { .unsupported }
+}
+
+/// Answer of `SyncConnector.noteLineage`.
+public enum NoteLineageProbe: Sendable, Equatable {
+    /// The note row's `created_at` (second resolution on the wire).
+    case createdAt(Date)
+    /// 404: the note is gone.
+    case notFound
+    case unauthorized
+    case forbidden
+    /// Network failure — retry with backoff.
+    case unavailable(String)
+    /// No stamp available (no `created_at`, connector without REST).
+    case unsupported
 }
 
 public enum SyncConnectError: Error, Sendable, Equatable {
@@ -172,6 +195,21 @@ public final class WebSocketConnector: SyncConnector {
             throw .notConfigured
         }
         return WebSocketTransport(url: url, session: session)
+    }
+
+    public func noteLineage(vaultID: UUID, noteID: String) async -> NoteLineageProbe {
+        do {
+            let note = try await client.getNote(vaultID: vaultID, noteID: noteID)
+            return note.createdAt.map(NoteLineageProbe.createdAt) ?? .unsupported
+        } catch {
+            switch error {
+            case .unauthorized, .server(401, _, _): return .unauthorized
+            case .server(403, _, _): return .forbidden
+            case .server(404, _, _), .invalidResponse(404): return .notFound
+            case .network(let m): return .unavailable(m)
+            default: return .unavailable("\(error)")
+            }
+        }
     }
 
     public func probeAuth() async -> AuthProbeResult {

@@ -25,6 +25,14 @@ public final class BooksSyncEngine {
     public var addedBanner: String?
     /// Editor phase for the book whose note is open (set by the host).
     public var openEditor: (bookID: String, snapshot: EditorSnapshot)?
+    /// Notes per book with offline edits the server has not acknowledged
+    /// (persisted replicas, set by the host). Counts as "pending" input.
+    public var pendingReplicas: [String: Int] = [:]
+    /// Access to a bound book ended (`vault.revoked`, missing from
+    /// `hello`): the host wipes its offline replicas (LGPD).
+    @ObservationIgnored public var onAccessRevoked: ((Book) -> Void)?
+    /// `session.ended` for an account: the host wipes its replicas.
+    @ObservationIgnored public var onSessionEnded: ((AccountKey) -> Void)?
     /// Called after a catch-up for a book; `nil` outcome = "refetch the
     /// list" (server without `/changes`).
     @ObservationIgnored public var onNotesChanged: ((String, CatchUpOutcome?) -> Void)?
@@ -66,7 +74,8 @@ public final class BooksSyncEngine {
         )
         var cu = catchUp[book.id] ?? CatchUpSnapshot()
         cu.cursor = cursor(book.id)
-        let editor = openEditor?.bookID == book.id ? openEditor!.snapshot : EditorSnapshot()
+        var editor = openEditor?.bookID == book.id ? openEditor!.snapshot : EditorSnapshot()
+        if (pendingReplicas[book.id] ?? 0) > 0 { editor.pending = true }
         let status = bookStatus(book: snapshot, accountFeed: key.flatMap { feedState[$0] }, catchUp: cu,
                                 editor: editor, restHealth: key.flatMap { accounts.restHealth[$0] })
         return status
@@ -203,7 +212,10 @@ public final class BooksSyncEngine {
                 setHead(b.id, v.seq)
             }
             for b in registry.books where b.accountKey == key {
-                if let vid = b.vaultID, !listed.contains(vid) { markRevoked(b.id, reason: "removed") }
+                if let vid = b.vaultID, !listed.contains(vid) {
+                    markRevoked(b.id, reason: "removed")
+                    onAccessRevoked?(b)
+                }
             }
             if unknown { await refreshListings() }
             for b in registry.books where b.accountKey == key { await runCatchUpIfBehind(b.id) }
@@ -229,8 +241,10 @@ public final class BooksSyncEngine {
         case .vaultRevoked(let vid, let reason):
             guard let b = boundBook(vid, via: key) else { return }
             markRevoked(b.id, reason: reason)
+            onAccessRevoked?(b)
         case .sessionEnded:
             accounts.markNeedsSignIn(key, reason: "session ended")
+            onSessionEnded?(key)
         case .reconnect, .unknown:
             break
         }

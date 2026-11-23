@@ -49,5 +49,9 @@ public enum SessionTermination: Sendable, Equatable {
     case policy
     /// No server URL / token configured.
     case notConfigured
+    /// The persisted replica belongs to another CRDT lineage than the
+    /// server's doc (note recreated, CRDT reset): it was not merged. The
+    /// store replaces the session with a fresh one (`ReplicaConflict`).
+    case lineageChanged
 }
 
