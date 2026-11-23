@@ -197,6 +197,11 @@ struct ShellStatusLine: View {
         case .explorer:
             let nav = appState.explorer.nav
             var out: [String] = []
+            if let cached = appState.remoteVaultsStore.staleListingDate, appState.remoteVaultsStore.isOffline,
+               !appState.explorer.isLocal {
+                out.append("offline · list from \(cached.formatted(.relative(presentation: .named)))")
+            }
+            if appState.openBookPendingCount > 0 { out.append("\(appState.openBookPendingCount) pending") }
             if appState.explorer.yanked != nil { out.append("yanked") }
             if nav.showHidden { out.append("hidden") }
             let n = nav.entries.count

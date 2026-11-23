@@ -77,6 +77,15 @@ struct RootView: View {
             appState.showToast(banner)
             appState.sync.addedBanner = nil
         }
+        .onChange(of: appState.remoteVaultsStore.openSession?.hasPendingLocalChanges) { _, _ in
+            appState.publishEditorPhase()
+        }
+        .onChange(of: appState.remoteVaultsStore.offlineNotice) { _, notice in
+            guard let notice else { return }
+            appState.showToast(notice, tone: .warning)
+            appState.remoteVaultsStore.offlineNotice = nil
+        }
+        .modifier(OfflinePrompts())
     }
 
     /// VaultRecord rows for the one-shot books.yaml import.
@@ -204,3 +213,61 @@ extension ToolbarContent {
     }
 }
 #endif
+
+/// Decisions owed before offline data leaves the device: sign out /
+/// remove an account with pending edits, and texts that can no longer be
+/// synced (export or discard).
+private struct OfflinePrompts: ViewModifier {
+    @Environment(AppState.self) private var appState
+
+    func body(content: Content) -> some View {
+        content
+            .confirmationDialog(
+                accountTitle,
+                isPresented: Binding(get: { appState.accountActionPrompt != nil },
+                                     set: { if !$0 { appState.accountActionPrompt = nil } }),
+                titleVisibility: .visible,
+                presenting: appState.accountActionPrompt
+            ) { prompt in
+                switch prompt.kind {
+                case .signOut:
+                    Button("Sign out") { Task { await appState.performSignOut(prompt.key) } }
+                case .remove:
+                    Button("Export, then remove") {
+                        Task { await appState.performRemoveAccount(prompt.key, export: true) }
+                    }
+                    Button("Remove without exporting", role: .destructive) {
+                        Task { await appState.performRemoveAccount(prompt.key, export: false) }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { prompt in
+                switch prompt.kind {
+                case .signOut:
+                    Text("\(prompt.pending) note\(prompt.pending == 1 ? " has" : "s have") offline edits not sent yet. They stay on this device and sync after you sign in again as \(prompt.key.description).")
+                case .remove:
+                    Text("\(prompt.pending) note\(prompt.pending == 1 ? " has" : "s have") offline edits not sent yet. Removing the account deletes every offline copy of its books from this device.")
+                }
+            }
+            .confirmationDialog(
+                "Offline edits",
+                isPresented: Binding(get: { appState.recoveryPrompt != nil },
+                                     set: { if !$0 { appState.recoveryPrompt = nil } }),
+                titleVisibility: .visible,
+                presenting: appState.recoveryPrompt
+            ) { prompt in
+                Button("Export to Documents") { appState.exportRecovered(prompt.notes) }
+                Button("Discard", role: .destructive) { appState.discardRecovered(prompt.notes) }
+                Button("Later", role: .cancel) {}
+            } message: { prompt in
+                Text(prompt.message + " " + prompt.notes.map(\.conflictTitle).prefix(5).joined(separator: ", "))
+            }
+    }
+
+    private var accountTitle: String {
+        switch appState.accountActionPrompt?.kind {
+        case .remove: return "Remove account?"
+        default: return "Sign out?"
+        }
+    }
+}

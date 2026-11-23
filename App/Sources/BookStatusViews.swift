@@ -145,6 +145,8 @@ struct BookDetailsPanel: View {
         row("last sync", appState.sync.lastSyncedAt[book.id].map { $0.formatted(.relative(presentation: .named)) } ?? "never")
         let cu = appState.sync.catchUp[book.id]
         row("cursor / head", "\(appState.sync.cursor(book.id)) / \(cu?.head.map(String.init) ?? "?")")
+        let pending = appState.sync.pendingReplicas[book.id] ?? 0
+        row("pending", pending == 0 ? "nothing unsent" : "\(pending) note\(pending == 1 ? "" : "s") with offline edits not sent yet")
     }
 
     private func feedLabel(_ s: AccountFeedState) -> String {

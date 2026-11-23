@@ -78,9 +78,8 @@ extension AppState {
     func can(_ capability: String) -> Bool {
         guard let book = openBook else { return false }
         if book.kind == .local { return true }
-        guard let account = activeAccount else { return false }
-        let me = remoteVaultsStore.members.first { $0.username == account.username }
-        guard let caps = me?.capabilities else { return false }
+        guard let account = activeAccount,
+              let caps = remoteVaultsStore.capabilities(forUsername: account.username) else { return false }
         let ns = capability.split(separator: ".").first.map { String($0) + ".*" } ?? ""
         return caps.contains { $0 == "*" || $0 == capability || $0 == ns || $0 == "vault.*" }
     }

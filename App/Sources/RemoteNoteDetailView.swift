@@ -63,9 +63,8 @@ struct RemoteNoteDetailView: View {
     /// `RemoteVaultDetailView` — matches against the current session's
     /// member row inside the active vault.
     private var canEditNotes: Bool {
-        guard let account = appState.activeAccount else { return false }
-        let me = appState.remoteVaultsStore.members.first { $0.username == account.username }
-        guard let caps = me?.capabilities else { return false }
+        guard let account = appState.activeAccount,
+              let caps = appState.remoteVaultsStore.capabilities(forUsername: account.username) else { return false }
         return caps.contains { $0 == "*" || $0 == "note.*" || $0 == "note.write" || $0 == "vault.*" }
     }
 
@@ -224,7 +223,14 @@ struct RemoteNoteDetailView: View {
 
     @ViewBuilder
     private var content: some View {
-        if appState.remoteVaultsStore.openNoteIsLoading && appState.remoteEditor.status == .idle {
+        if liveSession?.hasSynced == true {
+            // The replica (live, or restored from disk offline) is the
+            // source: REST loading / errors don't matter.
+            switch appState.remoteEditorMode {
+            case .view: viewMode
+            case .edit: editMode
+            }
+        } else if appState.remoteVaultsStore.openNoteIsLoading && appState.remoteEditor.status == .idle {
             loadingState
         } else if let error = appState.remoteVaultsStore.openNoteError, !appState.remoteEditor.isBound(toVaultID: vault.id, noteID: listRow.id) {
             errorState(error)
@@ -296,7 +302,10 @@ struct RemoteNoteDetailView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 6) {
                         if session.termination == nil { ProgressView().controlSize(.small) }
-                        Text(session.termination.map(describe) ?? "connecting to live editing…")
+                        Text(session.termination.map(describe)
+                             ?? (appState.isRemoteOffline
+                                 ? "offline — no offline copy of this note yet; open it once online to edit it offline"
+                                 : "connecting to live editing…"))
                             .font(.system(.callout, design: .monospaced))
                             .foregroundStyle(theme.textDim)
                     }
@@ -365,6 +374,7 @@ struct RemoteNoteDetailView: View {
         case .notFound: return "this note was deleted on the server"
         case .policy: return "too many open live sessions — close another note and retry"
         case .notConfigured: return "no server session — sign in to edit live"
+        case .lineageChanged: return "this note's history changed on the server — reloading it"
         }
     }
 

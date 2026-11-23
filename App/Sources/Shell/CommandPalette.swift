@@ -237,12 +237,12 @@ struct CommandPalette: View {
         cmd("theme", "Theme…", aliases: "colorscheme appearance") { appState.query(paletteFor: .themes) }
         cmd("settings", "Settings", "⌘,", aliases: "preferences vim escape") { appState.showSettings = true }
         cmd("keys", "Keyboard shortcuts", "?", aliases: "help keymap") { appState.showHelp = true }
+        cmd("offline-copies", "Offline copies…", aliases: "recover conflict pending export offline") {
+            appState.showRecoveredNotes()
+        }
         for acc in appState.accounts.accounts where appState.accounts.state(acc.key).isSignedIn {
             cmd("signout-" + acc.key.description, "Sign out \(acc.key.description)", aliases: "logout account") {
-                Task {
-                    await appState.accounts.signOut(acc.key)
-                    await appState.accountsChanged()
-                }
+                appState.requestSignOut(acc.key)
             }
         }
         for acc in appState.accounts.accounts where !appState.accounts.state(acc.key).isSignedIn {
@@ -253,10 +253,7 @@ struct CommandPalette: View {
         }
         for acc in appState.accounts.accounts {
             cmd("remove-" + acc.key.description, "Remove account \(acc.key.description) from this device", aliases: "account forget delete") {
-                Task {
-                    await appState.accounts.remove(acc.key)
-                    await appState.accountsChanged()
-                }
+                appState.requestRemoveAccount(acc.key)
             }
         }
         return out

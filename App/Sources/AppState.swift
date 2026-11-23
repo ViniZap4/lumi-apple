@@ -181,6 +181,14 @@ final class AppState {
     /// Key → action reader for the explorer and reader.
     @ObservationIgnored var keymap = ShellKeymap()
 
+    // MARK: Offline
+
+    /// Sign out / remove account while offline edits are pending.
+    var accountActionPrompt: AccountActionPrompt?
+    /// Offline texts that could not be synced (access ended, upload failed):
+    /// export or discard.
+    var recoveryPrompt: RecoveryPrompt?
+
     init() {
         let accounts = AccountsStore()
         let books = BooksRegistry(bookmarks: SwiftDataBookmarkStore(context: LumiApp.sharedContainer.mainContext))
@@ -189,6 +197,9 @@ final class AppState {
         self.sync = BooksSyncEngine(accounts: accounts, registry: books)
         // Placeholder client until a bound book selects its account's.
         self.remoteVaultsStore = RemoteVaultsStore(client: LumiAPIClient())
+        // Offline editing of server books: per-note replicas on disk
+        // (only where a local CRDT exists).
+        if LumiCRDT.isSupported { remoteVaultsStore.replicaStore = .shared }
         #if canImport(AppKit)
         // Silence the system beep app-wide. Method-swizzles
         // NSResponder.noResponderFor(_:) to a no-op so AppKit's
@@ -215,6 +226,7 @@ final class AppState {
         accounts.load()
         books.importIfNeeded(records: legacyRecords)
         books.reload()
+        wireOfflineHooks()
         sync.onNotesChanged = { [weak self] bookID, outcome in
             guard let self, let book = self.books.book(bookID), let vault = book.vaultUUID else { return }
             Task { await self.remoteVaultsStore.applyCatchUp(outcome, vaultID: vault) }
@@ -274,7 +286,7 @@ final class AppState {
                 return
             }
             explorer.openRemote(vaultID: vault)
-            remoteVaultsStore.setClient(client)
+            remoteVaultsStore.setClient(client, account: key)
             await remoteVaultsStore.refresh()
             await remoteVaultsStore.selectVault(vault)
             // The explorer needs the whole tree, not the first page.
@@ -284,6 +296,17 @@ final class AppState {
                 pages += 1
             }
             explorer.updateRemote(notes: remoteVaultsStore.notes, loading: false)
+            if !remoteVaultsStore.isOffline, remoteVaultsStore.selectedVaultID == vault {
+                // Back online: push closed notes' offline edits and upload
+                // conflict copies.
+                let store = remoteVaultsStore
+                Task { [weak self] in
+                    await store.uploadRecoveredNotes()
+                    await store.flushPendingReplicas()
+                    self?.refreshPendingReplicas()
+                }
+            }
+            refreshPendingReplicas()
         }
     }
 
@@ -304,6 +327,7 @@ final class AppState {
 
     /// Keep the sync engine informed of the open note's CRDT phase.
     func publishEditorPhase() {
+        refreshPendingReplicas()
         guard let book = openBook, book.kind == .bound, selectedRemoteNoteID != nil else {
             sync.openEditor = nil
             return

@@ -6,6 +6,7 @@ import LumiKit
 /// calls only — bodies stay in the CRDT and are never seeded locally.
 extension AppState {
     func beginCreate() {
+        guard requireOnline("creating notes") else { return }
         guard can("note.create") else {
             showToast("you can't create notes in this book (note.create)", tone: .warning)
             return
@@ -16,6 +17,7 @@ extension AppState {
     func beginRename() {
         guard let cur = explorer.nav.current else { return }
         if !explorer.isLocal {
+            guard requireOnline("renaming notes") else { return }
             guard cur.kind == .note else {
                 showToast("folders on a server book are renamed through their notes", tone: .warning)
                 return
@@ -32,6 +34,7 @@ extension AppState {
     func beginDelete() {
         guard let cur = explorer.nav.current else { return }
         if !explorer.isLocal {
+            guard requireOnline("deleting notes") else { return }
             guard cur.kind == .note else {
                 showToast("delete the notes inside to remove a folder", tone: .warning)
                 return
@@ -198,6 +201,7 @@ extension AppState {
     // MARK: Paste
 
     func paste() {
+        guard requireOnline("duplicating notes") else { return }
         guard let yanked = explorer.yanked, let note = yanked.note else {
             showToast("nothing yanked — y on a note first")
             return

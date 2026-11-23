@@ -114,6 +114,12 @@ struct ManageBooksSheet: View {
                 Divider()
                 Button(book.path != nil || appState.books.bookmarks.bookmark(for: book.id) != nil
                        ? "Unlink (keep folder as local book)" : "Remove from list") {
+                    if let key = book.accountKey, let vault = book.vaultUUID {
+                        // The book no longer syncs here: its offline
+                        // replicas go too (pending text offered for export).
+                        appState.purgeOffline(account: key, vaultID: vault, reason: .accessRevoked,
+                                              why: "\(book.name) was unlinked.")
+                    }
                     appState.books.unlink(book.id)
                     appState.sync.forgetBook(book.id)
                     refresh()
