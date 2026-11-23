@@ -49,10 +49,9 @@ struct ShellBreadcrumb: View {
     private var segments: [String] {
         guard let book = appState.openBook else { return ["lumi"] }
         var out = [book.name]
-        if let path = appState.openNotePath, appState.isNoteOpen {
-            let dir = NoteTree.dirOf(NoteTree.normalizePath(path))
-            if !dir.isEmpty { out += dir.split(separator: "/").map(String.init) }
-            out.append(appState.openNoteTitle ?? NoteTree.stem(path))
+        if appState.isNoteOpen {
+            // The note bar shows the folder and the title.
+            return out
         } else {
             let dir = appState.explorer.nav.dir
             if !dir.isEmpty { out += dir.split(separator: "/").map(String.init) }
@@ -111,12 +110,15 @@ struct ShellStatusLine: View {
 
     var body: some View {
         HStack(spacing: 10) {
+            // Mode pill (web `.sb-mode`): the mode's colour on a 16% tint.
             Text(modeLabel)
                 .font(ShellFont.mode)
-                .foregroundStyle(theme.background)
+                .tracking(0.6)
+                .foregroundStyle(modeColor)
                 .padding(.horizontal, 7)
                 .frame(height: 16)
-                .background(Rectangle().fill(modeColor))
+                .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(modeColor.opacity(0.16)))
+                .animation(.easeOut(duration: 0.12), value: modeLabel)
             Text(context)
                 .font(ShellFont.small)
                 .foregroundStyle(theme.textDim)
@@ -211,7 +213,9 @@ struct ShellStatusLine: View {
             } else if appState.editor.isDirty {
                 out.append("modified")
             }
-            out.append("\(wordCount(appState.openNoteText)) words")
+            let words = MarkdownText.wordCount(appState.openNoteText)
+            let minutes = MarkdownText.readingMinutes(words: words)
+            out.append(minutes > 0 ? "\(words) words · \(minutes) min read" : "\(words) words")
             return out.filter { !$0.isEmpty }
         }
     }
@@ -237,11 +241,6 @@ struct ShellStatusLine: View {
         }
     }
 
-    private func wordCount(_ text: String) -> Int {
-        var n = 0
-        text.enumerateSubstrings(in: text.startIndex..., options: [.byWords, .substringNotRequired]) { _, _, _, _ in n += 1 }
-        return n
-    }
 }
 
 extension VimMode {
@@ -260,14 +259,15 @@ extension VimMode {
         }
     }
 
-    /// Mode colour for the status badge and the edit stripe.
+    /// Mode colour for the status pill (web `.sb-mode`): normal primary,
+    /// insert accent, visual secondary, replace error, command warning.
     func chromeColor(_ theme: ThemeTokens) -> Color {
         switch self {
-        case .insert: return theme.primary
+        case .insert: return theme.accent
         case .replace: return theme.error
-        case .visual: return theme.warning
-        case .commandLine: return theme.accent
-        case .normal: return theme.info
+        case .visual: return theme.secondary
+        case .commandLine: return theme.warning
+        case .normal: return theme.primary
         }
     }
 }

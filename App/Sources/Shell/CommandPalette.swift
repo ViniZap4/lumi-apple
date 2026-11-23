@@ -222,6 +222,14 @@ struct CommandPalette: View {
         if appState.isNoteOpen {
             cmd("edit", appState.isEditing ? "Read mode" : "Edit mode", "⌘E", aliases: "toggle") { appState.toggleEditing() }
             cmd("close", "Back to explorer", "q", aliases: "close quit") { appState.closeNote() }
+            cmd("split-preview", appState.preferences.splitPreview ? "Hide split preview" : "Show split preview",
+                "\\p", aliases: "preview split side by side render :preview") { appState.toggleSplitPreview() }
+        }
+        if appState.surface == .explorer || appState.surface == .reader {
+            cmd("hints", "Click by label (hints)", appState.surface == .explorer ? "f" : "F", aliases: "hint mode vimium mouse") {
+                // After the palette closes, so its rows aren't labelled.
+                Task { @MainActor in appState.startHints() }
+            }
         }
         cmd("switch-book", "Switch book…", "", aliases: "book open") {
             appState.query(paletteFor: .books)
@@ -235,7 +243,7 @@ struct CommandPalette: View {
         }
         cmd("sidebar", "Toggle sidebar", "⌘\\", aliases: "panel") { appState.toggleSidebar() }
         cmd("theme", "Theme…", aliases: "colorscheme appearance") { appState.query(paletteFor: .themes) }
-        cmd("settings", "Settings", "⌘,", aliases: "preferences vim escape vimrc") { appState.showSettings = true }
+        cmd("settings", "Settings", "⌘,", aliases: "preferences vim escape vimrc :settings") { appState.showSettings = true }
         cmd("legend", appState.preferences.showKeybindsBar ? "Hide command legend" : "Show command legend", aliases: "view keys hints which-key") {
             appState.preferences.showKeybindsBar.toggle()
         }

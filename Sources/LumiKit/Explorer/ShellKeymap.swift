@@ -6,6 +6,8 @@ public struct KeyStroke: Sendable, Equatable {
     public enum Special: Sendable, Equatable {
         case up, down, left, right, enter, escape, backspace, tab
         case pageUp, pageDown, home, end
+        /// Shift+F10 / the context-menu key.
+        case menu
     }
 
     /// Printed character(s) with shift applied (`G`, `?`, `~`). nil for
@@ -66,6 +68,9 @@ public enum ShellAction: Sendable, Equatable {
     case prevBook        // [
     case nextBook        // ]
     case close           // q (reader)
+    case settings        // , (explorer)
+    case hints           // f (explorer) / F (explorer, reader)
+    case contextMenu     // Shift+F10
     /// First key of a chord (`g`, `z`) or a count digit: consumed, no-op.
     case pending
 }
@@ -132,6 +137,7 @@ public struct ShellKeymap: Sendable {
             case .home: return .top
             case .end: return .bottom
             case .tab: return nil
+            case .menu: return context == .explorer ? .contextMenu : nil
             }
         }
 
@@ -187,6 +193,7 @@ public struct ShellKeymap: Sendable {
         case "]": count = nil; return .nextBook
         case "i", "e": count = nil; return .edit
         case "R": count = nil; return .refresh
+        case "F": count = nil; return .hints
         default: break
         }
 
@@ -203,6 +210,8 @@ public struct ShellKeymap: Sendable {
             case "y": return .yank
             case "p": return .paste
             case ".": return .toggleHidden
+            case ",": return .settings
+            case "f": return .hints
             case "q": return nil
             default: return nil
             }

@@ -16,17 +16,17 @@ struct KeymapHelpOverlay: View {
         ("Files", [
             ("a", "new note (a/b/name, dir/)"), ("r", "rename"), ("d", "delete (confirm)"),
             ("y  p", "yank / paste copy"), (".", "show hidden"), ("zp", "preview column"),
-            ("R", "refresh"),
+            ("R", "refresh"), ("⇧F10  right-click", "context menu"), ("drag", "note onto a folder: move"),
         ]),
         ("Note", [
             ("⏎  l", "read"), ("i  e  ⌘E", "edit (vim)"), ("q  h  ⎋", "back to explorer"),
             ("j k  d u", "scroll"), ("gg  G", "top / bottom"), ("y", "copy selection"),
-            (":q  :wq", "leave the editor"),
+            (":q  :wq", "leave the editor"), ("\\p  :preview split", "preview beside source"),
         ]),
         ("App", [
             ("space  :  ⌘K", "command palette"), ("[  ]", "previous / next book"),
             ("⌃1–9  g1–9", "book by number"), ("⌘\\", "sidebar"), ("⌥⌘,", "book settings"),
-            ("⌘,", "settings"), ("?", "this help"),
+            ("⌘,  ,  :settings", "settings"), ("f  F", "hints: click by label"), ("?", "this help"),
         ]),
     ]
 

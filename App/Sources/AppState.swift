@@ -188,6 +188,15 @@ final class AppState {
     var toast: ShellToast?
     /// Key → action reader for the explorer and reader.
     @ObservationIgnored var keymap = ShellKeymap()
+    /// The mounted vim editor (task toggles from the split preview go
+    /// through it so its buffer, view and CRDT stay one).
+    @ObservationIgnored weak var activeEditor: VimController?
+    /// Frames of everything hint mode can label (rows, note bar buttons).
+    @ObservationIgnored let hintRegistry = HintRegistry()
+    /// Hint mode (`f` explorer / `F` anywhere): labels on screen.
+    var hintSession: HintSession?
+    /// Note bar: the title is being renamed inline.
+    var renamingTitle = false
 
     // MARK: Offline
 

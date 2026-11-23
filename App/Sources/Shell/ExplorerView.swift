@@ -57,7 +57,8 @@ struct ExplorerView: View {
                     entries: explorer.nav.parentEntries,
                     cursor: explorer.nav.parentCursor,
                     active: false,
-                    emptyText: ""
+                    emptyText: "",
+                    hintPrefix: "parent"
                 ) { _, entry in
                     if entry.kind == .folder {
                         explorer.nav.goTo(entry.path)
@@ -103,7 +104,8 @@ struct ExplorerView: View {
                 cursor: explorer.nav.cursor,
                 active: true,
                 openKey: openKey,
-                emptyText: emptyText
+                emptyText: emptyText,
+                hintPrefix: "current"
             ) { i, entry in
                 explorer.nav.setCursor(i)
                 if entry.kind == .folder { _ = explorer.nav.right() }
@@ -155,10 +157,13 @@ struct ExplorerColumn: View {
     let active: Bool
     var openKey: String?
     var emptyText: String = "empty"
+    var hintPrefix: String = "col"
     let onPick: (Int, ExplorerEntry) -> Void
     let onOpen: (Int, ExplorerEntry) -> Void
 
     @Environment(\.theme) private var theme
+    @Environment(AppState.self) private var appState
+    @State private var dropTarget: String?
 
     var body: some View {
         if entries.isEmpty {
@@ -167,24 +172,78 @@ struct ExplorerColumn: View {
                 .foregroundStyle(theme.textDim)
                 .padding(12)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .contentShape(Rectangle())
+                .shellContextMenu(key: active ? "explorer.empty" : "explorer.\(hintPrefix).empty") { appState.explorerMenu(for: nil) }
         } else {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(entries.enumerated()), id: \.element.key) { i, entry in
-                            row(entry, index: i)
-                                .id(entry.key)
-                                .contentShape(Rectangle())
-                                .onTapGesture(count: 2) { onOpen(i, entry) }
-                                .onTapGesture { onPick(i, entry) }
+                            interactiveRow(entry, index: i)
                         }
                     }
                     .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+                .background {
+                    // Empty space below the rows: the "new / paste / filter" menu.
+                    if active {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .shellContextMenu(key: "explorer.empty") { appState.explorerMenu(for: nil) }
+                    }
                 }
                 .scrollIndicators(.never)
                 .onAppear { scrollToCursor(proxy, animated: false) }
                 .onChange(of: cursor) { _, _ in scrollToCursor(proxy, animated: false) }
                 .onChange(of: entries.first?.key) { _, _ in scrollToCursor(proxy, animated: false) }
+            }
+        }
+    }
+
+    /// A row with the mouse paths: click selects / enters, double-click
+    /// opens, right-click (⌃-click, ⇧F10) shows the key-labelled menu, a
+    /// note drags onto a folder to move it, hint mode can click it.
+    @ViewBuilder
+    private func interactiveRow(_ entry: ExplorerEntry, index i: Int) -> some View {
+        let base = row(entry, index: i)
+            .id(entry.key)
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { onOpen(i, entry) }
+            .onTapGesture { onPick(i, entry) }
+            .shellContextMenu(key: entry.key) { appState.explorerMenu(for: entry) }
+            .hintTarget("\(hintPrefix):\(entry.key)") {
+                if entry.kind == .note { onOpen(i, entry) } else { onPick(i, entry) }
+            }
+        if entry.kind == .folder {
+            base
+                .overlay {
+                    if dropTarget == entry.key {
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .strokeBorder(theme.primary, lineWidth: 1.5)
+                            .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(theme.primary.opacity(0.12)))
+                            .padding(.horizontal, 2)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .dropDestination(for: String.self) { items, _ in
+                    guard let path = items.compactMap(ExplorerDrag.path(from:)).first else { return false }
+                    appState.moveNote(path: path, toFolder: entry.path)
+                    return true
+                } isTargeted: { inside in
+                    if inside { dropTarget = entry.key } else if dropTarget == entry.key { dropTarget = nil }
+                }
+        } else {
+            base.draggable(ExplorerDrag.payload(entry)) {
+                HStack(spacing: 6) {
+                    Image(systemName: "doc.text")
+                    Text(entry.name).lineLimit(1)
+                }
+                .font(ShellFont.row)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(RoundedRectangle(cornerRadius: 5).fill(theme.overlayBackground))
+                .foregroundStyle(theme.text)
             }
         }
     }
@@ -357,7 +416,8 @@ struct PreviewColumn: View {
             entries: children,
             cursor: appState.explorer.nav.previewCursor,
             active: false,
-            emptyText: "empty folder"
+            emptyText: "empty folder",
+            hintPrefix: "preview"
         ) { _, child in
             appState.explorer.nav.goTo(entry.path, select: child.key)
         } onOpen: { _, child in

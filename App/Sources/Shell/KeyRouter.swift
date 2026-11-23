@@ -72,6 +72,7 @@ extension KeyStroke {
         case 121: special = .pageDown
         case 115: special = .home
         case 119: special = .end
+        case 109 where mods.contains(.shift): special = .menu
         default: special = nil
         }
         if let special {

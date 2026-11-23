@@ -19,6 +19,7 @@ enum ShellMetrics {
     static let topLineHeight: CGFloat = 34
     static let statusLineHeight: CGFloat = 24
     static let legendHeight: CGFloat = 22
+    static let noteBarHeight: CGFloat = 40
     #if os(macOS)
     /// Room for the traffic lights when the sidebar is hidden.
     static let trafficLightInset: CGFloat = 78

@@ -224,6 +224,12 @@ extension AppState {
 
     private func routeShellKey(_ k: KeyStroke) -> Bool {
         if showPalette { return false }
+        if hintSession != nil { return handleHintKey(k) }
+        if MarkdownZoom.shared.item != nil {
+            if k.command { return false }
+            MarkdownZoom.shared.dismiss()
+            return true
+        }
         if showHelp {
             if k.command { return false }
             showHelp = false
@@ -267,6 +273,8 @@ extension AppState {
         case let .book(n): selectBook(number: n)
         case .prevBook: cycleBook(-1)
         case .nextBook: cycleBook(1)
+        case .settings: showSettings = true
+        case .hints: startHints()
         default: return false
         }
         return true
@@ -310,6 +318,7 @@ extension AppState {
         case .refresh: refreshBook()
         case .edit:
             if let cur = ex.nav.current, cur.kind == .note { open(cur, edit: true) }
+        case .contextMenu: showContextMenuForCursor()
         case .close: break
         default: return false
         }

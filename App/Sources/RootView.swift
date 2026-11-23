@@ -119,6 +119,9 @@ struct ShellMain: View {
             #else
             ShellTopLine()
             #endif
+            if appState.isNoteOpen {
+                NoteBar()
+            }
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             if appState.preferences.showKeybindsBar {
@@ -127,6 +130,15 @@ struct ShellMain: View {
             ShellStatusLine()
         }
         .background(theme.background)
+        .coordinateSpace(.named(shellHintSpace))
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(shellHintSpace)) } action: { frame in
+            appState.hintRegistry.bounds = frame
+        }
+        .overlay {
+            if let session = appState.hintSession {
+                HintOverlay(session: session)
+            }
+        }
         #if os(macOS)
         .toolbar {
             ToolbarItem(placement: .navigation) {

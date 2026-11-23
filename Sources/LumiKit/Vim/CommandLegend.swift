@@ -68,12 +68,12 @@ public enum CommandLegend {
             return [
                 .init("j k", "move"), .init("h l", "folder"), .init("⏎", "open"), .init("e", "edit"),
                 .init("/", "filter"), .init("a", "new"), .init("r", "rename"), .init("d", "delete"),
-                .init("y p", "copy"), .init("H L", "history"), .init("space", "commands"), .init("?", "keys"),
+                .init("y p", "copy"), .init("H L", "history"), .init("f", "hints"), .init("space", "commands"), .init("?", "keys"),
             ]
         }
         return [
             .init("j k", "scroll"), .init("d u", "half page"), .init("gg G", "top/end"), .init("e i", "edit"),
-            .init("q h", "back"), .init("y", "copy"), .init("space", "commands"), .init("?", "keys"),
+            .init("q h", "back"), .init("y", "copy"), .init("F", "hints"), .init("space", "commands"), .init("?", "keys"),
         ]
     }
 
