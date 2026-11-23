@@ -264,7 +264,8 @@ struct RemoteNoteDetailView: View {
                 // No in-app link routing for server notes yet — the slug
                 // resolution endpoint isn't wired up.
                 onInAppLink: nil,
-                yankFlashTrigger: appState.yankFlashAt
+                yankFlashTrigger: appState.yankFlashAt,
+                onToggleTask: canEditNotes ? { appState.toggleTask($0) } : nil
             )
         }
         .id(listRow.id)
@@ -280,8 +281,23 @@ struct RemoteNoteDetailView: View {
         }
     }
 
-    @ViewBuilder
     private var editMode: some View {
+        SourceSplit(
+            enabled: appState.preferences.splitPreview,
+            text: liveSession.map { $0.hasSynced ? $0.text : readText } ?? appState.remoteEditor.currentText,
+            ratio: Binding(get: { appState.preferences.splitPreviewRatio },
+                           set: { appState.preferences.splitPreviewRatio = $0 }),
+            scale: appState.preferences.readingScale,
+            fontFamily: markdownFontFamilyFromPreferences,
+            onToggleTask: canEditNotes ? { appState.toggleTask($0) } : nil
+        ) {
+            editPane
+        }
+        .environment(\.vimControllerSink) { appState.activeEditor = $0 }
+    }
+
+    @ViewBuilder
+    private var editPane: some View {
         if let session = liveSession {
             if session.isEditable {
                 VimEditor(
@@ -534,6 +550,7 @@ struct RemoteNoteDetailView: View {
             case .save: break
             case .saveAndClose, .close: appState.remoteEditorMode = .view
             case .scrollCursor, .scrollLines, .displayLines: break
+            case let .host(command): appState.performHostCommand(command)
             }
             return
         }
@@ -553,6 +570,8 @@ struct RemoteNoteDetailView: View {
             appState.remoteEditorMode = .view
         case .scrollCursor, .scrollLines, .displayLines:
             break // handled by the editor view
+        case let .host(command):
+            appState.performHostCommand(command)
         }
     }
 

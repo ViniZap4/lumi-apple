@@ -423,6 +423,15 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
     @objc func undo(_ sender: Any?) { controller?.undo() }
     @objc func redo(_ sender: Any?) { controller?.redo() }
 
+    override func copy(_ sender: Any?) {
+        if let text = controller?.visualSelectionText {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            return
+        }
+        super.copy(sender)
+    }
+
     // MARK: Search + block highlights (TextKit 2 rendering attributes — no storage edits)
 
     private var highlightColor: NSColor = .systemYellow
@@ -1329,6 +1338,14 @@ final class VimUIKitTextView: UITextView, EditorTextSurface {
         let h = bounds.height
         let y = max(-adjustedContentInset.top, min(contentOffset.y + CGFloat(lines) * font.lineHeight, max(0, contentSize.height - h)))
         setContentOffset(CGPoint(x: contentOffset.x, y: y), animated: false)
+    }
+
+    override func copy(_ sender: Any?) {
+        if let text = controller?.visualSelectionText {
+            UIPasteboard.general.string = text
+            return
+        }
+        super.copy(sender)
     }
 
     // MARK: Split preview scroll sync

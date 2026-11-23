@@ -538,7 +538,11 @@ public final class VimController {
 
     func showEngineSelection(scroll: Bool = true) {
         guard vimEnabled else { return }
-        surface?.showSelection(selectionUTF16Range, scroll: scroll)
+        // Visual mode is painted by the view (`visualHighlightRanges`);
+        // the native selection stays a caret so AppKit's inactive-window
+        // selection (an opaque grey on some themes) never covers it.
+        let range = state.mode.isVisual ? NSRange(location: cursorUTF16Offset, length: 0) : selectionUTF16Range
+        surface?.showSelection(range, scroll: scroll)
     }
 
     private func readSystemPasteboard() -> String? {
@@ -629,6 +633,14 @@ public final class VimController {
         if kind == .block { return blockSelectionRanges }
         let r = selectionUTF16Range
         return r.length > 0 ? [r] : []
+    }
+
+    /// Text of the visual selection (⌘C in visual mode), nil otherwise.
+    public var visualSelectionText: String? {
+        let ranges = visualHighlightRanges
+        guard !ranges.isEmpty else { return nil }
+        let ns = buffer.text as NSString
+        return ranges.filter { NSMaxRange($0) <= ns.length }.map { ns.substring(with: $0) }.joined(separator: "\n")
     }
 
     /// Visual-block selection, one UTF-16 range per line.

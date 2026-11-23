@@ -142,7 +142,8 @@ struct NoteDetailView: View {
                     contentAnimations: appState.preferences.contentAnimations,
                     readingWidth: appState.preferences.readingWidth,
                     onInAppLink: handleInAppLink,
-                    yankFlashTrigger: appState.yankFlashAt
+                    yankFlashTrigger: appState.yankFlashAt,
+                    onToggleTask: { appState.toggleTask($0) }
                 )
             }
             // Per-note identity: new entry → fresh scroll-host coord,
@@ -157,6 +158,32 @@ struct NoteDetailView: View {
                     : .identity
             )
         case .edit:
+            SourceSplit(
+                enabled: appState.preferences.splitPreview,
+                text: editor.currentText,
+                ratio: Binding(get: { appState.preferences.splitPreviewRatio },
+                               set: { appState.preferences.splitPreviewRatio = $0 }),
+                scale: appState.preferences.readingScale,
+                fontFamily: markdownFontFamilyFromPreferences,
+                baseURL: baseURL,
+                vaultRoot: vaultRoot,
+                onToggleTask: { appState.toggleTask($0) },
+                onInAppLink: handleInAppLink
+            ) {
+                editorPane(editor: editor)
+            }
+            .environment(\.vimControllerSink) { appState.activeEditor = $0 }
+            .id(entry.relativePath)
+            .transition(
+                appState.preferences.contentAnimations
+                    ? .opacity
+                    : .identity
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func editorPane(editor: EditorState) -> some View {
             Group {
                 if appState.preferences.vimEnabled {
                     VimEditor(
@@ -185,13 +212,6 @@ struct NoteDetailView: View {
                     ))
                 }
             }
-            .id(entry.relativePath)
-            .transition(
-                appState.preferences.contentAnimations
-                    ? .opacity
-                    : .identity
-            )
-        }
     }
 
     /// Thin colored stripe along the top of the editor area. Color reflects
@@ -235,6 +255,8 @@ struct NoteDetailView: View {
             appState.editorMode = .view
         case .scrollCursor, .scrollLines, .displayLines:
             break // handled by the editor view
+        case let .host(command):
+            appState.performHostCommand(command)
         }
     }
 }

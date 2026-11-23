@@ -59,6 +59,9 @@ struct LumiApp: App {
                 Button(appState.isEditing ? "Read Mode" : "Edit Mode") { appState.toggleEditing() }
                     .keyboardShortcut("e", modifiers: [.command])
                     .disabled(appState.openBook == nil)
+                Button(appState.preferences.splitPreview ? "Hide Split Preview" : "Show Split Preview") { appState.toggleSplitPreview() }
+                    .keyboardShortcut("p", modifiers: [.command, .option])
+                    .disabled(!appState.isNoteOpen)
                 Button("Back to Explorer") { appState.closeNote() }
                     .disabled(!appState.isNoteOpen)
                 Divider()

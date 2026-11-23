@@ -218,6 +218,24 @@ public final class LumiPreferences {
         didSet { store.set(Keys.explorerShowPreview, explorerShowPreview) }
     }
 
+    /// Source mode: rendered preview beside the editor (`\p`,
+    /// `:preview split`). Off by default, like the web.
+    public var splitPreview: Bool {
+        didSet { store.set(Keys.splitPreview, splitPreview) }
+    }
+
+    /// Split preview: the editor's share of the width (0.25…0.75).
+    public var splitPreviewRatio: Double {
+        didSet {
+            let clamped = ScrollSync.clampRatio(splitPreviewRatio)
+            if clamped != splitPreviewRatio {
+                splitPreviewRatio = clamped
+                return
+            }
+            store.set(Keys.splitPreviewRatio, splitPreviewRatio)
+        }
+    }
+
     /// Per-device `.vimrc` — the safe subset (mappings, leader, a few
     /// `set` options), parsed and never executed (`Vimrc`). Saved to
     /// `~/.config/lumi/apple.vimrc`; editors pick up `parsedVimrc`.
@@ -266,6 +284,8 @@ public final class LumiPreferences {
         self.lineWrapping = store.bool(Keys.lineWrapping) ?? true
         self.explorerShowHidden = store.bool(Keys.explorerShowHidden) ?? false
         self.explorerShowPreview = store.bool(Keys.explorerShowPreview) ?? true
+        self.splitPreview = store.bool(Keys.splitPreview) ?? false
+        self.splitPreviewRatio = ScrollSync.clampRatio(store.double(Keys.splitPreviewRatio) ?? 0.5)
         let rawTheme = store.string(Keys.themeMode) ?? ThemeMode.auto.rawValue
         self.themeMode = ThemeMode(rawValue: rawTheme) ?? .auto
         let rc = (try? String(contentsOf: store.vimrcURL, encoding: .utf8)).map(Vimrc.sanitize) ?? ""
@@ -327,6 +347,8 @@ public final class LumiPreferences {
         static let lineWrapping = "line_wrapping"
         static let explorerShowHidden = "explorer_show_hidden"
         static let explorerShowPreview = "explorer_show_preview"
+        static let splitPreview = "split_preview"
+        static let splitPreviewRatio = "split_preview_ratio"
     }
 
     /// UserDefaults keys used by builds <= F.36. Kept here only for the

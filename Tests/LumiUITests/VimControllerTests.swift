@@ -101,7 +101,10 @@ struct VimControllerTests {
         #expect(c.buffer.cursor == 9)
         #expect(c.state.mode == .visual(.characterwise, anchor: 9))
         #expect(surface.storage as String == ">> hello world")
-        #expect(surface.selection == NSRange(location: 9, length: 1))
+        // Visual mode is painted as a highlight; the native selection is
+        // a caret at the cursor.
+        #expect(surface.selection == NSRange(location: 9, length: 0))
+        #expect(c.visualHighlightRanges == [NSRange(location: 9, length: 1)])
         // Remote edits never echo back as local ops.
         #expect(doc.localOps.isEmpty)
     }
