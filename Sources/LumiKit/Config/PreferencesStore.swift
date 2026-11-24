@@ -112,6 +112,11 @@ public final class PreferencesStore: @unchecked Sendable {
     /// injected values.
     public func bootstrap(_ values: [String: String]) {
         queue.sync {
+            // Read the file first: without this a fresh store (every
+            // launch) started from an empty cache, so the migration
+            // rewrote apple.yaml with only the legacy values and every
+            // setting saved since was lost.
+            if !loaded { cache = readFromDisk(fileURL) ?? [:] }
             for (k, v) in values where cache[k] == nil {
                 cache[k] = v
             }
