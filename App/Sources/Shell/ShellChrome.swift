@@ -118,7 +118,7 @@ struct ShellStatusLine: View {
                 .padding(.horizontal, 7)
                 .frame(height: 16)
                 .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(modeColor.opacity(0.16)))
-                .animation(.easeOut(duration: 0.12), value: modeLabel)
+                .animation(appState.animation(.fast), value: modeLabel)
             Text(context)
                 .font(ShellFont.small)
                 .foregroundStyle(theme.textDim)
@@ -302,13 +302,13 @@ struct ShellToastOverlay: View {
                 .frame(maxWidth: 380, alignment: .leading)
                 .background(card)
                 .onTapGesture { appState.toast = nil }
-                .transition(.opacity.combined(with: .move(edge: .bottom)))
+                .transition(appState.transition(.opacity.combined(with: .move(edge: .bottom))))
                 .id(toast.id)
             }
         }
         .padding(.trailing, 14)
         .padding(.bottom, ShellMetrics.statusLineHeight + 10)
-        .animation(.easeOut(duration: 0.16), value: appState.toast)
+        .animation(appState.animation(.standard), value: appState.toast)
     }
 
     private var card: some View {

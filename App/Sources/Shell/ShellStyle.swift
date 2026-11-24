@@ -28,6 +28,24 @@ enum ShellMetrics {
     #endif
 }
 
+/// Raised surface for floating chrome (palette, help, cards): the theme
+/// background lifted toward white — more in light themes, a touch in
+/// dark ones — so it separates from the scrim without a new colour.
+struct ElevatedSurface: View {
+    var radius: CGFloat = 14
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        shape
+            .fill(theme.background)
+            .overlay(shape.fill(Color.white.opacity(theme.isDark ? 0.035 : 0.42)))
+            .overlay(shape.stroke(theme.border.opacity(theme.isDark ? 0.9 : 0.55), lineWidth: 0.5))
+            .shadow(color: .black.opacity(theme.isDark ? 0.45 : 0.18), radius: 34, y: 14)
+            .shadow(color: .black.opacity(theme.isDark ? 0.25 : 0.06), radius: 3, y: 1)
+    }
+}
+
 /// Hairline in the theme's border colour.
 struct Hairline: View {
     var vertical = false

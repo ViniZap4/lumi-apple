@@ -40,6 +40,7 @@ public struct SourceSplit<Editor: View>: View {
     @State private var tab: Tab = .source
     @FocusState private var dividerFocused: Bool
     @Environment(\.theme) private var theme
+    @Environment(\.lumiMotion) private var motion
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var sizeClass
     #endif
@@ -98,8 +99,13 @@ public struct SourceSplit<Editor: View>: View {
                         preview
                             .overlay(alignment: .top) { focusMark(.preview, enabled: true) }
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            // Split open / close slides the preview in
+                            // from the trailing edge (instant under
+                            // Reduce Motion).
+                            .transition(motion ? .move(edge: .trailing).combined(with: .opacity) : .identity)
                     }
                 }
+                .animation(motion ? .smooth(duration: 0.18) : nil, value: enabled)
             }
             .coordinateSpace(.named("lumi.split"))
             .onAppear {

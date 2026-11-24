@@ -133,8 +133,12 @@ struct ShellMain: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay(alignment: .top) { mainPaneMarker }
+                // Explorer ↔ reader ↔ editor: a short cross-fade with a
+                // small lift (instant under Reduce Motion).
+                .animation(appState.animation(.standard), value: appState.surface)
             if appState.preferences.showKeybindsBar {
                 ShellLegendLine()
+                    .transition(appState.transition(.opacity.combined(with: .move(edge: .bottom))))
             }
             ShellStatusLine()
         }
@@ -149,6 +153,7 @@ struct ShellMain: View {
         .overlay {
             if let session = appState.hintSession {
                 HintOverlay(session: session)
+                    .transition(appState.transition(.opacity))
             }
         }
         #if os(macOS)
@@ -165,27 +170,32 @@ struct ShellMain: View {
         #endif
         .overlay(alignment: .bottomTrailing) { ShellToastOverlay() }
         .overlay {
-            if appState.showPalette || appState.showHelp {
-                ZStack(alignment: .top) {
-                    Color.black.opacity(0.28)
+            ZStack(alignment: .top) {
+                if appState.showPalette || appState.showHelp {
+                    Color.black.opacity(theme.isDark ? 0.38 : 0.16)
                         .ignoresSafeArea()
                         .onTapGesture {
                             appState.showPalette = false
                             appState.showHelp = false
                         }
-                    if appState.showPalette {
-                        CommandPalette()
-                            .padding(.top, 90)
-                    } else {
-                        KeymapHelpOverlay()
-                            .padding(.top, 70)
-                    }
+                        .transition(appState.transition(.opacity))
                 }
-                .transition(.opacity)
+                if appState.showPalette {
+                    CommandPalette()
+                        .padding(.top, 90)
+                        .transition(appState.transition(.scale(scale: 0.97, anchor: .top).combined(with: .opacity)))
+                } else if appState.showHelp {
+                    KeymapHelpOverlay()
+                        .padding(.top, 70)
+                        .transition(appState.transition(.scale(scale: 0.97, anchor: .top).combined(with: .opacity)))
+                }
             }
         }
-        .animation(.easeOut(duration: 0.12), value: appState.showPalette)
-        .animation(.easeOut(duration: 0.12), value: appState.showHelp)
+        .animation(appState.animation(.fast), value: appState.showPalette)
+        .animation(appState.animation(.fast), value: appState.showHelp)
+        .animation(appState.animation(.fast), value: appState.hintSession != nil)
+        .animation(appState.animation(.standard), value: appState.preferences.showKeybindsBar)
+        .environment(\.lumiMotion, appState.motionEnabled)
         #if !os(macOS)
         .focusable()
         .onKeyPress(phases: [.down, .repeat]) { press in
@@ -217,10 +227,12 @@ struct ShellMain: View {
                 baseURL: entry.url.deletingLastPathComponent(),
                 vaultRoot: session.rootURL
             )
+            .transition(appState.transition(.opacity.combined(with: .offset(y: 8))))
         } else if let vaultID = appState.selectedVaultID,
                   let book = appState.books.book(vaultID) {
             if appState.session != nil {
                 ExplorerView()
+                    .transition(appState.transition(.opacity.combined(with: .offset(y: -6))))
             } else {
                 BookUnavailableView(book: book)
             }
@@ -229,8 +241,10 @@ struct ShellMain: View {
             if let noteID = appState.selectedRemoteNoteID,
                let row = appState.remoteVaultsStore.notes.first(where: { $0.id == noteID }) {
                 RemoteNoteDetailView(vault: remote, listRow: row)
+                    .transition(appState.transition(.opacity.combined(with: .offset(y: 8))))
             } else {
                 ExplorerView()
+                    .transition(appState.transition(.opacity.combined(with: .offset(y: -6))))
             }
         } else if appState.selectedRemoteVaultID != nil, let book = appState.openBook {
             BookUnavailableView(book: book)

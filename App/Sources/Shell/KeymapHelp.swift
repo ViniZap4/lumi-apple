@@ -69,12 +69,7 @@ struct KeymapHelpOverlay: View {
         }
         .padding(24)
         .frame(width: 640)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(theme.background)
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(theme.border, lineWidth: 0.5))
-                .shadow(color: .black.opacity(0.35), radius: 30, y: 12)
-        )
+        .background(ElevatedSurface())
         .onTapGesture { appState.showHelp = false }
     }
 

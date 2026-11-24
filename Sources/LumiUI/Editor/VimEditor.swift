@@ -249,6 +249,10 @@ public extension VimMode {
 }
 
 public extension EnvironmentValues {
+    /// Motion allowed (system and app Reduce Motion both off, animations
+    /// on). Hosts set it at the root; LumiUI views read it.
+    @Entry var lumiMotion: Bool = true
+
     /// Receives the editor's `VimController` when it appears.
     @Entry var vimControllerSink: (@MainActor (VimController) -> Void)? = nil
 }

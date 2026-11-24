@@ -42,7 +42,8 @@ struct CommandPalette: View {
                 Text(appState.paletteCommandMode ? ":" : "›")
                     .font(ShellFont.palette)
                     .foregroundStyle(theme.accent)
-                TextField(appState.paletteCommandMode ? "command" : "open a note, book or command", text: $query)
+                TextField("", text: $query, prompt: Text(appState.paletteCommandMode ? "command" : "open a note, book or command")
+                    .foregroundStyle(theme.textDim.opacity(0.8)))
                     .textFieldStyle(.plain)
                     .font(ShellFont.palette)
                     .foregroundStyle(theme.text)
@@ -60,8 +61,8 @@ struct CommandPalette: View {
                         move(-1, items.count); return .handled
                     }
             }
-            .padding(.horizontal, 16)
-            .frame(height: 48)
+            .padding(.horizontal, 18)
+            .frame(height: 52)
             Hairline()
             if items.isEmpty {
                 Text("no match")
@@ -83,23 +84,18 @@ struct CommandPalette: View {
                                     }
                             }
                         }
-                        .padding(.vertical, 6)
+                        .padding(6)
                     }
-                    .frame(maxHeight: 380)
+                    .frame(maxHeight: 400)
                     .onChange(of: selection) { _, s in
                         if s < items.count { proxy.scrollTo(items[s].id) }
                     }
                 }
             }
         }
-        .frame(width: 600)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(theme.background)
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(theme.border, lineWidth: 0.5))
-                .shadow(color: .black.opacity(0.35), radius: 30, y: 12)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .frame(width: 620)
+        .background(ElevatedSurface())
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .onAppear {
             query = appState.paletteSeed
             appState.paletteSeed = ""
@@ -129,9 +125,13 @@ struct CommandPalette: View {
             Spacer(minLength: 8)
             if !item.shortcut.isEmpty { KeyCap(item.shortcut) }
         }
-        .padding(.horizontal, 16)
-        .frame(height: 30)
-        .background(selected ? theme.selectionRow : Color.clear)
+        .padding(.horizontal, 12)
+        .frame(height: 32)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(selected ? theme.primary.opacity(theme.isDark ? 0.18 : 0.12) : Color.clear)
+        )
+        .animation(appState.animation(.fast), value: selected)
     }
 
     private func move(_ d: Int, _ n: Int) {
