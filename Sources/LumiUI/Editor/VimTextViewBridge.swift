@@ -55,13 +55,15 @@ struct EditorStyler {
 /// storage edits with incremental (dirty-paragraph) highlighting.
 @MainActor
 enum EditorStorage {
-    static func apply(_ edits: [TextEdit], to storage: NSTextStorage, styler: EditorStyler) -> NSRange? {
+    static func apply(_ edits: [TextEdit], to storage: NSTextStorage, styler: EditorStyler, highlight: Bool = true,
+                      baseAttributes: [NSAttributedString.Key: Any]? = nil) -> NSRange? {
         storage.beginEditing()
         for e in edits {
             guard e.location + e.length <= storage.length else { continue }
-            storage.replaceCharacters(in: e.range, with: NSAttributedString(string: e.replacement, attributes: styler.baseAttributes))
+            storage.replaceCharacters(in: e.range, with: NSAttributedString(string: e.replacement, attributes: baseAttributes ?? styler.baseAttributes))
         }
         storage.endEditing()
+        guard highlight else { return nil }
         guard let dirty = MarkdownSyntaxHighlighter.dirtyRange(for: edits, in: storage.string as NSString) else { return nil }
         styler.highlight(storage, range: dirty)
         return dirty
@@ -88,6 +90,10 @@ struct VimTextViewBridge: NSViewRepresentable {
     var blockRanges: [NSRange] = []
     /// Draw a block cursor in normal mode (preference).
     var blockCursor: Bool = true
+    /// Source or Live Preview.
+    var presentation: EditorPresentation = .source
+    /// ⌘-click on a Live Preview link.
+    var onOpenLink: ((LiveLink) -> Void)?
 
     func makeNSView(context: Context) -> NSScrollView {
         let textView = VimAppKitTextView(usingTextLayoutManager: true)
@@ -131,6 +137,8 @@ struct VimTextViewBridge: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? VimAppKitTextView else { return }
         textView.updateTheme(EditorStyler(theme: theme, fontSize: fontSize))
+        textView.onOpenLink = onOpenLink
+        textView.applyPresentation(presentation, theme: theme)
         textView.applyWrapping(lineWrapping, in: scrollView)
         textView.caretColor = NSColor(mode == .insert || !controller.vimEnabled ? theme.primary : theme.accent)
         textView.cursorColors = VimCursorColors(
@@ -157,8 +165,11 @@ struct VimTextViewBridge: NSViewRepresentable {
         if let ruler = scrollView.verticalRulerView as? LineNumberRulerView {
             ruler.theme = theme
             ruler.showRelative = relativeLineNumbers
-            if scrollView.rulersVisible != showLineNumbers {
-                scrollView.rulersVisible = showLineNumbers
+            // Line numbers are a Source affordance; Live Preview reads
+            // like the page.
+            let rulers = showLineNumbers && !presentation.isLive
+            if scrollView.rulersVisible != rulers {
+                scrollView.rulersVisible = rulers
             }
             ruler.needsDisplay = true
         }
@@ -189,15 +200,185 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
     /// Last range re-highlighted after an edit (tests).
     private(set) var lastHighlightedRange: NSRange?
 
+    // MARK: Live Preview
+
+    /// Live Preview styler; nil in Source.
+    private(set) var live: LivePreviewStyler?
+    private(set) var presentation: EditorPresentation = .source
+    private let liveDelegate = LiveLayoutDelegate()
+    private(set) var liveOverlays: LiveWidgetOverlays?
+    /// ⌘-click on a Live Preview link.
+    var onOpenLink: ((LiveLink) -> Void)?
+
+    /// The font the cursor overlay and line metrics fall back to.
+    var editorFont: NSFont {
+        live?.baseFont ?? (styler?.baseAttributes[.font] as? NSFont) ?? .monospacedSystemFont(ofSize: 13, weight: .regular)
+    }
+
+    /// Attributes for freshly inserted text.
+    private var insertionAttributes: [NSAttributedString.Key: Any]? { live?.baseAttributes }
+
+    /// Switch Source ⇄ Live (or re-theme Live). Only attributes change;
+    /// the characters never do.
+    func applyPresentation(_ new: EditorPresentation, theme: ThemeTokens) {
+        let themeChanged = live.map { $0.theme != theme } ?? false
+        guard new != presentation || themeChanged else { return }
+        presentation = new
+        guard let storage = textStorage, let tlm = textLayoutManager else { return }
+        applyingEngineChange = true
+        defer { applyingEngineChange = false }
+        switch new {
+        case .source:
+            live = nil
+            liveOverlays?.removeAll()
+            liveOverlays = nil
+            tlm.delegate = nil
+            let styler = self.styler ?? EditorStyler(theme: theme, fontSize: 13)
+            storage.beginEditing()
+            storage.setAttributes(styler.baseAttributes, range: NSRange(location: 0, length: storage.length))
+            storage.endEditing()
+            styler.highlight(storage, range: NSRange(location: 0, length: storage.length))
+            typingAttributes = styler.baseAttributes
+        case let .live(options):
+            let styler = LivePreviewStyler(theme: theme, options: options)
+            styler.containerWidth = max(1, (textContainer?.size.width ?? bounds.width) - 2 * (textContainer?.lineFragmentPadding ?? 5))
+            live = styler
+            tlm.delegate = liveDelegate
+            let style = MarkdownRenderStyle(theme: theme, scale: options.scale, fontFamily: options.fontFamily, tasksInteractive: true)
+            if let overlays = liveOverlays {
+                overlays.environment = MarkdownHostedEnvironment(style: style, linkAction: .systemDefault, vaultRoot: options.vaultRoot, embedDepth: 0)
+                overlays.removeAll()
+            } else {
+                let overlays = LiveWidgetOverlays(environment: MarkdownHostedEnvironment(style: style, linkAction: .systemDefault, vaultRoot: options.vaultRoot, embedDepth: 0))
+                overlays.textView = self
+                overlays.onHeight = { [weak self] payload, height in
+                    guard let self, let storage = self.textStorage, let live = self.live else { return }
+                    if live.widgetMeasured(payload, height: height, storage: storage) {
+                        self.liveOverlays?.setNeedsLayout()
+                        self.scheduleCursorUpdate()
+                    }
+                }
+                overlays.onActivate = { [weak self] location in self?.activateWidget(at: location) }
+                liveOverlays = overlays
+            }
+            styler.restyleAll(storage, selection: liveSelection)
+            typingAttributes = styler.baseAttributes
+        }
+        tlm.invalidateLayout(for: tlm.documentRange)
+        updateLiveInsets()
+        needsDisplay = true
+        liveOverlays?.setNeedsLayout()
+        scheduleCursorUpdate()
+    }
+
+    /// Ranges whose lines show raw syntax: the selection, the vim cursor
+    /// and any visual range.
+    var liveSelection: [NSRange] {
+        var out = [selectedRange()]
+        if let c = controller {
+            out.append(NSRange(location: c.cursorUTF16Offset, length: 0))
+            out += c.visualHighlightRanges
+        }
+        return out
+    }
+
+    /// The cursor / selection may have moved onto or off lines.
+    func refreshLive() {
+        guard let live, let storage = textStorage else { return }
+        let wasApplying = applyingEngineChange
+        applyingEngineChange = true
+        if live.selectionChanged(storage, selection: liveSelection) {
+            liveOverlays?.setNeedsLayout()
+        }
+        applyingEngineChange = wasApplying
+    }
+
+    private func liveTextChanged(_ edits: [TextEdit]) {
+        guard let live, let storage = textStorage else { return }
+        let wasApplying = applyingEngineChange
+        applyingEngineChange = true
+        live.textChanged(storage, edits: edits, selection: liveSelection)
+        applyingEngineChange = wasApplying
+        liveOverlays?.setNeedsLayout()
+    }
+
+    /// Reading measure: centre a column of the reader's width.
+    private func updateLiveInsets() {
+        if case let .live(options) = presentation {
+            let width = enclosingScrollView?.contentSize.width ?? bounds.width
+            let column = min(width, CGFloat(options.readingWidth) + 2 * 28)
+            let inset = NSSize(width: max(28, (width - column) / 2 + 28), height: 28)
+            if textContainerInset != inset { textContainerInset = inset }
+            live?.containerWidth = max(1, (textContainer?.size.width ?? width) - 2 * (textContainer?.lineFragmentPadding ?? 5))
+        } else if textContainerInset != NSSize(width: 12, height: 12) {
+            textContainerInset = NSSize(width: 12, height: 12)
+        }
+    }
+
+    /// A widget was clicked: put the cursor at the start of its source.
+    private func activateWidget(at location: Int) {
+        guard let controller else { return }
+        window?.makeFirstResponder(self)
+        controller.userMovedSelection(to: NSRange(location: location, length: 0))
+        controller.showEngineSelection(scroll: false)
+        if !controller.vimEnabled { showSelection(NSRange(location: location, length: 0), scroll: false) }
+    }
+
+    /// Live Preview mouse: a task box toggles (one character, cursor
+    /// untouched); ⌘-click follows a link. Returns true when handled.
+    private func handleLiveClick(_ event: NSEvent) -> Bool {
+        guard live != nil, let storage = textStorage, let tlm = textLayoutManager, let tcm = tlm.textContentManager else { return false }
+        let point = convert(event.locationInWindow, from: nil)
+        let origin = textContainerOrigin
+        let local = CGPoint(x: point.x - origin.x, y: point.y - origin.y)
+        let idx = characterIndexForInsertion(at: point)
+        guard idx != NSNotFound else { return false }
+        let candidates = [idx, idx - 1, idx + 1].filter { $0 >= 0 && $0 < storage.length }
+        // Task boxes.
+        for c in candidates {
+            var run = NSRange()
+            guard let marker = storage.attribute(.lumiLiveMarker, at: c, longestEffectiveRange: &run,
+                                                 in: NSRange(location: 0, length: storage.length)) as? LiveMarkerBox,
+                  case .task = marker.kind,
+                  let fragment = tlm.textLayoutFragment(for: local) as? LiveLayoutFragment
+            else { continue }
+            let fragStart = tcm.offset(from: tcm.documentRange.location, to: fragment.rangeInElement.location)
+            guard let box = fragment.taskBoxRect(forLocation: run.location, fragmentLocation: fragStart), box.contains(local) else { continue }
+            if let controller, controller.isEditable,
+               let edit = LivePreview.taskToggle(storage.string as NSString, at: run.location) {
+                controller.applyProgrammaticEdit(edit)
+            }
+            return true
+        }
+        // ⌘-click links.
+        if event.modifierFlags.contains(.command) {
+            for c in candidates {
+                if let box = storage.attribute(.lumiLiveLink, at: c, effectiveRange: nil) as? LiveLinkBox, box.link != .inert {
+                    if case let .external(href) = box.link, let safe = LivePreview.safeHref(href), let url = URL(string: safe) {
+                        if let onOpenLink { onOpenLink(.external(safe)) } else { NSWorkspace.shared.open(url) }
+                    } else {
+                        onOpenLink?(box.link)
+                    }
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
     func attach(_ controller: VimController) {
         self.controller = controller
         controller.surface = self
         if cursorView.superview == nil { addSubview(cursorView) }
         applyingEngineChange = true
         let styler = self.styler ?? EditorStyler(theme: .tokyoNight, fontSize: 13)
-        textStorage?.setAttributedString(NSAttributedString(string: controller.buffer.text, attributes: styler.baseAttributes))
+        textStorage?.setAttributedString(NSAttributedString(string: controller.buffer.text, attributes: insertionAttributes ?? styler.baseAttributes))
         if let storage = textStorage {
-            styler.highlight(storage, range: NSRange(location: 0, length: storage.length))
+            if let live {
+                live.restyleAll(storage, selection: liveSelection)
+            } else {
+                styler.highlight(storage, range: NSRange(location: 0, length: storage.length))
+            }
         }
         applyingEngineChange = false
         controller.showEngineSelection(scroll: false)
@@ -207,6 +388,8 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
         let fontChanged = self.styler?.fontSize != styler.fontSize
         guard self.styler?.theme != styler.theme || fontChanged else { return }
         self.styler = styler
+        // Live Preview re-themes through `applyPresentation`.
+        guard live == nil else { return }
         typingAttributes = styler.baseAttributes
         if let storage = textStorage {
             let full = NSRange(location: 0, length: storage.length)
@@ -251,9 +434,11 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
     func applyEdits(_ edits: [TextEdit]) {
         guard let storage = textStorage, let styler else { return }
         applyingEngineChange = true
-        lastHighlightedRange = EditorStorage.apply(edits, to: storage, styler: styler)
+        lastHighlightedRange = EditorStorage.apply(edits, to: storage, styler: styler, highlight: live == nil,
+                                                   baseAttributes: insertionAttributes)
         invalidateLineStarts()
         applyingEngineChange = false
+        if live != nil { liveTextChanged(edits) }
         if !appliedHighlights.isEmpty || !appliedBlock.isEmpty { reapplyRenderingHighlights() }
     }
 
@@ -263,6 +448,7 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
         settingSelection = true
         setSelectedRange(clamped)
         settingSelection = false
+        refreshLive()
         if scroll {
             if let c = controller, clamped.length > 0 {
                 scrollRangeToVisible(c.cursorCharacterRange)
@@ -298,6 +484,7 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
 
     override func mouseDown(with event: NSEvent) {
         controller?.onUserInteraction?()
+        if handleLiveClick(event) { return }
         super.mouseDown(with: event)
     }
 
@@ -401,7 +588,9 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
         guard let edit = pendingExternalEdit else { return }
         pendingExternalEdit = nil
         controller?.applyExternalEdit(edit)
-        if let storage = textStorage, let styler,
+        if live != nil {
+            liveTextChanged([edit])
+        } else if let storage = textStorage, let styler,
            let dirty = MarkdownSyntaxHighlighter.dirtyRange(for: [edit], in: storage.string as NSString) {
             styler.highlight(storage, range: dirty)
         }
@@ -417,6 +606,7 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
         // A click (or a finished drag) moves the engine cursor; a drag
         // selection stays visible for Cmd-C until the next engine move.
         controller.userMovedSelection(to: first)
+        refreshLive()
         updateCursor()
     }
 
@@ -449,6 +639,7 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
         appliedBlock = block
         self.blockColor = blockColor
         reapplyRenderingHighlights()
+        refreshLive()
     }
 
     private func reapplyRenderingHighlights() {
@@ -475,7 +666,7 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
         guard let tlm = textLayoutManager, let tcm = tlm.textContentManager else { return nil }
         let length = (string as NSString).length
         let loc = min(range.location, length)
-        let font = (styler?.baseAttributes[.font] as? NSFont) ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let font = editorFont
         let cellWidth = ("0" as NSString).size(withAttributes: [.font: font]).width
         let lineHeight = ceil(font.ascender - font.descender + font.leading)
         let origin = textContainerOrigin
@@ -551,8 +742,7 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
         cursorView.thickness = style.shape == .bar ? 2 : max(2, floor(rect.height / 9))
         if range.length > 0, style.shape == .block || style.shape == .halfBlock {
             let text = (string as NSString).substring(with: range)
-            let font = (textStorage?.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont)
-                ?? (styler?.baseAttributes[.font] as? NSFont) ?? .monospacedSystemFont(ofSize: 13, weight: .regular)
+            let font = (textStorage?.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont) ?? editorFont
             cursorView.glyph = text == "\t" ? nil : NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: cursorColors.inverted])
         } else {
             cursorView.glyph = nil
@@ -628,7 +818,10 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
         }
     }
 
-    @objc private func clipScrolled() { controller?.onViewportScroll?() }
+    @objc private func clipScrolled() {
+        controller?.onViewportScroll?()
+        liveOverlays?.setNeedsLayout()
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -648,7 +841,7 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
 
     /// Coalesced, deferred update for layout-time callbacks (never force
     /// TextKit layout from inside a layout pass).
-    private func scheduleCursorUpdate() {
+    func scheduleCursorUpdate() {
         guard !cursorUpdateScheduled else { return }
         cursorUpdateScheduled = true
         DispatchQueue.main.async { [weak self] in
@@ -659,8 +852,13 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
     }
 
     override func setFrameSize(_ newSize: NSSize) {
+        let widthChanged = newSize.width != frame.width
         super.setFrameSize(newSize)
         if controller != nil { scheduleCursorUpdate() }
+        if live != nil, widthChanged {
+            updateLiveInsets()
+            liveOverlays?.setNeedsLayout()
+        }
     }
 
     // MARK: Viewport (H M L, page keys, zz, gj gk)
@@ -698,7 +896,7 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
 
     func scrollLines(_ lines: Int) {
         guard let sv = enclosingScrollView else { return }
-        let font = (styler?.baseAttributes[.font] as? NSFont) ?? .monospacedSystemFont(ofSize: 13, weight: .regular)
+        let font = editorFont
         let lh = ceil(font.ascender - font.descender + font.leading)
         let visible = sv.contentView.bounds
         let y = max(0, min(visible.minY + CGFloat(lines) * lh, max(0, frame.height - visible.height)))
@@ -869,6 +1067,8 @@ struct VimTextViewBridge: UIViewRepresentable {
     var lineWrapping: Bool = true
     var blockRanges: [NSRange] = []
     var blockCursor: Bool = true
+    var presentation: EditorPresentation = .source
+    var onOpenLink: ((LiveLink) -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 

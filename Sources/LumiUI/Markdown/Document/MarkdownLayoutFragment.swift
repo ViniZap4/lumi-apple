@@ -239,7 +239,12 @@ final class MarkdownLayoutFragment: NSTextLayoutFragment {
     /// Rounded backgrounds behind `.lumiPill` runs (inline code, kbd,
     /// mark), one per line the run occupies.
     private func drawPills(at point: CGPoint, in context: CGContext) {
-        for line in textLineFragments {
+        Self.drawPills(textLineFragments, at: point, in: context)
+    }
+
+    /// Shared with Live Preview's fragment (one prose system).
+    static func drawPills(_ lines: [NSTextLineFragment], at point: CGPoint, in context: CGContext) {
+        for line in lines {
             let attributed = line.attributedString
             let range = line.characterRange
             guard range.length > 0, NSMaxRange(range) <= attributed.length else { continue }

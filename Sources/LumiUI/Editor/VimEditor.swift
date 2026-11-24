@@ -28,6 +28,10 @@ public struct VimEditor: View {
     let fileName: String?
     /// Mode / pending keys / messages for the chrome (legend, status).
     let onStatusChange: ((VimStatus) -> Void)?
+    /// Source (raw markdown) or Live Preview.
+    var presentation: EditorPresentation = .source
+    /// ⌘-click on a Live Preview link.
+    var onOpenLink: ((LiveLink) -> Void)?
 
     @State private var controller: VimController
 
@@ -107,7 +111,9 @@ public struct VimEditor: View {
                 fontSize: options.fontSize,
                 lineWrapping: opts.wrap ?? options.lineWrapping,
                 blockRanges: controller.visualHighlightRanges,
-                blockCursor: blockCursor
+                blockCursor: blockCursor,
+                presentation: presentation,
+                onOpenLink: onOpenLink
             )
             if case let .commandLine(prefix, buffer) = controller.state.mode {
                 VimCommandLineOverlay(prefix: prefix, buffer: buffer)
@@ -156,6 +162,16 @@ public struct VimEditor: View {
             controller.setEscapeSequences(new.escapeSequences, timeout: new.escapeTimeout)
         }
         .background(theme.background)
+    }
+}
+
+public extension VimEditor {
+    /// Show the note as Source or Live Preview.
+    func presentation(_ p: EditorPresentation, onOpenLink: ((LiveLink) -> Void)? = nil) -> VimEditor {
+        var copy = self
+        copy.presentation = p
+        copy.onOpenLink = onOpenLink
+        return copy
     }
 }
 
