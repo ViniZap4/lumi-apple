@@ -38,3 +38,9 @@ func freshDefaults() -> UserDefaults {
 func ts(_ s: String) -> Date {
     try! Date(s, strategy: .iso8601)
 }
+
+/// A fresh `accounts.yaml` path inside a temp dir — tests never touch the
+/// real `~/.config/lumi`.
+func tempAccountsURL() -> URL {
+    tempDir().appendingPathComponent("accounts.yaml")
+}

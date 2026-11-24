@@ -62,7 +62,7 @@ struct AccountsStoreTests {
             return (200, Data(#"{"id":"x","username":"\#(tok)","display_name":"x"}"#.utf8))
         }
         let tokens = InMemoryTokenStore()
-        let store = AccountsStore(defaults: freshDefaults(), tokens: tokens, urlSession: HostRoutedURLProtocol.session)
+        let store = AccountsStore(fileURL: tempAccountsURL(), defaults: freshDefaults(), tokens: tokens, urlSession: HostRoutedURLProtocol.session)
         let a = try await store.signIn(serverURL: "https://\(host)/", username: "alice", password: "pw")
         let b = try await store.signIn(serverURL: "https://\(host)", username: "bob", password: "pw")
         #expect(store.accounts.count == 2)
@@ -91,7 +91,7 @@ struct AccountsStoreTests {
             Account(serverURL: server, username: "bob", userID: "2", displayName: "B", addedAt: ts("2026-01-02T00:00:00Z"))
         ]
         defaults.set(try JSONEncoder.accounts.encode(accounts), forKey: AccountsStore.defaultsKey)
-        let store = AccountsStore(defaults: defaults, tokens: tokens, urlSession: HostRoutedURLProtocol.session)
+        let store = AccountsStore(fileURL: tempAccountsURL(), defaults: defaults, tokens: tokens, urlSession: HostRoutedURLProtocol.session)
         store.load()
         let alice = accounts[0].key, bob = accounts[1].key
         _ = try? await store.client(for: alice)!.listVaults()
@@ -111,7 +111,8 @@ struct AccountsStoreTests {
                                  user: UserDTO(id: "u1", username: "alice", displayName: "Alice"), expiresAt: nil)
         defaults.set(try JSONEncoder().encode(legacy), forKey: AccountsStore.legacySessionKey)
         let tokens = InMemoryTokenStore(["https://Lumi.Work.com/": "tok"])
-        let store = AccountsStore(defaults: defaults, tokens: tokens)
+        let file = tempAccountsURL()
+        let store = AccountsStore(fileURL: file, defaults: defaults, tokens: tokens)
         store.load()
         let key = AccountKey(serverURL: "https://lumi.work.com", username: "alice")
         #expect(store.accounts.map(\.key) == [key])
@@ -119,7 +120,7 @@ struct AccountsStoreTests {
         #expect(tokens.allAccounts == ["https://lumi.work.com#alice"])
         #expect(defaults.data(forKey: AccountsStore.legacySessionKey) == nil)
         // Persisted: a second store sees it without re-migrating.
-        let again = AccountsStore(defaults: defaults, tokens: tokens)
+        let again = AccountsStore(fileURL: file, defaults: defaults, tokens: tokens)
         again.load()
         #expect(again.accounts.map(\.key) == [key])
     }
@@ -132,7 +133,7 @@ struct AccountsStoreTests {
         defaults.set(try JSONEncoder().encode(legacy), forKey: AccountsStore.legacySessionKey)
         let tokens = InMemoryTokenStore(["https://lumi.work.com": "tok"])
         tokens.failWrites = true
-        let store = AccountsStore(defaults: defaults, tokens: tokens)
+        let store = AccountsStore(fileURL: tempAccountsURL(), defaults: defaults, tokens: tokens)
         store.load()
         let key = AccountKey(serverURL: "https://lumi.work.com", username: "alice")
         #expect(store.account(key) != nil)
@@ -141,7 +142,7 @@ struct AccountsStoreTests {
 
     @Test("http to a public host is refused; base path is preserved in requests")
     func urlRules() async throws {
-        let store = AccountsStore(defaults: freshDefaults(), tokens: InMemoryTokenStore())
+        let store = AccountsStore(fileURL: tempAccountsURL(), defaults: freshDefaults(), tokens: InMemoryTokenStore())
         await #expect(throws: LumiAPIError.self) {
             try await store.signIn(serverURL: "http://lumi.work.com", username: "a", password: "b")
         }

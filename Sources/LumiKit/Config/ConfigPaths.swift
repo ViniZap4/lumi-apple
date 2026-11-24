@@ -14,7 +14,9 @@ import Foundation
 ///   ~/.config/lumi/vaults.yaml   — legacy vault registry (read-only import
 ///                                  source for books.yaml; left for old clients)
 ///   ~/.config/lumi/books.yaml    — shared book registry (Apple + TUI)
-///   ~/.config/lumi/servers.yaml  — shared server accounts (future; see SPEC)
+///   ~/.config/lumi/accounts.yaml — shared account registry v3, no secrets
+///                                  (Apple + TUI; SPEC-LIVROS §8.3)
+///   ~/.config/lumi/link/         — device-link drop box (SPEC-LIVROS §8.4)
 ///   ~/.config/lumi/themes/       — TUI custom themes (future Apple use)
 ///
 /// Callers should never hard-code these paths; they go through this type so a
@@ -33,6 +35,17 @@ public enum ConfigPaths {
     /// On iOS / visionOS this resolves inside the app container.
     public static var books: URL {
         directory.appendingPathComponent("books.yaml", isDirectory: false)
+    }
+
+    /// Shared account registry (SPEC-LIVROS §8.3), byte-compatible with
+    /// the TUI. Never holds a token.
+    public static var accounts: URL {
+        directory.appendingPathComponent("accounts.yaml", isDirectory: false)
+    }
+
+    /// Device-link drop box shared with the TUI (SPEC-LIVROS §8.4).
+    public static var link: URL {
+        directory.appendingPathComponent("link", isDirectory: true)
     }
 
     public static var vaults: URL {
