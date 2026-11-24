@@ -277,3 +277,17 @@ struct LivePreviewTests {
         #expect(dt < 2.0, "scan+plan took \(dt)s")
     }
 }
+
+@Suite("Note link resolution")
+struct NoteLinkResolutionTests {
+    @Test("relative, rooted, fragments, escapes; leaving the book is refused")
+    func resolve() {
+        #expect(LivePreview.resolveNoteLink("other.md", from: "a/b/note.md") == "a/b/other.md")
+        #expect(LivePreview.resolveNoteLink("../c.md#top", from: "a/b/note.md") == "a/c.md")
+        #expect(LivePreview.resolveNoteLink("/x/y.md", from: "a/b/note.md") == "x/y.md")
+        #expect(LivePreview.resolveNoteLink("my%20note.md", from: "n.md") == "my note.md")
+        #expect(LivePreview.resolveNoteLink("../../x.md", from: "a/n.md") == nil)
+        #expect(LivePreview.resolveNoteLink("https://e.com/x.md", from: "n.md") == nil)
+        #expect(LivePreview.resolveNoteLink("#anchor", from: "n.md") == nil)
+    }
+}

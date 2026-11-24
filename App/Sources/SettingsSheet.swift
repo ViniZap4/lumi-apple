@@ -195,9 +195,14 @@ struct SettingsSheet: View {
                 label: { $0.label }
             )
             toggleRow(
-                title: "Animate note transitions",
-                detail: "Brief fade when opening / switching notes and toggling read / edit.",
+                title: "Animate transitions",
+                detail: "Short fades and slides between explorer, reader and editor, splits and overlays.",
                 isOn: $prefs.contentAnimations
+            )
+            toggleRow(
+                title: "Reduce motion",
+                detail: "No movement or fades — instant changes. The system's Reduce Motion setting does the same.",
+                isOn: $prefs.reduceMotion
             )
         }
     }
@@ -211,6 +216,13 @@ struct SettingsSheet: View {
                 detail: "What mode a freshly-tapped note lands in.",
                 selection: $prefs.defaultOpenMode,
                 options: LumiPreferences.DefaultOpenMode.allCases,
+                label: { $0.label }
+            )
+            pickerRow(
+                title: "Editing mode",
+                detail: "Live Preview renders markdown as you type and shows the syntax only on the cursor's line; Source shows it all. :live / :source switch, and the last choice is kept.",
+                selection: $prefs.editMode,
+                options: LumiPreferences.EditMode.allCases,
                 label: { $0.label }
             )
             stepperRow(

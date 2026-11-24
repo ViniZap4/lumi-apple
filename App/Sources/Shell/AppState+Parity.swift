@@ -342,6 +342,10 @@ extension AppState {
             setEditing(!isEditing)
         case "settings":
             showSettings = true
+        case "live":
+            setNoteViewMode(.live)
+        case "source":
+            setNoteViewMode(.source)
         default:
             showToast("unknown command: \(command)", tone: .warning)
         }
@@ -349,12 +353,13 @@ extension AppState {
 
     /// `\p`, `:preview split`, the note bar button, the palette.
     func toggleSplitPreview() {
-        if !isEditing, isNoteOpen {
-            preferences.splitPreview = true
-            setEditing(true)
+        // The split preview sits beside Source.
+        if isNoteOpen, noteViewMode != .source {
+            setNoteViewMode(.source)
+            setSplitPreview(true)
             return
         }
-        preferences.splitPreview.toggle()
+        setSplitPreview(!splitPreviewShown)
     }
 
     var openFolderPath: String {

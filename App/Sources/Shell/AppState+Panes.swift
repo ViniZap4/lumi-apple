@@ -27,7 +27,7 @@ extension AppState {
 
     var paneLayout: PaneLayout {
         var preview: PaneLayout.Preview = .none
-        if surface == .editor, preferences.splitPreview, let split = activeSplit {
+        if surface == .editor, splitPreviewShown, let split = activeSplit {
             switch split.placement {
             case .off: preview = .none
             case .beside: preview = .beside
@@ -61,6 +61,13 @@ extension AppState {
     /// Run a pane command. False when no pane lies that way.
     @discardableResult
     func performPane(_ command: PaneCommand) -> Bool {
+        switch command {
+        case .close, .only, .equalize:
+            performLayout(command)
+            return true
+        default:
+            break
+        }
         guard let target = PaneGraph.target(from: paneFocus, command, layout: paneLayout, previous: previousPane) else {
             return false
         }

@@ -103,6 +103,7 @@ extension AppState {
             selectedNoteID = ne.relativePath
             selectedEntry = ne
             editorMode = wantsEdit ? .edit : .view
+            syncLayoutContent()
         case let .remote(vaultID):
             if selectedRemoteNoteID != nil, selectedRemoteNoteID != note.id {
                 remoteVaultsStore.closeOpenNote()
@@ -112,6 +113,7 @@ extension AppState {
             selectedRemoteNoteID = note.id
             let store = remoteVaultsStore
             Task { await store.loadOpenNote(vaultID: vaultID, noteID: note.id) }
+            syncLayoutContent()
         case .none:
             break
         }
@@ -149,6 +151,7 @@ extension AppState {
         }
         if let revealID { explorer.revealPath(revealID) }
         keymap.reset()
+        syncLayoutContent()
     }
 
     var isEditing: Bool { surface == .editor }
@@ -164,6 +167,7 @@ extension AppState {
             }
             remoteEditorMode = on ? .edit : .view
         }
+        syncLayoutContent()
     }
 
     func toggleEditing() {

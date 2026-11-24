@@ -35,7 +35,12 @@ struct LumiApp: App {
                 .environment(\.theme, appState.theme.tokens)
                 .preferredColorScheme(preferredScheme)
                 .tint(appState.theme.tokens.primary)
+                // lumi://open… (SPEC-PARTE2 §8): handled by this window,
+                // never by a new one.
+                .onOpenURL { appState.handleOpenURL($0) }
+                .handlesExternalEvents(preferring: ["lumi"], allowing: ["lumi"])
         }
+        .handlesExternalEvents(matching: ["lumi"])
         .modelContainer(Self.sharedContainer)
         #if os(macOS)
         .windowStyle(.hiddenTitleBar)
@@ -59,7 +64,13 @@ struct LumiApp: App {
                 Button(appState.isEditing ? "Read Mode" : "Edit Mode") { appState.toggleEditing() }
                     .keyboardShortcut("e", modifiers: [.command])
                     .disabled(appState.openBook == nil)
-                Button(appState.preferences.splitPreview ? "Hide Split Preview" : "Show Split Preview") { appState.toggleSplitPreview() }
+                Button("Live Preview") { appState.setNoteViewMode(.live) }
+                    .keyboardShortcut("l", modifiers: [.command, .option])
+                    .disabled(!appState.isNoteOpen)
+                Button("Source") { appState.setNoteViewMode(.source) }
+                    .keyboardShortcut("s", modifiers: [.command, .option])
+                    .disabled(!appState.isNoteOpen)
+                Button(appState.splitPreviewShown ? "Hide Split Preview" : "Show Split Preview") { appState.toggleSplitPreview() }
                     .keyboardShortcut("p", modifiers: [.command, .option])
                     .disabled(!appState.isNoteOpen)
                 Button("Back to Explorer") { appState.closeNote() }

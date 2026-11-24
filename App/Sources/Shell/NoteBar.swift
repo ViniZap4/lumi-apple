@@ -112,22 +112,16 @@ struct NoteBar: View {
 
     private var actions: some View {
         HStack(spacing: 4) {
-            Picker("View", selection: Binding(
-                get: { editing },
-                set: { appState.setEditing($0) }
-            )) {
-                Text("Reading").tag(false)
-                Text("Source").tag(true)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
-            .disabled(!canWrite && !editing)
-            .help("Reading ⇄ Source (⌘E)")
+            NoteModeSwitch(
+                views: appState.openNoteViews,
+                selection: appState.noteViewMode,
+                canEdit: canWrite
+            ) { appState.setNoteViewMode($0) }
+            .help("Reading ⇄ editing (⌘E) · ⌥⌘L Live · ⌥⌘S Source")
             .hintTarget("notebar:mode") { appState.setEditing(!editing) }
 
-            iconButton(appState.preferences.splitPreview ? "rectangle.split.2x1.fill" : "rectangle.split.2x1",
-                       active: appState.preferences.splitPreview && editing,
+            iconButton(appState.splitPreviewShown ? "rectangle.split.2x1.fill" : "rectangle.split.2x1",
+                       active: appState.splitPreviewShown && appState.noteViewMode == .source,
                        help: "Preview beside source (\\p · ⌥⌘P · :preview split)", id: "notebar:split") {
                 appState.toggleSplitPreview()
             }
@@ -164,5 +158,58 @@ struct NoteBar: View {
     private func beginRename() {
         guard canWrite else { return }
         appState.renamingTitle = true
+    }
+}
+
+/// Reading | Live | Source — a compact segmented switch with a sliding
+/// selection (the views come from the note-view registry, so kanban /
+/// canvas notes get Board / Canvas here later).
+struct NoteModeSwitch: View {
+    let views: [NoteViewMode]
+    let selection: NoteViewMode
+    let canEdit: Bool
+    let onSelect: (NoteViewMode) -> Void
+    @Environment(AppState.self) private var appState
+    @Environment(\.theme) private var theme
+    @Namespace private var pill
+    @State private var hover: NoteViewMode?
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(views, id: \.self) { view in
+                let selected = view == selection
+                let enabled = canEdit || !view.isEditing
+                Button {
+                    onSelect(view)
+                } label: {
+                    Text(view.label)
+                        .font(.system(size: 11.5, weight: selected ? .semibold : .medium))
+                        .foregroundStyle(selected ? theme.text : (enabled ? theme.textDim : theme.textDim.opacity(0.45)))
+                        .padding(.horizontal, 10)
+                        .frame(height: 22)
+                        .background {
+                            if selected {
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(theme.background)
+                                    .shadow(color: .black.opacity(theme.isDark ? 0.35 : 0.12), radius: 1.5, y: 0.5)
+                                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(theme.border.opacity(0.6), lineWidth: 0.5))
+                                    .matchedGeometryEffect(id: "pill", in: pill)
+                            } else if hover == view, enabled {
+                                RoundedRectangle(cornerRadius: 6, style: .continuous).fill(theme.text.opacity(0.05))
+                            }
+                        }
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!enabled)
+                .onHover { hover = $0 ? view : (hover == view ? nil : hover) }
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(theme.text.opacity(0.06)))
+        .animation(appState.animation(.fast), value: selection)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("View")
     }
 }

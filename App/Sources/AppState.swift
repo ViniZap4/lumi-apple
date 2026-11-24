@@ -214,6 +214,13 @@ final class AppState {
     /// Keyboard scrolling of the focused split preview.
     let previewCoordinator = ReadModeCoordinator()
 
+    // MARK: Note area layout
+
+    /// The note area's pane tree (one note pane, optionally with its
+    /// split preview). Remembered per book on this device.
+    var noteLayout = PaneTree()
+    @ObservationIgnored let layoutStore = PaneLayoutStore.shared
+
     // MARK: Offline
 
     /// Sign out / remove account while offline edits are pending.
@@ -294,6 +301,7 @@ final class AppState {
         explorer.prompt = nil
         explorer.pendingDelete = nil
         if markOpened { books.setActive(book.id) } else if books.activeBookID == nil { books.setActive(book.id) }
+        restoreLayout(for: book)
 
         switch book.kind {
         case .local:

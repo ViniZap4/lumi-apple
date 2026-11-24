@@ -222,7 +222,9 @@ struct CommandPalette: View {
         if appState.isNoteOpen {
             cmd("edit", appState.isEditing ? "Read mode" : "Edit mode", "⌘E", aliases: "toggle") { appState.toggleEditing() }
             cmd("close", "Back to explorer", "q", aliases: "close quit") { appState.closeNote() }
-            cmd("split-preview", appState.preferences.splitPreview ? "Hide split preview" : "Show split preview",
+            cmd("live", "Live Preview", ":live", aliases: "wysiwyg render inline edit mode") { appState.setNoteViewMode(.live) }
+            cmd("source", "Source mode", ":source", aliases: "raw markdown edit mode") { appState.setNoteViewMode(.source) }
+            cmd("split-preview", appState.splitPreviewShown ? "Hide split preview" : "Show split preview",
                 "\\p", aliases: "preview split side by side render :preview") { appState.toggleSplitPreview() }
         }
         if appState.surface == .explorer || appState.surface == .reader {

@@ -100,18 +100,8 @@ struct NoteDetailView: View {
         // `entry.relativePath` for note switch — both run the same easing
         // curve. Without the second, .id changes would replace the
         // subtree without firing the inner `.transition` modifiers.
-        .animation(
-            appState.preferences.contentAnimations
-                ? .easeInOut(duration: 0.22)
-                : nil,
-            value: mode
-        )
-        .animation(
-            appState.preferences.contentAnimations
-                ? .easeInOut(duration: 0.22)
-                : nil,
-            value: entry.relativePath
-        )
+        .animation(appState.animation(.slow), value: appState.noteRoute)
+        .animation(appState.animation(.slow), value: entry.relativePath)
         .background {
             // ⌘S saves (local notes write to disk; vim :w does the same).
             Button("Save") { editor.save() }
@@ -126,8 +116,8 @@ struct NoteDetailView: View {
 
     @ViewBuilder
     private func content(editor: EditorState) -> some View {
-        switch mode {
-        case .view:
+        switch appState.noteRoute {
+        case .reader:
             ReadModeScroll(jkEnabled: appState.preferences.jkScrollInView) {
                 MarkdownReader(
                     title: displayTitle,
@@ -152,17 +142,12 @@ struct NoteDetailView: View {
             // higher up, the swap fades out the old before the new
             // cascades in.
             .id(entry.relativePath)
-            .transition(
-                appState.preferences.contentAnimations
-                    ? .opacity.combined(with: .move(edge: .top))
-                    : .identity
-            )
-        case .edit:
+            .transition(appState.transition(.opacity.combined(with: .offset(y: 6))))
+        case let .editor(live):
             SourceSplit(
-                enabled: appState.preferences.splitPreview,
+                enabled: !live && appState.splitPreviewShown,
                 text: editor.currentText,
-                ratio: Binding(get: { appState.preferences.splitPreviewRatio },
-                               set: { appState.preferences.splitPreviewRatio = $0 }),
+                ratio: appState.splitRatioBinding,
                 scale: appState.preferences.readingScale,
                 fontFamily: markdownFontFamilyFromPreferences,
                 baseURL: baseURL,
@@ -172,20 +157,16 @@ struct NoteDetailView: View {
                 focus: appState.splitFocusMarker,
                 onSync: { appState.adoptSplit($0) }
             ) {
-                editorPane(editor: editor)
+                editorPane(editor: editor, live: live)
             }
             .environment(\.vimControllerSink) { appState.adoptEditor($0) }
             .id(entry.relativePath)
-            .transition(
-                appState.preferences.contentAnimations
-                    ? .opacity
-                    : .identity
-            )
+            .transition(appState.transition(.opacity))
         }
     }
 
     @ViewBuilder
-    private func editorPane(editor: EditorState) -> some View {
+    private func editorPane(editor: EditorState, live: Bool) -> some View {
             Group {
                 if appState.preferences.vimEnabled {
                     VimEditor(
@@ -206,7 +187,10 @@ struct NoteDetailView: View {
                         fileName: entry.relativePath,
                         onStatusChange: { appState.liveVimStatus = $0 }
                     )
-                    .readableEditorWidth()
+                    .presentation(live ? appState.livePresentation(baseURL: baseURL, vaultRoot: vaultRoot) : .source,
+                                  onOpenLink: { appState.openLiveLink($0) })
+                    // Live centres its own reading column.
+                    .readableEditorWidth(!live)
                 } else {
                     PlainTextEditor(text: Binding(
                         get: { editor.currentText },

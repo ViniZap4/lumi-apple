@@ -1009,3 +1009,34 @@ extension LivePreview {
         return isASCIIPunct(u)
     }
 }
+
+// MARK: - Note links
+
+public extension LivePreview {
+    /// Book-relative path a note link points to, from the note at
+    /// `notePath`: `other.md`, `../a/b.md`, `/from/root.md`, with
+    /// `#fragment` / `?query` dropped and percent-escapes decoded. nil
+    /// when the link leaves the book or is not a note link.
+    static func resolveNoteLink(_ href: String, from notePath: String) -> String? {
+        guard var s = noteHref(href) else { return nil }
+        if let i = s.firstIndex(where: { $0 == "#" || $0 == "?" }) { s = String(s[..<i]) }
+        s = s.removingPercentEncoding ?? s
+        guard !s.isEmpty, !s.contains("\\"), !s.contains("\0") else { return nil }
+        var parts: [Substring] = []
+        if !s.hasPrefix("/") {
+            parts = notePath.split(separator: "/", omittingEmptySubsequences: true)
+            if !parts.isEmpty { parts.removeLast() }  // the note's folder
+        }
+        for seg in s.split(separator: "/", omittingEmptySubsequences: true) {
+            if seg == "." { continue }
+            if seg == ".." {
+                guard !parts.isEmpty else { return nil }
+                parts.removeLast()
+                continue
+            }
+            parts.append(seg)
+        }
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: "/")
+    }
+}

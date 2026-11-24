@@ -226,19 +226,19 @@ struct RemoteNoteDetailView: View {
         if liveSession?.hasSynced == true {
             // The replica (live, or restored from disk offline) is the
             // source: REST loading / errors don't matter.
-            switch appState.remoteEditorMode {
-            case .view: viewMode
-            case .edit: editMode
+            switch appState.noteRoute {
+            case .reader: viewMode
+            case .editor: editMode
             }
         } else if appState.remoteVaultsStore.openNoteIsLoading && appState.remoteEditor.status == .idle {
             loadingState
         } else if let error = appState.remoteVaultsStore.openNoteError, !appState.remoteEditor.isBound(toVaultID: vault.id, noteID: listRow.id) {
             errorState(error)
         } else {
-            switch appState.remoteEditorMode {
-            case .view:
+            switch appState.noteRoute {
+            case .reader:
                 viewMode
-            case .edit:
+            case .editor:
                 editMode
             }
         }
@@ -283,10 +283,9 @@ struct RemoteNoteDetailView: View {
 
     private var editMode: some View {
         SourceSplit(
-            enabled: appState.preferences.splitPreview,
+            enabled: appState.noteRoute == .editor(live: false) && appState.splitPreviewShown,
             text: liveSession.map { $0.hasSynced ? $0.text : readText } ?? appState.remoteEditor.currentText,
-            ratio: Binding(get: { appState.preferences.splitPreviewRatio },
-                           set: { appState.preferences.splitPreviewRatio = $0 }),
+            ratio: appState.splitRatioBinding,
             scale: appState.preferences.readingScale,
             fontFamily: markdownFontFamilyFromPreferences,
             onToggleTask: canEditNotes ? { appState.toggleTask($0) } : nil,
@@ -316,7 +315,9 @@ struct RemoteNoteDetailView: View {
                     fileName: appState.openNotePath,
                     onStatusChange: { appState.liveVimStatus = $0 }
                 )
-                .readableEditorWidth()
+                .presentation(appState.noteRoute == .editor(live: true) ? appState.livePresentation(baseURL: nil, vaultRoot: nil) : .source,
+                              onOpenLink: { appState.openLiveLink($0) })
+                .readableEditorWidth(appState.noteRoute != .editor(live: true))
                 // One editor per replica: a new session remounts it.
                 .id(ObjectIdentifier(session))
             } else {
@@ -359,7 +360,9 @@ struct RemoteNoteDetailView: View {
                         fileName: appState.openNotePath,
                         onStatusChange: { appState.liveVimStatus = $0 }
                     )
-                    .readableEditorWidth()
+                    .presentation(appState.noteRoute == .editor(live: true) ? appState.livePresentation(baseURL: nil, vaultRoot: nil) : .source,
+                                  onOpenLink: { appState.openLiveLink($0) })
+                    .readableEditorWidth(appState.noteRoute != .editor(live: true))
                 } else {
                     PlainTextEditor(text: $editor.currentText)
                 }

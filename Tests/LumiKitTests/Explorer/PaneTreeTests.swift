@@ -138,3 +138,25 @@ struct PaneTreeTests {
         #expect(NoteViewMode.live.isEditing && !NoteViewMode.reading.isEditing)
     }
 }
+
+@Suite("Note view registry")
+struct NoteViewRegistryTests {
+    enum Route: Equatable { case reader, editor(live: Bool), board }
+
+    @Test("routes by kind; unsupported views coerce; unregistered kinds fall back")
+    func registry() {
+        var r = NoteViewRegistry<Route>()
+        r.register(.markdown, views: [.reading, .live, .source]) { v in
+            v == .reading ? .reader : .editor(live: v == .live)
+        }
+        #expect(r.resolve(.markdown, .live)?.route == .editor(live: true))
+        #expect(r.resolve(.markdown, .board)?.view == .reading)
+        let kanban = r.resolve(.kanban, .source)
+        #expect(kanban?.isFallback == true && kanban?.route == .editor(live: false))
+        #expect(r.views(for: .canvas) == [.reading, .live, .source])
+        r.register(.kanban, views: [.board, .source]) { $0 == .board ? .board : .editor(live: false) }
+        #expect(r.resolve(.kanban, .live)?.route == .board)
+        #expect(r.resolve(.kanban, .live)?.isFallback == false)
+        #expect(r.views(for: .kanban) == [.board, .source])
+    }
+}

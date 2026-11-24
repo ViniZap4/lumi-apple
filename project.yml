@@ -53,6 +53,9 @@ targets:
       base:
         PRODUCT_NAME: Lumi
         PRODUCT_BUNDLE_IDENTIFIER: com.vinizap.lumi
+        # Merged with the generated keys: registers the lumi:// scheme
+        # (SPEC-PARTE2 §8).
+        INFOPLIST_FILE: App/Info.plist
         INFOPLIST_KEY_CFBundleDisplayName: Lumi
         INFOPLIST_KEY_NSHumanReadableCopyright: "© Lumi"
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
