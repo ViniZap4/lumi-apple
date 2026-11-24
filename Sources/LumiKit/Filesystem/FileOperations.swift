@@ -30,6 +30,34 @@ public enum FileOperations {
 
     // MARK: - Create
 
+    /// Empty JSON Canvas body, byte-identical to the server's
+    /// (CRDT-CLIENT-PROTOCOL §13).
+    public static let emptyCanvas = "{\"nodes\":[],\"edges\":[]}\n"
+
+    /// `name` → `name.canvas` (an existing `.canvas` suffix is kept once).
+    public static func canvasFileName(_ name: String) -> String {
+        var stem = name
+        if stem.lowercased().hasSuffix(".canvas") { stem = String(stem.dropLast(7)) }
+        stem = stem.trimmingCharacters(in: .whitespacesAndNewlines)
+        return stem + ".canvas"
+    }
+
+    /// Create `<name>.canvas` holding an empty canvas. The file name keeps
+    /// the user's name (Obsidian style; a canvas has no frontmatter title).
+    @discardableResult
+    public static func createCanvas(in folderURL: URL, name: String) throws -> URL {
+        let file = canvasFileName(name)
+        guard file != ".canvas", !file.contains("/") else { throw Error.emptyName }
+        try ensureDirectory(folderURL)
+        let url = uniqueURL(folderURL.appendingPathComponent(file))
+        do {
+            try emptyCanvas.write(to: url, atomically: true, encoding: .utf8)
+            return url
+        } catch {
+            throw Error.underlying(error)
+        }
+    }
+
     /// Creates a new markdown note in `folderURL` with the given title.
     /// File name is the title slugged + `.md`. Body has a minimal
     /// frontmatter block with id / title / created_at / updated_at /
@@ -85,10 +113,14 @@ public enum FileOperations {
     /// the new URL.
     @discardableResult
     public static func rename(at oldURL: URL, to newName: String) throws -> URL {
-        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        var trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw Error.emptyName }
         let isNote = oldURL.pathExtension.lowercased() == "md"
         let parent = oldURL.deletingLastPathComponent()
+        // A canvas stays a canvas: the kind never changes on rename.
+        if oldURL.pathExtension.lowercased() == "canvas" {
+            trimmed = canvasFileName(trimmed)
+        }
         // For notes the rename uses the slugged title as the file
         // stem; the visible title sits in the frontmatter, so we keep
         // the slug there too.

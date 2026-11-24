@@ -119,6 +119,7 @@ extension AppState {
             selectedRemoteNoteID = note.id
             let store = remoteVaultsStore
             Task { await store.loadOpenNote(vaultID: vaultID, noteID: note.id) }
+            Task { await store.learnFrontmatter(noteID: note.id) }
             syncLayoutContent()
         case .none:
             break
@@ -255,6 +256,17 @@ extension AppState {
 
         keymap.ctrlHJKLPanes = preferences.ctrlHJKLPanes
         let now = ProcessInfo.processInfo.systemUptime
+        // The focused pane's Board / Canvas takes its keys first
+        // (SPEC-PARTE2 §5–6): on a canvas `-` zooms out; elsewhere it is
+        // the floating explorer.
+        // `⌃w` stays the shell's window prefix (⌃w f / ⏎ reach the canvas
+        // through `followLinkInFocusedPane`).
+        if isNoteOpen, focusedPane != .preview, !paneView(focusedLeaf).isEditing,
+           let sink = structuredKeySinks[focusedLeaf], keymap.pendingDisplay.isEmpty,
+           !(k.control && k.chars?.lowercased() == "w"),
+           let key = StructuredKey(stroke: k, shift: Self.shiftHeld), sink(key) {
+            return true
+        }
         if let leaf = focusedSecondary {
             // A secondary pane: its editor owns its keys; its reader reads here.
             if paneView(leaf).isEditing, paneEditors[leaf]?.value != nil { return false }

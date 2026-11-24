@@ -32,6 +32,8 @@ struct NoteViewContext {
     /// This pane has the keyboard.
     let isFocused: Bool
     let isReadOnly: Bool
+    /// A server note (live session) rather than a local file.
+    let isRemote: Bool
     /// Follow a link written in this note (same table as the reader).
     let openLink: @MainActor (String, LinkOpenWhere) -> Void
     /// Join (or share) the note's document. Edits MUST go through it as
@@ -40,6 +42,15 @@ struct NoteViewContext {
     let releaseSession: @MainActor (NoteViewSession) -> Void
     /// Switch this pane to another view (Board ⇄ Source).
     let switchView: @MainActor (NoteViewMode) -> Void
+    /// Open a book path / card link from a structured view: here, in a
+    /// vertical split, or (link nodes) in the browser.
+    let openStructured: @MainActor (String, StructuredOpenTarget) -> Void
+    /// The view's key handler while it shows (nil when it goes). Keys
+    /// reach it only while its pane has the keyboard.
+    let registerKeys: @MainActor (((StructuredKey) -> Bool)?) -> Void
+    /// Keep / drop a session handle for the life of a structured host.
+    let retain: @MainActor (NoteViewSession) -> Void
+    let releaseRetained: @MainActor () -> Void
 }
 
 /// A note's shared document for a registered view. Local notes edit the
@@ -48,17 +59,29 @@ struct NoteViewContext {
 @MainActor
 final class NoteViewSession {
     let key: String
-    private let local: EditorState?
+    let local: EditorState?
+    /// Server notes: the live session seen through this view's fan-out
+    /// (with the join state the structured host needs).
+    let structured: (any StructuredSession)?
     /// The collaborative document (server notes) — bind an editor to it
     /// or call `apply`. Set `document.changeHandler` to hear remote edits.
     let document: CollaborativeDocument?
     fileprivate let release: () -> Void
 
-    init(key: String, local: EditorState?, document: CollaborativeDocument?, release: @escaping () -> Void) {
+    init(key: String, local: EditorState?, document: CollaborativeDocument?, structured: (any StructuredSession)? = nil,
+         release: @escaping () -> Void) {
         self.key = key
         self.local = local
         self.document = document
+        self.structured = structured
         self.release = release
+    }
+
+    /// Local notes: replace the whole text and save it verbatim.
+    func writeVerbatim(_ text: String) {
+        guard let local, local.currentText != text else { return }
+        local.currentText = text
+        local.save()
     }
 
     var text: String { document?.text ?? local?.currentText ?? "" }
@@ -102,6 +125,7 @@ enum NoteViewHooks {
     static func registerBuiltIns() {
         guard !didRegisterBuiltIns else { return }
         didRegisterBuiltIns = true
+        registerStructured()
     }
 
     static func view(_ context: NoteViewContext) -> AnyView? {
@@ -115,13 +139,24 @@ extension AppState {
         let remoteRow = remoteVaultsStore.notes.first { $0.path == path || $0.id == path }
         let noteID = explorer.isLocal ? path : (remoteRow?.id ?? path)
         let title = remoteRow?.title.isEmpty == false ? remoteRow!.title : NoteTree.stem(path)
+        let owner = "view\(leaf.raw)"
         return NoteViewContext(
             view: view, kind: kind, notePath: path, noteID: noteID, title: title, text: text,
-            isFocused: focusedLeaf == leaf, isReadOnly: !canWritePane(path),
+            isFocused: focusedLeaf == leaf, isReadOnly: !canWritePane(path), isRemote: !explorer.isLocal,
             openLink: { [weak self] href, target in self?.openLink(href, where: target, from: leaf) },
-            acquireSession: { [weak self] in self?.acquireNoteViewSession(path: path, owner: "view\(leaf.raw)") },
+            acquireSession: { [weak self] in self?.acquireNoteViewSession(path: path, owner: owner) },
             releaseSession: { $0.release() },
-            switchView: { [weak self] v in self?.setPaneView(leaf, v) }
+            switchView: { [weak self] v in self?.setPaneView(leaf, v) },
+            openStructured: { [weak self] href, target in self?.openStructuredLink(href, target, from: leaf) },
+            registerKeys: { [weak self] handler in self?.structuredKeySinks[leaf] = handler },
+            retain: { [weak self] h in
+                self?.noteViewHandles[owner]?.release()
+                self?.noteViewHandles[owner] = h
+            },
+            releaseRetained: { [weak self] in
+                self?.noteViewHandles[owner]?.release()
+                self?.noteViewHandles[owner] = nil
+            }
         )
     }
 
@@ -141,7 +176,8 @@ extension AppState {
             guard can("note.write"), let row = remoteVaultsStore.notes.first(where: { $0.path == path || $0.id == path }),
                   let live = remoteVaultsStore.acquireSession(vaultID: vault, noteID: row.id, user: awarenessUser) else { return nil }
             let view = docView(for: live, owner: owner)
-            return NoteViewSession(key: row.id, local: nil, document: view) { [weak self] in
+            return NoteViewSession(key: row.id, local: nil, document: view,
+                                   structured: FanoutStructuredSession(session: live, view: view)) { [weak self] in
                 self?.fanoutViews = self?.fanoutViews.filter { !$0.key.hasPrefix(owner + "#") } ?? [:]
                 self?.remoteVaultsStore.releaseSession(live, defer: true)
             }

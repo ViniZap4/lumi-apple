@@ -143,7 +143,10 @@ struct SecondaryNotePane: View {
         return NoteTree.stem(path)
     }
 
-    private var kind: NoteKind { NoteKind.detect(path: path, text: String(text.prefix(2048))) }
+    private var kind: NoteKind {
+        if local?.isKanban == true { return .kanban }
+        return appState.noteKind(path: path, text: text)
+    }
     private var focused: Bool { appState.focusedLeaf == leaf }
     private var canEdit: Bool { appState.canWritePane(path) }
 

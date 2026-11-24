@@ -246,6 +246,10 @@ final class AppState {
     /// Each mounted editor's handle on its fan-out (held strongly here:
     /// editors hold their document weakly).
     @ObservationIgnored var fanoutViews: [String: DocumentFanout.View] = [:]
+    /// Key handlers of the boards / canvases on screen, per pane.
+    @ObservationIgnored var structuredKeySinks: [PaneLeafID: (StructuredKey) -> Bool] = [:]
+    /// Session handles structured hosts hold (released with the host).
+    @ObservationIgnored var noteViewHandles: [String: NoteViewSession] = [:]
 
     /// The floating explorer (`-`, `<leader>e`, `:explore`) — the only
     /// navigation (SPEC-PARTE2 §2): files, or the books level (`gb`).

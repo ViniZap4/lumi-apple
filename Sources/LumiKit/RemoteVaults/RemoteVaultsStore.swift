@@ -620,14 +620,37 @@ public final class RemoteVaultsStore {
         guard let vaultID = selectedVaultID else {
             throw LumiAPIError.network(message: "no vault selected")
         }
-        return try await client.getNoteContent(vaultID: vaultID, noteID: noteID).body
+        let content = try await client.getNoteContent(vaultID: vaultID, noteID: noteID)
+        recordFrontmatter(content)
+        return content.body
+    }
+
+    /// `kanban-plugin` per note id, learned from `/content` (the CRDT body
+    /// has no frontmatter; this is how server boards are recognised).
+    public private(set) var kanbanFormats: [String: String] = [:]
+
+    /// The frontmatter's `kanban-plugin: …` line for a note, when known.
+    public func frontmatterHint(noteID: String) -> String? {
+        kanbanFormats[noteID].flatMap { $0.isEmpty ? nil : "kanban-plugin: \($0)" }
+    }
+
+    /// Fetch `/content` once to learn the note's frontmatter flags.
+    public func learnFrontmatter(noteID: String) async {
+        guard kanbanFormats[noteID] == nil, let vaultID = selectedVaultID,
+              let content = try? await client.getNoteContent(vaultID: vaultID, noteID: noteID) else { return }
+        recordFrontmatter(content)
+    }
+
+    private func recordFrontmatter(_ content: RemoteNoteContent) {
+        let v = content.kanbanPlugin ?? ""
+        if kanbanFormats[content.id] != v { kanbanFormats[content.id] = v }
     }
 
     /// Create a new note in the currently-selected vault and prepend it to
     /// the cached `notes` list. Returns the new row on success so the host
     /// can navigate to it (e.g. auto-open in edit mode).
     @discardableResult
-    public func createNote(title: String, body: String = "", tags: [String] = []) async throws(LumiAPIError) -> RemoteNote {
+    public func createNote(title: String, body: String = "", tags: [String] = [], kind: String? = nil) async throws(LumiAPIError) -> RemoteNote {
         guard let id = selectedVaultID else {
             throw LumiAPIError.network(message: "no vault selected")
         }
@@ -635,7 +658,8 @@ public final class RemoteVaultsStore {
             vaultID: id,
             title: title,
             body: body,
-            tags: tags
+            tags: tags,
+            kind: kind
         )
         if !notes.contains(where: { $0.id == created.id }) {
             notes.insert(created, at: 0)

@@ -175,6 +175,18 @@ extension AppState {
     /// `gf`, `Enter` on a link, `⌃w f` / `⌃w Enter` / `⌃w F`, `:follow`.
     func followLinkInFocusedPane(_ target: LinkOpenWhere) {
         let leaf = focusedLeaf
+        // A canvas: its selected file node (gf here, ⌃w f in a split).
+        if focusedPane != .preview, !paneView(leaf).isEditing, let sink = structuredKeySinks[leaf],
+           let path = panePath(leaf), NoteKind.isCanvasPath(path) {
+            if target == .current {
+                _ = sink(StructuredKey("g"))
+                _ = sink(StructuredKey("f"))
+            } else {
+                _ = sink(StructuredKey("w", ctrl: true))
+                _ = sink(StructuredKey("f"))
+            }
+            return
+        }
         if focusedPane != .preview, let editor = paneEditor(leaf) {
             guard let l = editor.linkUnderCursor else {
                 showToast("no link under the cursor", tone: .warning)

@@ -21,6 +21,12 @@ final class EditorState {
     private(set) var noteURL: URL?
     private(set) var frontmatter = Frontmatter()
     private(set) var loadedMTime: Date?
+    /// The file's bytes before the body (frontmatter as written), kept so
+    /// structured notes save verbatim.
+    private(set) var rawHeader: String?
+    /// An Obsidian Kanban board (`kanban-plugin` in the frontmatter):
+    /// saved byte for byte — no `updated_at`, no frontmatter rewrite.
+    private(set) var isKanban = false
 
     var originalText: String = ""
     var currentText: String = ""
@@ -33,6 +39,10 @@ final class EditorState {
     func load(noteID: String, at url: URL, vaultRoot: URL) {
         do {
             let loaded = try NoteFile.load(at: url, vaultRoot: vaultRoot)
+            let raw = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            let body = loaded.note.content
+            self.rawHeader = raw.hasSuffix(body) ? String(raw.dropLast(body.count)) : nil
+            self.isKanban = Kanban.isKanbanText(raw)
             self.noteID = noteID
             self.noteURL = url
             self.frontmatter = loaded.frontmatter
@@ -82,6 +92,8 @@ final class EditorState {
     func reset() {
         noteID = nil
         noteURL = nil
+        rawHeader = nil
+        isKanban = false
         frontmatter = Frontmatter()
         loadedMTime = nil
         originalText = ""
@@ -91,6 +103,20 @@ final class EditorState {
 
     private func commit(to url: URL) {
         status = .saving
+        // A canvas is raw JSON (never wrap it in frontmatter); a board keeps
+        // its frontmatter bytes (structured notes save verbatim).
+        let isCanvas = url.pathExtension.lowercased() == "canvas"
+        if isCanvas || (isKanban && rawHeader != nil) {
+            do {
+                try ((isCanvas ? "" : rawHeader ?? "") + currentText).write(to: url, atomically: true, encoding: .utf8)
+                originalText = currentText
+                loadedMTime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+                status = .saved(at: Date())
+            } catch {
+                status = .error(message: "could not write note: \(error.localizedDescription)")
+            }
+            return
+        }
         do {
             let newMTime = try NoteFile.write(
                 body: currentText,

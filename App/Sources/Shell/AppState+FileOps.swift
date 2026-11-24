@@ -88,7 +88,10 @@ extension AppState {
                     explorer.nav.goTo(rel)
                     return
                 }
-                let url = try FileOperations.createNote(in: target, title: NoteTree.baseName(rel))
+                // `a name.canvas` creates a JSON Canvas (SPEC-PARTE2 §6).
+                let url = rel.lowercased().hasSuffix(".canvas")
+                    ? try FileOperations.createCanvas(in: target, name: NoteTree.baseName(rel))
+                    : try FileOperations.createNote(in: target, title: NoteTree.baseName(rel))
                 let created = NoteTree.normalizePath((NoteTree.dirOf(rel).isEmpty ? "" : NoteTree.dirOf(rel) + "/") + url.lastPathComponent)
                 explorer.rescanLocal(reveal: created)
                 let entry = ExplorerEntry(kind: .note, key: NoteTree.noteKey(created), name: NoteTree.stem(created),
@@ -103,8 +106,11 @@ extension AppState {
                 return
             }
             do {
-                let title = NoteTree.baseName(rel)
-                var created = try await remoteVaultsStore.createNote(title: title)
+                // `a name.canvas` → POST kind:"canvas" (id `<slug>.canvas`).
+                let isCanvas = rel.lowercased().hasSuffix(".canvas")
+                let base = NoteTree.baseName(rel)
+                let title = isCanvas ? String(base.dropLast(7)) : base
+                var created = try await remoteVaultsStore.createNote(title: title, kind: isCanvas ? "canvas" : nil)
                 let folder = NoteTree.dirOf(rel)
                 if !folder.isEmpty {
                     let file = NoteTree.baseName(created.path.isEmpty ? created.id + ".md" : created.path)
@@ -145,8 +151,15 @@ extension AppState {
             // note (relative to its folder), like yazi.
             let dir = NoteTree.dirOf(entry.path)
             var path: String?
-            var title = input
-            if input.contains("/") {
+            var title: String? = input
+            if NoteKind.isCanvasPath(entry.path) {
+                // A canvas has no title to PATCH: rename = move to
+                // `<name>.canvas` (the kind never changes).
+                let rel = NoteTree.normalizePath(dir.isEmpty ? input : dir + "/" + input)
+                let folder = NoteTree.dirOf(rel)
+                path = (folder.isEmpty ? "" : folder + "/") + FileOperations.canvasFileName(NoteTree.baseName(rel))
+                title = nil
+            } else if input.contains("/") {
                 let rel = NoteTree.normalizePath(dir.isEmpty ? input : dir + "/" + input)
                 title = NoteTree.stem(rel)
                 path = (NoteTree.dirOf(rel).isEmpty ? "" : NoteTree.dirOf(rel) + "/") + NoteTree.baseName(entry.path)

@@ -365,4 +365,15 @@ struct PanesPart2Tests {
         let notes = [ExplorerNote(id: "Hover cards.md", path: "Hover cards.md", title: "Hover cards")]
         #expect(LinkRouting.classify(notes, from: "x.md", href: "Hover%20cards.md") == .note(notes[0]))
     }
+
+    @Test("server boards: /content frontmatter carries kanban-plugin; the hint resolves the kind")
+    func serverKanbanHint() throws {
+        let json = ###"{"id":"b","vault_id":"6f9619ff-8b86-d011-b42d-00c04fc964ff","path":"b.md","body":"## Todo\n","frontmatter":{"kanban-plugin":"board","tags":["x"]}}"###
+        let c = try JSONDecoder().decode(RemoteNoteContent.self, from: Data(json.utf8))
+        #expect(c.kanbanPlugin == "board")
+        let plain = #"{"id":"n","vault_id":"6f9619ff-8b86-d011-b42d-00c04fc964ff","path":"n.md","body":"x","frontmatter":{"title":7}}"#
+        #expect(try JSONDecoder().decode(RemoteNoteContent.self, from: Data(plain.utf8)).kanbanPlugin == nil)
+        #expect(NoteKind.resolve(path: "b.md", frontmatterText: "kanban-plugin: board", text: "## Todo\n") == .kanban)
+        #expect(NoteKind.resolve(path: "b.md", text: "## Todo\n") == .markdown)
+    }
 }

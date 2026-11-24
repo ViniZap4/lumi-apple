@@ -176,7 +176,7 @@ enum LocalScan {
             if rel.isEmpty { continue }
             if values?.isDirectory == true {
                 folders.append(rel)
-            } else if url.pathExtension.lowercased() == "md" {
+            } else if ["md", "canvas"].contains(url.pathExtension.lowercased()) {
                 notes.append(ExplorerNote(id: rel, path: rel, title: "", updatedAt: values?.contentModificationDate))
             }
         }

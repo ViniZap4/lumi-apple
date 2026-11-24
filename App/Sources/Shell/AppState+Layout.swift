@@ -14,6 +14,9 @@ extension AppState {
     /// What the open note shows.
     var noteViewMode: NoteViewMode {
         guard isNoteOpen else { return .reading }
+        // Board / Canvas notes: their view, or Source while editing.
+        let kind = openNoteKind
+        if kind != .markdown { return isEditing ? .source : kind.defaultView }
         guard isEditing else { return .reading }
         // A pane remembers Live vs Source; new edits take the preference.
         if case let .note(_, view)? = noteLayout.content(noteLayout.mainLeaf), view.isEditing { return view }
@@ -25,6 +28,9 @@ extension AppState {
     /// mode (web parity: `editMode`).
     func setNoteViewMode(_ mode: NoteViewMode) {
         switch mode {
+        case .source where openNoteKind != .markdown:
+            // Structured Source never changes the markdown edit mode.
+            if !isEditing { setEditing(true) }
         case .live, .source:
             let wanted: LumiPreferences.EditMode = mode == .live ? .live : .source
             if preferences.editMode != wanted {
@@ -88,6 +94,8 @@ extension AppState {
         selectedRemoteNoteID = id
         let store = remoteVaultsStore
         Task { await store.loadOpenNote(vaultID: vaultID, noteID: id) }
+        // The snapshot has no frontmatter: learn `kanban-plugin` once.
+        Task { await store.learnFrontmatter(noteID: id) }
     }
 }
 
@@ -316,7 +324,26 @@ extension AppState {
 
     var openNoteKind: NoteKind {
         guard let path = openNotePath else { return .markdown }
-        return NoteKind.detect(path: path, text: String(openNoteText.prefix(2048)))
+        if selectedEntry != nil {
+            // Local: the editor holds the body; the flag is in the frontmatter.
+            if editor.isKanban { return .kanban }
+            return NoteKind.resolve(path: path, frontmatterText: editor.frontmatter.unknownLines.joined(separator: "\n"),
+                                    text: editor.currentText)
+        }
+        let row = selectedRemoteNoteID.flatMap { id in remoteVaultsStore.notes.first { $0.id == id } }
+        return NoteKind.resolve(path: path, kind: row?.kind,
+                                frontmatterText: row.flatMap { remoteVaultsStore.frontmatterHint(noteID: $0.id) },
+                                text: openNoteText)
+    }
+
+    /// Kind of the note a pane shows: local frontmatter (pooled buffer),
+    /// the server's `kind` and `/content` frontmatter, else the text.
+    func noteKind(path: String, text: String) -> NoteKind {
+        if let doc = localDocs.peek(path), doc.isKanban { return .kanban }
+        let row = explorer.isLocal ? nil : remoteVaultsStore.notes.first { $0.path == path || $0.id == path }
+        return NoteKind.resolve(path: path, kind: row?.kind,
+                                frontmatterText: row.flatMap { remoteVaultsStore.frontmatterHint(noteID: $0.id) },
+                                text: text)
     }
 
     /// Views the note bar offers for the open note.

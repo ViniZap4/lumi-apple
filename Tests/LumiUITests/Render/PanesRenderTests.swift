@@ -342,6 +342,38 @@ struct PanesRenderTests {
         }
     }
 
+    @Test("2 panes: a kanban board beside a canvas, dark + light")
+    func boardAndCanvas() throws {
+        for (theme, n) in Self.themes {
+            let board = KanbanBoardModel(doc: MemoryLiveText(StructuredRenderTests.fixture("kanban/basic.md")))
+            board.setCursor(KanbanCursor(lane: 0, card: 1))
+            let canvas = CanvasBoardModel(doc: MemoryLiveText(StructuredRenderTests.fixture("canvas/obsidian.canvas")))
+            canvas.setPreview("Projects/Roadmap.md", .ok("# Roadmap\n\n- [x] Kanban board\n- [ ] Canvas view\n\nShip **part 2**."))
+            canvas.select(["b1c2d3e4f5a6b7c8"])
+            let one = PaneLeafID(1), two = PaneLeafID(2)
+            let root = PaneNode.split(.vertical, [.leaf(one, .note(path: "boards/launch.md", view: .board)),
+                                                  .leaf(two, .note(path: "maps/launch.canvas", view: .canvas))], [0.5, 0.5])
+            let view = VStack(spacing: 0) {
+                TopLine(crumbs: "Work")
+                PaneLayoutView(root: root, focused: two, showsFocus: true, onResize: { _, _, _ in }) { id, _ in
+                    VStack(spacing: 0) {
+                        if id == one {
+                            PaneHeaderBar(title: "Launch board", folder: "boards", views: [.board, .source], selection: .board,
+                                          canEdit: true, focused: false, onSelect: { _ in }, onClose: {})
+                            KanbanBoardView(model: board, title: "Launch board", status: nil, motion: false, onSource: nil)
+                        } else {
+                            PaneHeaderBar(title: "launch", folder: "maps", views: [.canvas, .source], selection: .canvas,
+                                          canEdit: true, focused: true, badge: "2 editing", onSelect: { _ in }, onClose: {})
+                            CanvasBoardView(model: canvas, title: "Launch plan", motion: false, onSource: nil)
+                        }
+                    }
+                }
+                StatusLine(mode: "CANVAS", context: "maps/launch.canvas  · pane 2/2")
+            }
+            try Self.render(view, size: CGSize(width: 1500, height: 860), theme: theme, name: "board-canvas-\(n)", settle: 1.2)
+        }
+    }
+
     // MARK: Pure bits
 
     @Test("split sizes: weights, dividers, last child takes the rest")
