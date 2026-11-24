@@ -14,6 +14,9 @@ extension AppState {
     /// What the open note shows.
     var noteViewMode: NoteViewMode {
         guard isNoteOpen else { return .reading }
+        // Board / Canvas notes: their view, or Source while editing.
+        let kind = openNoteKind
+        if kind != .markdown { return isEditing ? .source : kind.defaultView }
         guard isEditing else { return .reading }
         return preferences.editMode == .live ? .live : .source
     }
@@ -23,6 +26,9 @@ extension AppState {
     /// mode (web parity: `editMode`).
     func setNoteViewMode(_ mode: NoteViewMode) {
         switch mode {
+        case .source where openNoteKind != .markdown:
+            // Structured Source never changes the markdown edit mode.
+            if !isEditing { setEditing(true) }
         case .live, .source:
             let wanted: LumiPreferences.EditMode = mode == .live ? .live : .source
             if preferences.editMode != wanted {
@@ -304,6 +310,8 @@ extension AppState {
 enum NoteRoute: Equatable {
     case reader
     case editor(live: Bool)
+    /// Kanban Board / JSON Canvas (`StructuredNoteHost.swift`).
+    case structured(NoteKind)
 }
 
 extension AppState {
@@ -319,12 +327,21 @@ extension AppState {
             default: return .reader
             }
         }
+        for kind in [NoteKind.kanban, .canvas] {
+            r.register(kind, views: kind.views) { $0 == .source ? .editor(live: false) : .structured(kind) }
+        }
         return r
     }()
 
     var openNoteKind: NoteKind {
         guard let path = openNotePath else { return .markdown }
-        return NoteKind.detect(path: path, text: String(openNoteText.prefix(2048)))
+        if selectedEntry != nil {
+            // Local: the editor holds the body; the flag is in the frontmatter.
+            return NoteKind.resolve(path: path, frontmatterText: editor.frontmatter.unknownLines.joined(separator: "\n"),
+                                    text: editor.currentText)
+        }
+        let row = selectedRemoteNoteID.flatMap { id in remoteVaultsStore.notes.first { $0.id == id } }
+        return NoteKind.resolve(path: path, kind: row?.kind, text: openNoteText)
     }
 
     /// Views the note bar offers for the open note.

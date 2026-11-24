@@ -395,10 +395,11 @@ public actor LumiAPIClient {
         vaultID: UUID,
         title: String,
         body: String = "",
-        tags: [String] = []
+        tags: [String] = [],
+        kind: String? = nil
     ) async throws(LumiAPIError) -> RemoteNote {
         let path = "/api/vaults/\(vaultID.uuidString.lowercased())/notes"
-        let req = CreateNoteRequest(title: title, body: body, tags: tags)
+        let req = CreateNoteRequest(title: title, body: body, tags: tags, kind: kind)
         return try await request(method: "POST", path: path, body: req, requireToken: true)
     }
 
@@ -747,15 +748,19 @@ struct CreateNoteRequest: Encodable, Sendable {
     let title: String
     let body: String
     let tags: [String]
+    /// `"canvas"` creates a JSON Canvas note (CRDT-CLIENT-PROTOCOL §13);
+    /// omitted for markdown.
+    var kind: String? = nil
 
     enum CodingKeys: String, CodingKey {
-        case title, body, tags
+        case title, body, tags, kind
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(title, forKey: .title)
         try c.encode(body, forKey: .body)
+        try c.encodeIfPresent(kind, forKey: .kind)
         // Omit when empty so the JSON matches the server's `tags,omitempty`
         // tag — symmetric with how we'd receive it back.
         if !tags.isEmpty {

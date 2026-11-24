@@ -91,6 +91,18 @@ final class EditorState {
 
     private func commit(to url: URL) {
         status = .saving
+        // A canvas is raw JSON: never wrap it in frontmatter.
+        if url.pathExtension.lowercased() == "canvas" {
+            do {
+                try currentText.write(to: url, atomically: true, encoding: .utf8)
+                originalText = currentText
+                loadedMTime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+                status = .saved(at: Date())
+            } catch {
+                status = .error(message: "could not write note: \(error.localizedDescription)")
+            }
+            return
+        }
         do {
             let newMTime = try NoteFile.write(
                 body: currentText,

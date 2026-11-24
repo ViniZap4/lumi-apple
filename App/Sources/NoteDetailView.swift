@@ -162,6 +162,10 @@ struct NoteDetailView: View {
             .environment(\.vimControllerSink) { appState.adoptEditor($0) }
             .id(entry.relativePath)
             .transition(appState.transition(.opacity))
+        case let .structured(kind):
+            LocalStructuredNote(kind: kind, title: displayTitle)
+                .id(entry.relativePath)
+                .transition(appState.transition(.opacity))
         }
     }
 

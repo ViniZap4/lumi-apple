@@ -559,7 +559,7 @@ public final class RemoteVaultsStore {
     /// the cached `notes` list. Returns the new row on success so the host
     /// can navigate to it (e.g. auto-open in edit mode).
     @discardableResult
-    public func createNote(title: String, body: String = "", tags: [String] = []) async throws(LumiAPIError) -> RemoteNote {
+    public func createNote(title: String, body: String = "", tags: [String] = [], kind: String? = nil) async throws(LumiAPIError) -> RemoteNote {
         guard let id = selectedVaultID else {
             throw LumiAPIError.network(message: "no vault selected")
         }
@@ -567,7 +567,8 @@ public final class RemoteVaultsStore {
             vaultID: id,
             title: title,
             body: body,
-            tags: tags
+            tags: tags,
+            kind: kind
         )
         if !notes.contains(where: { $0.id == created.id }) {
             notes.insert(created, at: 0)

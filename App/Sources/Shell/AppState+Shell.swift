@@ -253,6 +253,11 @@ extension AppState {
             guard let action = keymap.feed(k, context: .preview, now: now) else { return false }
             return dispatch(action) { self.performShared($0) || self.performPreview($0) }
         }
+        // A visible Board / Canvas takes its keys first (SPEC-PARTE2 §5–6).
+        if case .structured = noteRoute, let sink = StructuredKeyRouting.current,
+           let key = StructuredKey(stroke: k, shift: Self.shiftHeld), sink(key) {
+            return true
+        }
         switch surface {
         case .editor:
             return false

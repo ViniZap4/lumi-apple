@@ -18,9 +18,12 @@ public struct RemoteNote: Codable, Sendable, Equatable, Hashable, Identifiable {
     /// recreate, init from file). Compare by equality only. Nil on
     /// servers predating it.
     public let crdtEpoch: String?
+    /// `"markdown"` or `"canvas"` (CRDT-CLIENT-PROTOCOL §13). Nil on
+    /// servers predating it — `NoteKind.resolve` falls back to the path.
+    public let kind: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, path, title
+        case id, path, title, kind
         case vaultID = "vault_id"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
@@ -34,7 +37,8 @@ public struct RemoteNote: Codable, Sendable, Equatable, Hashable, Identifiable {
         title: String,
         createdAt: Date?,
         updatedAt: Date?,
-        crdtEpoch: String? = nil
+        crdtEpoch: String? = nil,
+        kind: String? = nil
     ) {
         self.id = id
         self.vaultID = vaultID
@@ -43,6 +47,7 @@ public struct RemoteNote: Codable, Sendable, Equatable, Hashable, Identifiable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.crdtEpoch = crdtEpoch
+        self.kind = kind
     }
 
     public init(from decoder: Decoder) throws {
@@ -62,6 +67,7 @@ public struct RemoteNote: Codable, Sendable, Equatable, Hashable, Identifiable {
             self.updatedAt = nil
         }
         self.crdtEpoch = Self.nonEmpty(try c.decodeIfPresent(String.self, forKey: .crdtEpoch))
+        self.kind = Self.nonEmpty(try c.decodeIfPresent(String.self, forKey: .kind))
     }
 
     static func nonEmpty(_ s: String?) -> String? {
@@ -84,6 +90,7 @@ public struct RemoteNote: Codable, Sendable, Equatable, Hashable, Identifiable {
             try c.encode(updatedAt.ISO8601Format(), forKey: .updatedAt)
         }
         try c.encodeIfPresent(crdtEpoch, forKey: .crdtEpoch)
+        try c.encodeIfPresent(kind, forKey: .kind)
     }
 }
 

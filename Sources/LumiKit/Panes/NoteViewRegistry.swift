@@ -3,8 +3,9 @@ import Foundation
 /// Which view renders a note, keyed by its kind (SPEC-PARTE2 §5–6).
 /// Generic over the host's `Route` (the App maps routes to SwiftUI
 /// views), so the decision stays pure and testable. Markdown registers
-/// Reading / Live / Source today; kanban (Board) and canvas register in
-/// the next batch — until then they fall back to markdown's views.
+/// Reading / Live / Source; kanban registers Board / Source and canvas
+/// Canvas / Source (the App's `AppState.noteViews`). An unregistered kind
+/// falls back to markdown's views.
 public struct NoteViewRegistry<Route> {
     public struct Entry {
         public let views: [NoteViewMode]

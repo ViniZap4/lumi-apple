@@ -229,6 +229,7 @@ struct RemoteNoteDetailView: View {
             switch appState.noteRoute {
             case .reader: viewMode
             case .editor: editMode
+            case let .structured(kind): structuredMode(kind)
             }
         } else if appState.remoteVaultsStore.openNoteIsLoading && appState.remoteEditor.status == .idle {
             loadingState
@@ -240,6 +241,8 @@ struct RemoteNoteDetailView: View {
                 viewMode
             case .editor:
                 editMode
+            case let .structured(kind):
+                structuredMode(kind)
             }
         }
     }
@@ -279,6 +282,10 @@ struct RemoteNoteDetailView: View {
         case .serif: return .serif
         case .monospace: return .monospace
         }
+    }
+
+    private func structuredMode(_ kind: NoteKind) -> some View {
+        RemoteStructuredNote(kind: kind, noteID: listRow.id, title: displayTitle, restBody: readText, canEdit: canEditNotes)
     }
 
     private var editMode: some View {
