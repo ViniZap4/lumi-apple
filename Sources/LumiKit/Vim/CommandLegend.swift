@@ -113,9 +113,9 @@ public enum CommandLegend {
 
     /// The floating explorer, books level (web `BOOKS_ITEMS`).
     public static let booksItems: [LegendItem] = [
-        .init("j k", "move", .keys("j")), .init("⏎ l", "open book", .keys("⏎")), .init("h", "accounts", .keys("h")),
-        .init("[ ]", "prev/next book", .keys("]")), .init("gg G", "top/end", .keys("g")), .init("Esc q", "close", .keys("Esc")),
-        .init("?", "keys", .keys("?")),
+        .init("j k", "mover", .keys("j")), .init("⏎ l", "abrir livro", .keys("⏎")), .init("h", "contas", .keys("h")),
+        .init("[ ]", "livro ant./próx.", .keys("]")), .init("gg G", "topo/fim", .keys("g")), .init("Esc q", "fechar", .keys("Esc")),
+        .init("?", "teclas", .keys("?")),
     ]
 
     /// A keyboard hover card (web `HOVER_ITEMS`).

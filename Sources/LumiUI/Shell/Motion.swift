@@ -15,16 +15,12 @@ public extension View {
 private struct StaggerIn: ViewModifier {
     let index: Int
     let active: Bool
-    @State private var shown = false
+    @Environment(\.lumiMotionPolicy) private var motion
 
     func body(content: Content) -> some View {
-        content
-            .opacity(active && !shown ? 0 : 1)
-            .offset(y: active && !shown ? 6 : 0)
-            .onAppear {
-                guard active, !shown else { return }
-                withAnimation(.spring(response: 0.24, dampingFraction: 0.9).delay(Double(min(index, 14)) * 0.012)) { shown = true }
-            }
+        // A ripple, not a queue (§6.2.3): 18 ms steps, ≤ 14 items,
+        // ≤ 160 ms; rows are interactive from frame 0.
+        content.lumiEnter(active ? .rise : MotionFrom(), spring: .gentle, delay: motion.stagger(index))
     }
 }
 
@@ -44,13 +40,15 @@ public struct LiftButtonStyle: ButtonStyle {
         @State private var hover = false
 
         var body: some View {
+            // Press 0.96 at tap speed, release on snappy; hover lifts 1 pt.
             configuration.label
-                .scaleEffect(enabled && configuration.isPressed ? 0.95 : 1)
-                .offset(y: enabled && hover && !configuration.isPressed ? -0.5 : 0)
-                .shadow(color: .black.opacity(enabled && hover ? 0.12 : 0), radius: 3, y: 1)
+                .scaleEffect(enabled && configuration.isPressed ? 0.96 : 1)
+                .offset(y: enabled && hover && !configuration.isPressed ? -1 : 0)
+                .shadow(color: .black.opacity(enabled && hover ? 0.14 : 0), radius: 4, y: 2)
                 .onHover { hover = $0 }
-                .animation(enabled ? .spring(response: 0.2, dampingFraction: 0.7) : nil, value: configuration.isPressed)
-                .animation(enabled ? .spring(response: 0.22, dampingFraction: 0.8) : nil, value: hover)
+                .animation(enabled ? (configuration.isPressed ? .easeOut(duration: LumiDuration.tap) : LumiSpring.snappy.animation) : nil,
+                           value: configuration.isPressed)
+                .animation(enabled ? LumiSpring.snappy.animation : nil, value: hover)
         }
     }
 }

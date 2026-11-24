@@ -129,6 +129,7 @@ struct PanesRenderTests {
         let text: String
         let title: String
         let scale: Double
+        var readingWidth: CGFloat? = nil
         @Environment(\.theme) private var theme
 
         final class Box: NSView {
@@ -150,12 +151,12 @@ struct PanesRenderTests {
             box.controller = c
             box.addSubview(c.scrollView)
             let theme = self.theme
-            let text = self.text, title = self.title, scale = self.scale
+            let text = self.text, title = self.title, scale = self.scale, rw = self.readingWidth
             box.configure = { c, size in
                 let header = MarkdownText.startsWithTitle(text, title: title) ? nil : MarkdownHeader(title: title, tags: [])
                 c.update(header: header, document: MarkdownParser.parse(HoverPreview.stripFrontmatter(text)),
                          style: MarkdownRenderStyle(theme: theme, scale: scale, tasksInteractive: true),
-                         readingWidth: min(620, size.width - 40), linkAction: .systemDefault, vaultRoot: nil, embedDepth: 0,
+                         readingWidth: rw ?? min(620, size.width - 40), linkAction: .systemDefault, vaultRoot: nil, embedDepth: 0,
                          onToggleTask: { _ in })
                 if let tlm = c.textView.textLayoutManager, let tcm = tlm.textContentManager {
                     tlm.ensureLayout(for: tcm.documentRange)

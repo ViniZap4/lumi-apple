@@ -13,12 +13,15 @@ public enum ShellFont {
     public static let palette = Font.system(size: 15, design: .monospaced)
 }
 
+/// Shell chrome heights. Space pass (owner: "não está tendo um bom
+/// aproveitamento de espaço"): every line is a few points thinner, so a
+/// 900 pt window gains ~16 pt of note.
 public enum ShellMetrics {
     public static let rowHeight: CGFloat = 26
-    public static let topLineHeight: CGFloat = 34
-    public static let statusLineHeight: CGFloat = 24
-    public static let legendHeight: CGFloat = 22
-    public static let noteBarHeight: CGFloat = 40
+    public static let topLineHeight: CGFloat = 32
+    public static let statusLineHeight: CGFloat = 21
+    public static let legendHeight: CGFloat = 19
+    public static let noteBarHeight: CGFloat = 34
     #if os(macOS)
     /// Room for the traffic lights when the sidebar is hidden.
     public static let trafficLightInset: CGFloat = 78

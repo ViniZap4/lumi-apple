@@ -25,6 +25,11 @@ struct BookHome: View {
                 if recents.indices.contains(i) { appState.open(recents[i]) }
             }
         )
+        // Switching books opens the new one like a cover, from its spine.
+        .lumiEnter(.cover, spring: .gentle, trigger: book.id)
+        .onChange(of: appState.explorer.tree.noteCount, initial: true) { _, n in
+            if n > 0 { appState.bookNoteCounts[book.id] = n }
+        }
     }
 
     private var location: String {

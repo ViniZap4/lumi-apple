@@ -121,7 +121,7 @@ struct ShellStatusLine: View {
                 .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(modeColor.opacity(0.16)))
                 // The pill morphs between modes (width, colour, letters).
                 .contentTransition(appState.motionEnabled ? .interpolate : .identity)
-                .animation(appState.motionEnabled ? .spring(response: 0.2, dampingFraction: 0.8) : nil, value: modeLabel)
+                .animation(appState.animation(.travel), value: modeLabel)
             Text(context)
                 .font(ShellFont.small)
                 .foregroundStyle(theme.textDim)
@@ -317,10 +317,15 @@ struct ShellToastOverlay: View {
             if let notice = appState.sync.pendingNotices.first {
                 federation(notice)
             }
-            // Toasts slide in from the bottom and stack (newest lowest).
-            ForEach(appState.toasts) { toast in
+            // Toasts slide up and stack with weight: the newest lands on
+            // bouncy, older ones settle back (smaller, dimmer) on gentle
+            // — stack physics, not a list. Errors shake once.
+            let toasts = appState.toasts
+            ForEach(Array(toasts.enumerated()), id: \.element.id) { i, toast in
+                let depth = Double(toasts.count - 1 - i)
                 HStack(spacing: 8) {
                     Circle().fill(color(toast.tone)).frame(width: 6, height: 6)
+                        .lumiEnter(.pop, spring: .bouncy, delay: 0.06)
                     Text(toast.text)
                         .font(ShellFont.chrome)
                         .foregroundStyle(theme.text)
@@ -330,23 +335,25 @@ struct ShellToastOverlay: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
                 .frame(maxWidth: 380, alignment: .leading)
-                .background(card)
+                .lumiGlass(theme: theme, radius: 18, level: .menu, accentEdge: false)
+                .scaleEffect(1 - 0.035 * min(3, depth), anchor: .bottomTrailing)
+                .opacity(1 - 0.18 * min(3, depth))
+                .lumiShake(trigger: toast.id, onAppear: toast.tone == .error)
                 .onTapGesture { appState.toasts.removeAll { $0.id == toast.id } }
                 .transition(appState.transition(.asymmetric(
-                    insertion: .move(edge: .bottom).combined(with: .opacity),
-                    removal: .move(edge: .trailing).combined(with: .opacity))))
+                    insertion: .modifier(active: ToastIn(p: 0), identity: ToastIn(p: 1)),
+                    removal: .move(edge: .trailing).combined(with: .opacity).animation(appState.motionPolicy.exit))))
             }
         }
         .padding(.trailing, 14)
         .padding(.bottom, ShellMetrics.statusLineHeight + 10)
-        .animation(appState.animation(.standard), value: appState.toasts)
+        .animation(appState.animation(.settle), value: appState.toasts)
     }
 
     private var card: some View {
-        RoundedRectangle(cornerRadius: 6, style: .continuous)
+        RoundedRectangle(cornerRadius: LumiRadius.md, style: .continuous)
             .fill(theme.overlayBackground)
-            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(theme.border, lineWidth: 0.5))
-            .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
+            .lumiElevation(.menu, radius: LumiRadius.md, ramp: theme.ramp)
     }
 
     private func color(_ tone: ShellToast.Tone) -> Color {
@@ -386,5 +393,16 @@ struct ShellToastOverlay: View {
         .padding(12)
         .frame(width: 340, alignment: .leading)
         .background(card)
+    }
+}
+
+/// Toast entrance: up 16 pt from below, scale 0.96 → 1.
+struct ToastIn: ViewModifier {
+    let p: Double
+    func body(content: Content) -> some View {
+        content
+            .offset(y: 16 * (1 - p))
+            .scaleEffect(0.96 + 0.04 * p, anchor: .bottomTrailing)
+            .opacity(p)
     }
 }

@@ -106,9 +106,11 @@ extension AppState {
     var floatingStat: String? {
         if floatingLevel == .books {
             let groups = bookGroups
-            guard groups.indices.contains(booksGroupCursor) else { return nil }
-            let n = groups[booksGroupCursor].books.count
-            return n == 0 ? "0 books" : "\(min(booksCursor, n - 1) + 1)/\(n)"
+            let sizes = groups.map(\.books.count)
+            let total = sizes.reduce(0, +)
+            guard total > 0 else { return "0 livros" }
+            if booksColumn == 0 { return "\(booksGroupCursor + 1)/\(groups.count) contas" }
+            return "\(BooksShelf.flatIndex(sizes, shelfCursor) + 1)/\(total)"
         }
         let n = explorer.nav.entries.count
         return n == 0 ? "0 items" : "\(explorer.nav.cursor + 1)/\(n)"

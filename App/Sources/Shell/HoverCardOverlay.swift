@@ -32,10 +32,19 @@ struct HoverCardOverlay: View {
                 }
                 .offset(x: x, y: y)
                 .id(card.id)
-                .transition(appState.transition(.scale(scale: 0.4, anchor: anchorPoint).combined(with: .opacity)))
+                // Grows out of the link (bouncy), leaves at exit speed.
+                .transition(appState.transition(.asymmetric(
+                    insertion: .scale(scale: 0.4, anchor: anchorPoint).combined(with: .opacity),
+                    removal: .opacity.animation(appState.motionPolicy.exit))))
+                // The tether: a hairline of light from the link to the
+                // card, drawn as the card arrives.
+                HoverTether(from: CGPoint(x: card.anchor.midX, y: y >= below ? card.anchor.maxY : card.anchor.minY),
+                            to: CGPoint(x: x + anchorPoint.x * size.width, y: y >= below ? y : y + size.height))
+                    .id("tether-\(card.id)")
+                    .transition(.opacity.animation(appState.motionPolicy.exit))
             }
         }
-        .animation(appState.motionEnabled ? .spring(response: 0.22, dampingFraction: 0.82) : nil, value: appState.hoverCard?.id)
+        .animation(appState.animation(.settle), value: appState.hoverCard?.id)
     }
 
     static func card(_ v: HoverCardView, structured: StructuredMini?) -> HoverCardView {
@@ -65,5 +74,33 @@ extension HoverCardState {
             if let card = LinkRouting.urlCard(u) { return .external(card, href: u) }
             return .missing(path: u)
         }
+    }
+}
+
+/// The link → card tether (drawn with trim on the soft spring).
+struct HoverTether: View {
+    let from: CGPoint
+    let to: CGPoint
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        Path { p in
+            p.move(to: from)
+            p.addLine(to: to)
+        }
+        .stroke(theme.ramp.accentLine, style: StrokeStyle(lineWidth: 1, lineCap: .round, dash: [2, 3]))
+        .modifier(TetherDraw())
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct TetherDraw: ViewModifier {
+    @Environment(\.lumiMotionPolicy) private var motion
+    @State private var p: Double = 0
+    func body(content: Content) -> some View {
+        content
+            .mask(Rectangle().scaleEffect(x: 1, y: max(0.001, motion.allowed ? p : 1), anchor: .top))
+            .onAppear { if let a = motion.animation(.soft) { withAnimation(a) { p = 1 } } else { p = 1 } }
     }
 }

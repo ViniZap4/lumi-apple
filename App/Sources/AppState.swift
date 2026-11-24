@@ -277,6 +277,8 @@ final class AppState {
     var booksColumn = 1
     var booksGroupCursor = 0
     var booksCursor = 0
+    /// Last known note count per book (shown on the Livros shelf).
+    var bookNoteCounts: [String: Int] = [:]
     @ObservationIgnored var floatingReturnSlot: FocusSlot?
     /// Empty book home: cursor in the recent notes.
     var homeCursor = 0

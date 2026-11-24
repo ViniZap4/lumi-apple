@@ -92,8 +92,9 @@ enum StructuredStyle {
     }
 
     /// Motion for card moves / viewport easing (SPEC-PARTE2 §1).
+    /// Cards making room, landings and viewport easing travel: glide.
     static func animation(_ enabled: Bool, _ duration: Double = 0.18) -> Animation? {
-        enabled ? .smooth(duration: duration) : nil
+        enabled ? LumiSpring.glide.animation : nil
     }
 }
 

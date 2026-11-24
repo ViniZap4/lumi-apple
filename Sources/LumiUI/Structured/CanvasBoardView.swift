@@ -37,6 +37,7 @@ public struct CanvasBoardView: View {
     }
 
     private var animates: Bool { motion && !systemReduceMotion }
+    @Environment(\.lumiMotionPolicy) private var policy
     private var v: CanvasViewport { model.viewport }
 
     public var body: some View {
@@ -44,7 +45,10 @@ public struct CanvasBoardView: View {
             ZStack(alignment: .topLeading) {
                 grid
                 board
-                    .animation(model.viewportEased ? StructuredStyle.animation(animates) : nil, value: model.viewport)
+                    .animation(model.viewportCoasting && animates
+                               ? .timingCurve(0.16, 0.72, 0.3, 1, duration: 3 * CanvasBoardModel.coastTau)
+                               : model.viewportEased ? StructuredStyle.animation(animates) : nil,
+                               value: model.viewport)
                 chrome
                 connectPreview
                 VStack(spacing: 0) {
@@ -116,20 +120,23 @@ public struct CanvasBoardView: View {
         let nodes = model.nodes
         let byId = Dictionary(nodes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         return ZStack(alignment: .topLeading) {
-            ForEach(nodes.filter { $0.type == .group }) { n in nodeView(n) }
+            ForEach(Array(nodes.filter { $0.type == .group }.enumerated()), id: \.element.id) { i, n in nodeView(n, order: i) }
             edgesLayer(nodes: byId)
-            ForEach(nodes.filter { $0.type != .group }) { n in nodeView(n) }
+            ForEach(Array(nodes.filter { $0.type != .group }.enumerated()), id: \.element.id) { i, n in nodeView(n, order: i + 1) }
             edgeLabels(nodes: byId)
         }
     }
 
-    private func nodeView(_ n: CanvasNode) -> some View {
+    private func nodeView(_ n: CanvasNode, order: Int) -> some View {
         let s = CanvasGeometry.toScreen(v, n.rect)
         return CanvasNodeCard(node: n, preview: model.previews[n.file], editing: editingBinding(n), field: $fieldFocused,
                               onCommit: { model.finishEdit() })
             .frame(width: n.width, height: n.height, alignment: .topLeading)
             .scaleEffect(v.zoom, anchor: .topLeading)
             .frame(width: s.width, height: s.height, alignment: .topLeading)
+            // Nodes pop in (0.92 → 1, bouncy) as a ripple when the canvas
+            // opens, and on their own when created.
+            .lumiEnter(.pop, spring: .bouncy, delay: policy.stagger(order))
             .offset(x: s.minX, y: s.minY)
     }
 
@@ -151,22 +158,28 @@ public struct CanvasBoardView: View {
         let selected = model.selectedEdge
         let accent = theme.accent
         let colors = Dictionary(edges.map { ($0.id, edgeColor($0)) }, uniquingKeysWith: { a, _ in a })
-        return Canvas { ctx, _ in
+        return EdgeDraw(ids: edges.map(\.id)) { ctx, progress in
             for e in edges {
                 guard let a = nodes[e.fromNode], let b = nodes[e.toNode] else { continue }
+                let p = progress(e.id)
+                guard p > 0.001 else { continue }
                 let g = CanvasGeometry.edgeGeometry(e, a.rect, b.rect)
                 func s(_ p: CGPoint) -> CGPoint { CanvasGeometry.toScreen(vp, p) }
                 var path = Path()
                 path.move(to: s(g.from))
                 path.addCurve(to: s(g.to), control1: s(g.c1), control2: s(g.c2))
+                // Edges draw from their source; the head fades in as the
+                // line arrives (§6.5 canvas).
+                if p < 1 { path = path.trimmedPath(from: 0, to: p) }
                 let color = selected == e.id ? accent : colors[e.id] ?? .gray
                 let width = (selected == e.id ? 2.5 : 1.8) * max(0.6, min(1.4, vp.zoom))
                 ctx.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: width, lineCap: .round))
                 let size = 11 * max(0.6, min(1.4, vp.zoom))
-                if e.arrowAtEnd {
+                let headAlpha = max(0, min(1, (p - 0.8) / 0.2))
+                if e.arrowAtEnd, headAlpha > 0 {
                     let pts = CanvasGeometry.arrowHead(s(g.to), g.endAngle, size: size)
                     var head = Path(); head.addLines(pts); head.closeSubpath()
-                    ctx.fill(head, with: .color(color))
+                    ctx.fill(head, with: .color(color.opacity(headAlpha)))
                 }
                 if e.arrowAtStart {
                     let pts = CanvasGeometry.arrowHead(s(g.from), g.startAngle, size: size)
@@ -203,6 +216,8 @@ public struct CanvasBoardView: View {
                 .fixedSize()
                 .position(mid)
                 .opacity(model.editing == .edge(id: e.id) || !(e.label ?? "").isEmpty ? 1 : 0)
+                // Labels arrive with their edge (after it has drawn).
+                .lumiEnter(MotionFrom(scale: 0.9, opacity: 0), spring: .soft, delay: 0.22)
             }
         }
     }
@@ -434,10 +449,10 @@ public struct CanvasBoardView: View {
                 }
                 model.pointerMove(to: g.location)
             }
-            .onEnded { _ in
+            .onEnded { g in
                 guard dragging else { return }
                 dragging = false
-                model.pointerUp()
+                model.pointerUp(velocity: CGVector(dx: g.velocity.width, dy: g.velocity.height), inertia: animates && policy.allowed)
                 focused = model.editing == nil && model.picker == nil
             }
     }
@@ -645,3 +660,59 @@ struct ScrollWheelCatcher: NSViewRepresentable {
     func updateNSView(_ v: CatcherView, context: Context) { v.onWheel = onWheel }
 }
 #endif
+
+/// Draws edges with a per-edge progress: all edges draw in when the canvas
+/// opens; an edge added later draws on its own (soft spring).
+struct EdgeDraw: View {
+    let ids: [String]
+    let draw: (inout GraphicsContext, (String) -> Double) -> Void
+    @Environment(\.lumiMotionPolicy) private var motion
+    @Environment(\.lumiMotionClock) private var clock
+    @State private var known: Set<String> = []
+    @State private var fresh: Set<String> = []
+    @State private var all: Double = 0
+    @State private var one: Double = 1
+
+    var body: some View {
+        let allP: Double = clock.map { motion.value(.soft, at: $0 - 0.08) } ?? (motion.allowed ? all : 1)
+        let oneP: Double = clock == nil && motion.allowed ? one : 1
+        EdgeDrawLayer(all: allP, one: oneP, fresh: fresh, draw: draw)
+            .onAppear {
+                known = Set(ids)
+                guard clock == nil else { return }
+                if let a = motion.animation(.soft) { withAnimation(a.delay(0.08)) { all = 1 } } else { all = 1 }
+            }
+            .onChange(of: ids) { _, now in
+                let added = Set(now).subtracting(known)
+                known = Set(now)
+                guard !added.isEmpty, motion.allowed, clock == nil else { return }
+                fresh = added
+                var t = Transaction()
+                t.disablesAnimations = true
+                withTransaction(t) { one = 0 }
+                withAnimation(motion.animation(.soft)) { one = 1 }
+            }
+    }
+}
+
+private struct EdgeDrawLayer: View, Animatable {
+    var all: Double
+    var one: Double
+    let fresh: Set<String>
+    let draw: (inout GraphicsContext, (String) -> Double) -> Void
+
+    nonisolated var animatableData: AnimatablePair<Double, Double> {
+        get { AnimatablePair(all, one) }
+        set {
+            all = newValue.first
+            one = newValue.second
+        }
+    }
+
+    var body: some View {
+        let a = min(1, max(0, all)), o = min(1, max(0, one)), f = fresh
+        Canvas { ctx, _ in
+            draw(&ctx) { id in f.contains(id) ? min(a, o) : a }
+        }
+    }
+}

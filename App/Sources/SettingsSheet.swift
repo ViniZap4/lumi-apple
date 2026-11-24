@@ -199,10 +199,26 @@ struct SettingsSheet: View {
                 detail: "Short fades and slides between explorer, reader and editor, splits and overlays.",
                 isOn: $prefs.contentAnimations
             )
-            toggleRow(
-                title: "Reduce motion",
-                detail: "No movement or fades — instant changes. The system's Reduce Motion setting does the same.",
-                isOn: $prefs.reduceMotion
+            pickerRow(
+                title: "Movimento",
+                detail: "Completo: springs, overshoot and ambient light. Suave: the same moves, calmer. Reduzido: instant changes (also when the system's Reduce Motion is on).",
+                selection: $prefs.motionLevel,
+                options: MotionLevel.allCases,
+                label: { $0.label }
+            )
+            pickerRow(
+                title: "Largura de leitura",
+                detail: "Text column of the reader, Live Preview and split preview. Total fills the pane.",
+                selection: $prefs.readingMeasure,
+                options: ReadingMeasure.allCases,
+                label: { $0.label }
+            )
+            pickerRow(
+                title: "Densidade",
+                detail: "Row height in the explorer and lists.",
+                selection: $prefs.density,
+                options: ShellDensity.allCases,
+                label: { $0.label }
             )
         }
     }

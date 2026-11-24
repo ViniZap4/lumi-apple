@@ -160,7 +160,7 @@ public struct PaneHeaderBar: View {
         }
         .padding(.leading, 12)
         .padding(.trailing, 6)
-        .frame(height: 30)
+        .frame(height: 27)
         .background(focused ? theme.text.opacity(theme.isDark ? 0.035 : 0.025) : Color.clear)
         .overlay(alignment: .bottom) { Hairline() }
         // Double-click the header: zoom (buttons inside keep their clicks).
@@ -330,6 +330,8 @@ public struct ExplorerRowLabel: View {
     let hidden: Bool
     var icon: String?
     @Environment(\.theme) private var theme
+    @Environment(\.lumiSlab) private var slab
+    @Environment(\.lumiDensity) private var density
 
     public init(name: String, isFolder: Bool, count: Int, isCursor: Bool, active: Bool, isOpen: Bool, hidden: Bool,
                 icon: String? = nil) {
@@ -347,10 +349,10 @@ public struct ExplorerRowLabel: View {
         HStack(spacing: 8) {
             Image(systemName: icon ?? (isFolder ? "folder" : "doc.text"))
                 .font(.system(size: 10.5))
-                .foregroundStyle(isFolder ? theme.accent.opacity(0.9) : theme.textDim)
+                .foregroundStyle(isCursor && active ? theme.primary : isFolder ? theme.secondary.opacity(0.9) : theme.ramp.ink3)
                 .frame(width: 14)
             Text(name)
-                .font(isFolder ? ShellFont.rowBold : ShellFont.row)
+                .font(.system(size: density.rowFont - 0.5, weight: isFolder ? .medium : .regular, design: .monospaced))
                 .foregroundStyle(nameColor)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -363,22 +365,38 @@ public struct ExplorerRowLabel: View {
         }
         .padding(.leading, 10)
         .padding(.trailing, 10)
-        .frame(height: ShellMetrics.rowHeight)
+        .frame(height: density.rowHeight)
         .background(alignment: .leading) {
             if isCursor {
-                ZStack(alignment: .leading) {
-                    Rectangle().fill(active ? theme.selectionRow : theme.text.opacity(0.06))
-                    if active {
-                        Rectangle().fill(theme.accent).frame(width: 2)
-                    }
-                }
+                // The cursor slab: one per column, travelling between rows
+                // on the glide spring (matched geometry) when the column
+                // provides a namespace.
+                cursorSlab
             }
+        }
+    }
+
+    @ViewBuilder
+    private var cursorSlab: some View {
+        let shape = RoundedRectangle(cornerRadius: 5, style: .continuous)
+        let body = ZStack(alignment: .leading) {
+            shape.fill(active ? theme.selectionRow : theme.text.opacity(0.06))
+            if active {
+                Capsule().fill(theme.primary).frame(width: 2.5).padding(.vertical, 4)
+                    .shadow(color: theme.ramp.accentGlow, radius: 4)
+            }
+        }
+        .padding(.horizontal, 3)
+        if let slab {
+            body.matchedGeometryEffect(id: "slab", in: slab)
+        } else {
+            body
         }
     }
 
     private var nameColor: Color {
         if isOpen { return theme.primary }
-        let base = isFolder ? theme.accent : theme.text
+        let base = isFolder ? theme.ramp.ink1 : theme.ramp.ink2
         return hidden ? base.opacity(0.55) : base
     }
 }
@@ -394,14 +412,21 @@ public struct FloatingPanel<Content: View, Footer: View>: View {
     let hints: [(String, String)]
     /// Narrow window: a full-height sheet instead of the centred card.
     var compact = false
+    /// Where the panel grows from (its trigger).
+    var origin: UnitPoint = .top
+    /// The header icon: the level (shelf, server, book).
+    var icon: String = "folder"
     let onDismiss: () -> Void
     let content: Content
     let footer: Footer
     @Environment(\.theme) private var theme
 
-    public init(title: String, path: String, hints: [(String, String)], compact: Bool = false, onDismiss: @escaping () -> Void,
+    public init(title: String, path: String, hints: [(String, String)], compact: Bool = false, origin: UnitPoint = .top,
+                icon: String = "folder", onDismiss: @escaping () -> Void,
                 @ViewBuilder content: () -> Content, @ViewBuilder footer: () -> Footer) {
         self.compact = compact
+        self.origin = origin
+        self.icon = icon
         self.title = title
         self.path = path
         self.hints = hints
@@ -413,17 +438,26 @@ public struct FloatingPanel<Content: View, Footer: View>: View {
     public var body: some View {
         GeometryReader { geo in
             ZStack {
-                Color.black.opacity(theme.isDark ? 0.42 : 0.12)
-                    .contentShape(Rectangle())
-                    .onTapGesture(perform: onDismiss)
-                    .accessibilityHidden(true)
+                // Scrim: a tint plus a radial vignette, no blur (§3).
+                ZStack {
+                    Color.black.opacity(theme.isDark ? 0.30 : 0.08)
+                    RadialGradient(colors: [.clear, .black.opacity(theme.isDark ? 0.28 : 0.10)], center: .center,
+                                   startRadius: min(geo.size.width, geo.size.height) * 0.3, endRadius: max(geo.size.width, geo.size.height) * 0.75)
+                }
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onDismiss)
+                .accessibilityHidden(true)
+                .lumiEnter(MotionFrom(opacity: 0), spring: .soft)
                 if compact {
                     panel
                         .frame(width: geo.size.width - 12, height: geo.size.height - 8)
                         .frame(maxHeight: .infinity, alignment: .bottom)
+                        .lumiEnter(MotionFrom(y: 40, opacity: 0, anchor: .bottom), spring: .bouncy)
                 } else {
+                    // Uses more of the window (space pass): 90% × 88%.
                     panel
-                        .frame(width: max(360, geo.size.width * 0.8), height: max(260, geo.size.height * 0.8))
+                        .frame(width: max(360, geo.size.width * 0.9), height: max(260, geo.size.height * 0.88))
+                        .lumiEnter(.overlay(from: origin), spring: .bouncy)
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
@@ -433,9 +467,10 @@ public struct FloatingPanel<Content: View, Footer: View>: View {
     private var panel: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: "folder")
-                    .font(.system(size: 11))
-                    .foregroundStyle(theme.accent)
+                Image(systemName: icon)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(theme.primary)
+                    .contentTransition(.symbolEffect(.replace))
                 Text(title)
                     .font(ShellFont.chromeBold)
                     .foregroundStyle(theme.text)
@@ -461,8 +496,7 @@ public struct FloatingPanel<Content: View, Footer: View>: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             footer
         }
-        .background(ElevatedSurface(radius: 12))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .lumiGlass(theme: theme, radius: LumiRadius.xl)
         .contentShape(Rectangle())
         .onTapGesture {} // clicks inside never reach the scrim
         .accessibilityElement(children: .contain)

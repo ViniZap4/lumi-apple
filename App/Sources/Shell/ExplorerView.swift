@@ -12,6 +12,8 @@ struct ExplorerColumns: View {
     @Environment(\.theme) private var theme
 
     private var explorer: ExplorerModel { appState.explorer }
+    /// Folder travel direction: deeper slides in from the right.
+    @State private var travelForward = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -20,17 +22,28 @@ struct ExplorerColumns: View {
                 let showPreview = appState.preferences.explorerShowPreview && geo.size.width >= 680
                 let parentW = max(150, min(240, geo.size.width * 0.2))
                 let currentW = showPreview ? max(220, min(360, geo.size.width * 0.3)) : geo.size.width - parentW
+                // Columns ripple in when the explorer opens, and travel
+                // (±14 pt, gentle) on h / l: the column the user acted on
+                // leads, the context follows 40 ms later (§6.2.6).
+                let dir = explorer.nav.dir
                 HStack(spacing: 0) {
                     parentColumn
                         .frame(width: parentW)
+                        .lumiEnter(.travel(forward: travelForward), spring: .gentle, delay: 0.04, trigger: dir)
                     Hairline(vertical: true)
                     currentColumn
                         .frame(width: currentW)
+                        .lumiEnter(.travel(forward: travelForward), spring: .gentle, trigger: dir)
                     if showPreview {
                         Hairline(vertical: true)
                         PreviewColumn(entry: explorer.nav.current)
                             .frame(maxWidth: .infinity)
+                            .lumiEnter(MotionFrom(x: 10, opacity: 0), spring: .gentle, delay: 0.08, trigger: dir)
                     }
+                }
+                .clipped()
+                .onChange(of: dir) { old, new in
+                    travelForward = new.count >= old.count
                 }
                 .onAppear { updatePageRows(geo.size.height) }
                 .onChange(of: geo.size.height) { _, h in updatePageRows(h) }
@@ -48,7 +61,7 @@ struct ExplorerColumns: View {
     }
 
     private func updatePageRows(_ height: CGFloat) {
-        explorer.pageRows = max(1, Int(height / ShellMetrics.rowHeight))
+        explorer.pageRows = max(1, Int(height / appState.preferences.density.rowHeight))
     }
 
     // MARK: Columns
@@ -168,6 +181,7 @@ struct ExplorerColumn: View {
     @Environment(AppState.self) private var appState
     @State private var dropTarget: String?
     @State private var hovered: String?
+    @Namespace private var slab
 
     var body: some View {
         if entries.isEmpty {
@@ -188,6 +202,9 @@ struct ExplorerColumn: View {
                     }
                     .padding(.vertical, 4)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
+                    // The cursor slab glides between rows (j/k, clicks).
+                    .environment(\.lumiSlab, slab)
+                    .animation(appState.animation(.travel), value: cursor)
                 }
                 .background {
                     // Empty space below the rows: the "new / paste / filter" menu.
