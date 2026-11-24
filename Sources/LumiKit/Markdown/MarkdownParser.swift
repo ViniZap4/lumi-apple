@@ -531,6 +531,13 @@ public enum MarkdownParser {
     ///
     /// Code spans and fenced code blocks are skipped so a literal `[[id]]`
     /// inside backticks survives untouched.
+    /// `target.md`, in angle brackets when it holds spaces (`[[linked
+    /// note]]` → `<linked note.md>`), which CommonMark needs to keep it a
+    /// link.
+    static func wikilinkDestination(_ target: String) -> String {
+        target.contains(" ") ? "<\(target).md>" : "\(target).md"
+    }
+
     public static func preprocessWikilinks(_ source: String) -> String {
         var out = String()
         out.reserveCapacity(source.count)
@@ -578,7 +585,7 @@ public enum MarkdownParser {
                 if let end = findWikilinkClose(chars: chars, from: i + 3) {
                     let inner = String(chars[(i + 3)..<end])
                     let (target, label) = splitWikilink(inner)
-                    out.append("![\(label ?? target)](\(target).md)")
+                    out.append("![\(label ?? target)](\(wikilinkDestination(target)))")
                     i = end + 2
                     atLineStart = false
                     continue
@@ -590,7 +597,7 @@ public enum MarkdownParser {
                 if let end = findWikilinkClose(chars: chars, from: i + 2) {
                     let inner = String(chars[(i + 2)..<end])
                     let (target, label) = splitWikilink(inner)
-                    out.append("[\(label ?? target)](\(target).md)")
+                    out.append("[\(label ?? target)](\(wikilinkDestination(target)))")
                     i = end + 2
                     atLineStart = false
                     continue
