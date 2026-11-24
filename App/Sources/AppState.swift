@@ -68,6 +68,10 @@ final class AppState {
     /// global "current session" (SPEC-LIVROS §2.2).
     let accounts: AccountsStore
 
+    /// Device links with the TUI (SPEC-LIVROS §8.4): requests sessions
+    /// the app lacks, and holds TUI requests for the user to approve.
+    let linkBroker: DeviceLinkBroker
+
     /// Shared book registry (`~/.config/lumi/books.yaml`).
     let books: BooksRegistry
 
@@ -291,6 +295,7 @@ final class AppState {
         let accounts = AccountsStore()
         let books = BooksRegistry(bookmarks: SwiftDataBookmarkStore(context: LumiApp.sharedContainer.mainContext))
         self.accounts = accounts
+        self.linkBroker = DeviceLinkBroker(store: accounts)
         self.books = books
         self.sync = BooksSyncEngine(accounts: accounts, registry: books)
         // Placeholder client until a bound book selects its account's.
@@ -323,6 +328,7 @@ final class AppState {
     /// Called once at launch from RootView.
     func bootstrapBooks(legacyRecords: [LegacyVaultSnapshot]) async {
         accounts.load()
+        startSharedLogin()
         books.importIfNeeded(records: legacyRecords)
         books.reload()
         wireOfflineHooks()
