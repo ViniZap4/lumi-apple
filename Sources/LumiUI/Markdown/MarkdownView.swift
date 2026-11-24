@@ -289,10 +289,10 @@ struct BlockView: View {
 
         case let .codeBlock(language, code):
             // Fenced code blocks whose language label is `mermaid` get
-            // rendered as a live diagram via WKWebView instead of as
-            // syntax-highlighted source. Standard fences fall through
+            // rendered as a diagram (offscreen render → native image, see
+            // `MermaidRenderer`) instead of as syntax-highlighted source. Standard fences fall through
             // to CodeBlockView.
-            if language?.lowercased() == "mermaid" {
+            if MermaidSource.isMermaidFence(language) {
                 MermaidView(code: code)
             } else {
                 CodeBlockView(language: language, code: code)

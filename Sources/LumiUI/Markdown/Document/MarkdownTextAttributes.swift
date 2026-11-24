@@ -205,7 +205,7 @@ final class MarkdownBlockAttachment: NSTextAttachment {
         case .mathBlock: return 40 * scale
         case .mathParagraph: return 26 * scale
         case let .mathHeading(_, level): return (MarkdownRenderStyle.headingBaseSize(level) + 10) * scale
-        case .mermaid: return 160
+        case let .mermaid(code): return MermaidDiagramView.placeholderHeight(code, compact: false)
         case let .code(_, code):
             let lines = CGFloat(max(1, code.split(separator: "\n", omittingEmptySubsequences: false).count))
             return (lines * 14.3 * 1.6 + 32 + 28) * scale

@@ -9,9 +9,8 @@ import AppKit
 import UIKit
 #endif
 
-/// Persistent WKWebView-backed renderer for math (KaTeX) and diagram
-/// (Mermaid) content. A single hidden WKWebView preloads katex.js +
-/// auto-render.js + mermaid.js *once* at app start; every subsequent
+/// Persistent WKWebView-backed renderer for math (KaTeX). A single
+/// hidden WKWebView preloads katex.js *once* at app start; every subsequent
 /// render reuses it instead of spawning a fresh WebView per markdown
 /// block.
 ///
@@ -29,8 +28,8 @@ import UIKit
 ///
 /// The display side (`KaTeXBlockView`, etc.) hands the service the
 /// source, awaits a pre-rendered HTML/SVG snippet, and embeds it in a
-/// trivial WebView (no scripts, no layout JIT). For mermaid the result
-/// is raw SVG and could ultimately become a native `Image` (deferred).
+/// trivial WebView (no scripts, no layout JIT). Mermaid diagrams have
+/// their own locked-down renderer (`MermaidRenderer`).
 ///
 /// The service is `@MainActor` because WKWebView is. JS execution is
 /// inherently serialised by WebKit, so concurrent callers safely
@@ -44,18 +43,15 @@ public final class MathRenderService {
     /// What kind of content to render. Each case carries everything the
     /// renderer needs to produce a layout-correct output — `fontSize`
     /// and `fontWeight` for paragraph/heading math because the spans
-    /// need to size to their host typography, `isDark` for mermaid
-    /// because mermaid bakes theme colours into the SVG itself.
+    /// need to size to their host typography.
     public enum Kind: Hashable, Sendable {
         case mathBlock(latex: String)
         case mathParagraph(html: String, fontSize: CGFloat)
         case mathHeading(html: String, fontSize: CGFloat, fontWeight: Int)
-        case mermaid(source: String, isDark: Bool)
     }
 
-    /// Output of a render. `payload` is the HTML (math) or SVG
-    /// (mermaid) ready to embed in a display WebView (or, for mermaid,
-    /// to feed to an `NSImage`/`UIImage`). `intrinsicHeight` is the
+    /// Output of a render. `payload` is the HTML ready to embed in a
+    /// display WebView. `intrinsicHeight` is the
     /// measured layout height in points so the display side can size
     /// itself without waiting for a second measurement round-trip.
     public struct Rendered: Hashable, Sendable {
@@ -71,7 +67,7 @@ public final class MathRenderService {
     // MARK: - Public API
 
     /// Fire-and-forget warmup. Triggers the persistent WebView setup
-    /// + KaTeX/Mermaid script load *now* so the user's first math
+    /// + KaTeX script load *now* so the user's first math
     /// render doesn't pay that latency. Safe to call multiple times —
     /// `ensureReady` is idempotent.
     public func prewarm() {
@@ -157,7 +153,7 @@ public final class MathRenderService {
         messageProxy = proxy
 
         // Persist a stable renderer.html in the writable mirror so it
-        // can sit alongside katex/mermaid assets. Re-written each
+        // can sit alongside the katex assets. Re-written each
         // launch because the JS template may change with builds.
         let rendererFile = webDir.appendingPathComponent("renderer.html")
         try? rendererPageHTML().write(to: rendererFile, atomically: true, encoding: .utf8)
@@ -195,9 +191,6 @@ public final class MathRenderService {
             return "window.lumiRenderMathParagraph({id:\(idJS), html:\(jsString(html)), fontSize:\(fontSize)});"
         case let .mathHeading(html, fontSize, fontWeight):
             return "window.lumiRenderMathHeading({id:\(idJS), html:\(jsString(html)), fontSize:\(fontSize), fontWeight:\(fontWeight)});"
-        case let .mermaid(source, isDark):
-            let theme = isDark ? "dark" : "default"
-            return "window.lumiRenderMermaid({id:\(idJS), source:\(jsString(source)), theme:\(jsString(theme))});"
         }
     }
 
@@ -218,10 +211,6 @@ public final class MathRenderService {
             hasher.combine(html)
             hasher.combine(fontSize)
             hasher.combine(fontWeight)
-        case let .mermaid(source, isDark):
-            hasher.combine(3)
-            hasher.combine(source)
-            hasher.combine(isDark)
         }
         return String(hasher.finalize())
     }
@@ -238,8 +227,7 @@ public final class MathRenderService {
     fileprivate func handleMessage(_ body: Any) {
         guard let dict = body as? [String: Any] else { return }
 
-        // Readiness handshake — page posts this once katex + mermaid
-        // are both defined globally.
+        // Readiness handshake — page posts this once katex is defined.
         if let kind = dict["kind"] as? String, kind == "ready" {
             guard !isLoaded else { return }
             isLoaded = true
@@ -269,10 +257,9 @@ public final class MathRenderService {
     // MARK: - HTML template
 
     private func rendererPageHTML() -> String {
-        // Hidden offscreen page. Loads katex + mermaid scripts once.
-        // Exposes four global render functions; each one accepts a
-        // request object, does the render synchronously (math) or
-        // awaits the SVG (mermaid), and posts the result back via
+        // Hidden offscreen page. Loads the katex script once.
+        // Exposes three global render functions; each one accepts a
+        // request object, renders synchronously, and posts the result back via
         // `webkit.messageHandlers.lumi`.
         """
         <!DOCTYPE html>
@@ -281,7 +268,6 @@ public final class MathRenderService {
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <link rel="stylesheet" href="katex.min.css">
         <script src="katex.min.js"></script>
-        <script src="mermaid.min.js"></script>
         <style>
           html, body { margin: 0; padding: 0; }
           .stage { display: inline-block; }
@@ -371,29 +357,9 @@ public final class MathRenderService {
               }
             };
 
-            // Mermaid is async: mermaid.render() returns a promise.
-            // re-initialize with the requested theme each call so
-            // dark/light flips correctly invalidate.
-            window.lumiRenderMermaid = async function (req) {
-              try {
-                mermaid.initialize({ startOnLoad: false, securityLevel: 'loose', theme: req.theme });
-                const idAttr = 'm' + req.id.replace(/-/g, '');
-                const { svg } = await mermaid.render(idAttr, req.source);
-                const stage = document.createElement('div');
-                stage.className = 'stage';
-                stage.innerHTML = svg;
-                document.body.appendChild(stage);
-                const h = measure(stage.firstChild || stage);
-                document.body.removeChild(stage);
-                post({ id: req.id, success: true, payload: svg, height: h });
-              } catch (e) {
-                post({ id: req.id, success: false, error: String(e) });
-              }
-            };
-
-            // Wait for both libs to land, then post `ready`.
+            // Wait for katex to land, then post `ready`.
             function pollReady() {
-              if (typeof katex === 'undefined' || typeof mermaid === 'undefined') {
+              if (typeof katex === 'undefined') {
                 setTimeout(pollReady, 30);
                 return;
               }

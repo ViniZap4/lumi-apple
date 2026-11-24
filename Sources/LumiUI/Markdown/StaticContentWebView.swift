@@ -25,10 +25,10 @@ import UIKit
 /// the full script bundle on every mount.
 struct StaticContentWebView: View {
     /// Inline HTML or SVG. For math this is `katex.renderToString`'s
-    /// output; for mermaid it's the SVG returned by `mermaid.render`.
+    /// output.
     let payload: String
     /// Wraps the payload with extra CSS — paragraph/heading math want
-    /// theme-coloured text + link styling, block math + mermaid don't.
+    /// theme-coloured text + link styling, block math doesn't.
     let role: Role
     /// Already-measured intrinsic height from the render service.
     let intrinsicHeight: CGFloat
@@ -44,9 +44,6 @@ struct StaticContentWebView: View {
         case mathParagraph
         /// Heading math: same as paragraph but heading typography.
         case mathHeading
-        /// Mermaid SVG: bg transparent, SVG already carries theme
-        /// colors baked in.
-        case mermaid
     }
 
     var body: some View {
@@ -78,15 +75,7 @@ struct StaticContentWebView: View {
           svg { max-width: 100%; height: auto; }
           """
 
-        let needsKatexCSS: Bool
-        switch role {
-        case .mathBlock, .mathParagraph, .mathHeading: needsKatexCSS = true
-        case .mermaid: needsKatexCSS = false
-        }
-
-        let katexLink = needsKatexCSS
-            ? "<link rel=\"stylesheet\" href=\"katex.min.css\">"
-            : ""
+        let katexLink = "<link rel=\"stylesheet\" href=\"katex.min.css\">"
 
         return """
         <!DOCTYPE html>
