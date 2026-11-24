@@ -254,6 +254,9 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
                 overlays.onHeight = { [weak self] payload, height in
                     guard let self, let storage = self.textStorage, let live = self.live else { return }
                     if live.widgetMeasured(payload, height: height, storage: storage) {
+                        // Fragments below the grown widget move: lay the
+                        // viewport out again before placing overlays.
+                        self.textLayoutManager?.textViewportLayoutController.layoutViewport()
                         self.liveOverlays?.setNeedsLayout()
                         self.scheduleCursorUpdate()
                     }

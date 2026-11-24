@@ -83,6 +83,10 @@ final class LiveWidgetOverlays {
                 }
                 if m.view.frame != item.frame { m.view.frame = item.frame }
                 m.view.sourceLocation = item.location
+                // Re-measure synchronously: the hosted view's geometry
+                // callback is not guaranteed after a width change.
+                let natural = m.view.host.fittingSize.height
+                if natural > 1, abs(natural - item.frame.height) > 0.5 { onHeight(item.payload, ceil(natural)) }
                 keep.append(m)
             } else {
                 let host = NSHostingView(rootView: content(item.payload, width: item.frame.width))
