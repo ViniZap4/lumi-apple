@@ -80,7 +80,7 @@ struct CommandLegendTests {
     func shell() {
         #expect(keys(CommandLegend.shellItems(.explorer)).prefix(3) == ["j k", "h l", "⏎"])
         #expect(keys(CommandLegend.shellItems(.reader)).first == "j k")
-        #expect(keys(CommandLegend.shellItems(.explorer, pending: "g")) == ["gg", "ge", "gh", "g1–9"])
+        #expect(keys(CommandLegend.shellItems(.explorer, pending: "g")) == ["gg", "ge", "gf", "gb", "gh", "g1–9"])
         #expect(keys(CommandLegend.shellItems(.explorer, pending: "z")) == ["zp", "zh"])
         #expect(keys(CommandLegend.shellItems(.explorer, pending: "5")) == ["5j", "5k", "Esc"])
         #expect(keys(CommandLegend.shellItems(.reader, pending: "12")) == ["12j", "12k"])

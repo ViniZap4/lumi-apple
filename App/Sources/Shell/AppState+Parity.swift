@@ -266,7 +266,7 @@ extension AppState {
         case .local:
             guard let src = explorer.localURL(for: entry), let dest = explorer.localDirURL(folder) else { return }
             do {
-                if selectedEntry?.relativePath == path { closeNote() }
+                if selectedEntry?.relativePath == path { closePrimaryNoteForRemoval() }
                 let moved = try FileOperations.move(src, into: dest)
                 let rel = (folder.isEmpty ? "" : folder + "/") + moved.lastPathComponent
                 explorer.rescanLocal(reveal: rel)
@@ -328,13 +328,15 @@ extension AppState {
                 showToast("not connected yet — try again in a moment", tone: .warning)
                 return
             }
-            session.applyLocal([edit])
+            // Through the fan-out: every editor pane on the note sees it.
+            fanout(for: session).applyExternal([edit])
         }
     }
 
     /// Ex commands the editor hands to the app (`:preview`, `:preview
     /// split`, `:settings`, `\p`).
     func performHostCommand(_ command: String) {
+        if performPaneHostCommand(command.trimmingCharacters(in: .whitespaces)) { return }
         switch command.trimmingCharacters(in: .whitespaces) {
         case "preview split", "preview s":
             toggleSplitPreview()
@@ -380,7 +382,9 @@ extension AppState {
                 let dir = NoteTree.dirOf(entry.relativePath)
                 let rel = (dir.isEmpty ? "" : dir + "/") + newURL.lastPathComponent
                 let ne = NoteEntry(url: newURL, relativePath: rel, updatedAt: Date())
-                editor.load(noteID: rel, at: newURL, vaultRoot: session.rootURL)
+                _ = session
+                bookMemory.forget(entry.relativePath, inBook: openBook?.id ?? "")
+                bindPrimaryLocal(path: rel, url: newURL)
                 selectedNoteID = rel
                 selectedEntry = ne
                 explorer.rescanLocal(reveal: rel)

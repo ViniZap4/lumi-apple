@@ -672,3 +672,81 @@ public final class PaneLayoutStore: @unchecked Sendable {
         return loaded
     }
 }
+
+// MARK: - Book memory (last opened note, recent notes)
+
+/// Per book, per device: the last opened note (opening a book shows it,
+/// SPEC-PARTE2 §2) and the recent notes the empty book home lists.
+/// `~/.config/lumi/apple-book-memory.json`; never synced.
+public final class BookMemoryStore: @unchecked Sendable {
+    public static let shared = BookMemoryStore(url: ConfigPaths.directory.appendingPathComponent("apple-book-memory.json"))
+    public static let recentLimit = 8
+
+    public struct Entry: Codable, Equatable, Sendable {
+        public var lastNote: String?
+        public var recent: [String] = []
+    }
+
+    private let url: URL
+    private let lock = NSLock()
+    private var cache: [String: Entry]?
+
+    public init(url: URL) { self.url = url }
+
+    public func lastNote(forBook id: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return loadLocked()[id]?.lastNote
+    }
+
+    public func recent(forBook id: String) -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        return loadLocked()[id]?.recent ?? []
+    }
+
+    /// A note was opened in the book (moves to the front of the recents).
+    public func noteOpened(_ path: String, inBook id: String) {
+        lock.lock(); defer { lock.unlock() }
+        var all = loadLocked()
+        var e = all[id] ?? Entry()
+        guard e.lastNote != path || e.recent.first != path else { return }
+        e.lastNote = path
+        e.recent.removeAll { $0 == path }
+        e.recent.insert(path, at: 0)
+        if e.recent.count > Self.recentLimit { e.recent.removeLast(e.recent.count - Self.recentLimit) }
+        all[id] = e
+        saveLocked(all)
+    }
+
+    /// The note is gone (deleted / renamed): forget it.
+    public func forget(_ path: String, inBook id: String) {
+        lock.lock(); defer { lock.unlock() }
+        var all = loadLocked()
+        guard var e = all[id] else { return }
+        if e.lastNote == path { e.lastNote = nil }
+        e.recent.removeAll { $0 == path }
+        all[id] = e
+        saveLocked(all)
+    }
+
+    public func remove(book id: String) {
+        lock.lock(); defer { lock.unlock() }
+        var all = loadLocked()
+        guard all.removeValue(forKey: id) != nil else { return }
+        saveLocked(all)
+    }
+
+    private func saveLocked(_ all: [String: Entry]) {
+        cache = all
+        if let data = try? JSONEncoder().encode(all) {
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    private func loadLocked() -> [String: Entry] {
+        if let cache { return cache }
+        let loaded = (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode([String: Entry].self, from: $0) } ?? [:]
+        cache = loaded
+        return loaded
+    }
+}

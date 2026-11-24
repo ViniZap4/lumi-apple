@@ -45,31 +45,7 @@ struct NoteDetailView: View {
     /// SwiftUI Text + `MarkdownLinkAction` for NSTextView) call this so
     /// the routing logic stays in one place.
     private func handleInAppLink(_ url: URL) -> Bool {
-        guard url.isFileURL, url.pathExtension.lowercased() == "md" else {
-            return false
-        }
-        guard let session = appState.session,
-              FileManager.default.fileExists(atPath: url.path)
-        else {
-            return false
-        }
-        let vaultRoot = session.rootURL.standardizedFileURL
-        let resolved = url.standardizedFileURL
-        let prefix = vaultRoot.path + "/"
-        let relativePath: String
-        if resolved.path.hasPrefix(prefix) {
-            relativePath = String(resolved.path.dropFirst(prefix.count))
-        } else {
-            relativePath = resolved.lastPathComponent
-        }
-        let mtime = (try? resolved.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
-        let entry = NoteEntry(url: resolved, relativePath: relativePath, updatedAt: mtime)
-        if appState.editor.isDirty { appState.editor.save() }
-        appState.editor.load(noteID: relativePath, at: resolved, vaultRoot: vaultRoot)
-        appState.selectedNoteID = relativePath
-        appState.selectedEntry = entry
-        appState.editorMode = .view
-        return true
+        appState.routeReaderURL(url, from: appState.primaryLeaf)
     }
 
     var body: some View {
@@ -135,6 +111,7 @@ struct NoteDetailView: View {
                     yankFlashTrigger: appState.yankFlashAt,
                     onToggleTask: { appState.toggleTask($0) }
                 )
+                .environment(\.markdownLinkHover, appState.linkHover(from: appState.primaryLeaf))
             }
             // Per-note identity: new entry → fresh scroll-host coord,
             // fresh stagger cascade for the header / blocks inside the
@@ -160,8 +137,18 @@ struct NoteDetailView: View {
                 editorPane(editor: editor, live: live)
             }
             .environment(\.vimControllerSink) { appState.adoptEditor($0) }
+            .environment(\.markdownLinkHover, appState.linkHover(from: appState.primaryLeaf))
             .id(entry.relativePath)
             .transition(appState.transition(.opacity))
+        case let .custom(mode):
+            let kind = appState.openNoteKind
+            let ctx = appState.noteViewContext(view: mode, kind: kind, path: entry.relativePath,
+                                               leaf: appState.primaryLeaf, text: editor.currentText)
+            if let v = NoteViewHooks.view(ctx) {
+                v.id(entry.relativePath + "#" + mode.rawValue)
+            } else {
+                Text("no \(mode.label) view registered").foregroundStyle(theme.textDim)
+            }
         }
     }
 
@@ -187,8 +174,9 @@ struct NoteDetailView: View {
                         fileName: entry.relativePath,
                         onStatusChange: { appState.liveVimStatus = $0 }
                     )
-                    .presentation(live ? appState.livePresentation(baseURL: baseURL, vaultRoot: vaultRoot) : .source,
-                                  onOpenLink: { appState.openLiveLink($0) })
+                    .presentation(live ? appState.livePresentation(baseURL: baseURL, vaultRoot: vaultRoot, live: true) : .source,
+                                  onOpenLink: { appState.openLiveLink($0, from: appState.primaryLeaf) })
+                    .onHoverLink { link, rect in appState.liveLinkHovered(link, rect: rect, from: appState.primaryLeaf) }
                     // Live centres its own reading column.
                     .readableEditorWidth(!live)
                 } else {
@@ -233,12 +221,13 @@ struct NoteDetailView: View {
         case .close(force: false):
             // Vim's :q refuses to quit a dirty buffer. Mirror that by staying
             // in edit mode; the user can :q! to discard or :w to save first.
-            if !editor.isDirty {
-                appState.editorMode = .view
+            if !editor.isDirty || appState.localDocs.refCount(entry.relativePath) > 1 {
+                // With splits `:q` closes the pane (SPEC-PARTE2 §3).
+                if appState.isSplit { appState.closeLeaf(appState.primaryLeaf) } else { appState.editorMode = .view }
             }
         case .close(force: true):
-            editor.discard()
-            appState.editorMode = .view
+            if appState.localDocs.refCount(entry.relativePath) <= 1 { editor.discard() }
+            if appState.isSplit { appState.closeLeaf(appState.primaryLeaf) } else { appState.editorMode = .view }
         case .scrollCursor, .scrollLines, .displayLines:
             break // handled by the editor view
         case let .host(command):

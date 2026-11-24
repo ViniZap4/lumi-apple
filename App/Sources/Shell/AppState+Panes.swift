@@ -34,9 +34,11 @@ extension AppState {
             case .tabbed: preview = .tabbed
             }
         }
+        // No books sidebar any more (SPEC-PARTE2 §2): books live in the
+        // floating overlay (`gb`).
         return PaneLayout(
-            sidebarVisible: columnVisibility != .detailOnly,
-            sidebarAvailable: true,
+            sidebarVisible: false,
+            sidebarAvailable: false,
             main: mainPane,
             preview: preview
         )
@@ -46,7 +48,7 @@ extension AppState {
     var focusedPane: PaneID? { PaneGraph.resolve(paneFocus, in: paneLayout) }
 
     /// More than one pane on screen: the focused one wears a marker.
-    var showsPaneMarker: Bool { PaneGraph.panes(paneLayout).count > 1 }
+    var showsPaneMarker: Bool { !isSplit && PaneGraph.panes(paneLayout).count > 1 }
 
     /// Which split side wears the focus marker (only while a pane key
     /// could move away from it).
@@ -61,12 +63,18 @@ extension AppState {
     /// Run a pane command. False when no pane lies that way.
     @discardableResult
     func performPane(_ command: PaneCommand) -> Bool {
-        switch command {
-        case .close, .only, .equalize:
+        if command.isLayout {
             performLayout(command)
             return true
-        default:
-            break
+        }
+        if isSplit {
+            switch command {
+            case let .move(dir): return movePane(dir)
+            case .next: return cyclePane(1)
+            case .previous: return cyclePane(-1)
+            case .last: return lastPane()
+            default: return false
+            }
         }
         guard let target = PaneGraph.target(from: paneFocus, command, layout: paneLayout, previous: previousPane) else {
             return false
@@ -77,6 +85,12 @@ extension AppState {
 
     /// Give `pane` the keyboard.
     func focusPane(_ pane: PaneID, reveal: Bool = false) {
+        let fromSlot = currentSlot
+        if pane != .sidebar, secondaryFocus != nil {
+            secondaryFocus = nil
+            noteLayout.focus(noteLayout.mainLeaf)
+        }
+        defer { if currentSlot != fromSlot { previousSlot = fromSlot } }
         let from = focusedPane
         if reveal {
             columnVisibility = .all
@@ -104,6 +118,11 @@ extension AppState {
 
     /// A click (or the system) gave `pane` the keyboard.
     func notePaneFocus(_ pane: PaneID?) {
+        if pane != .sidebar, secondaryFocus != nil {
+            previousSlot = currentSlot
+            secondaryFocus = nil
+            noteLayout.focus(noteLayout.mainLeaf)
+        }
         let target = pane == mainPane ? nil : pane
         guard target != paneFocus else { return }
         let from = focusedPane
@@ -160,6 +179,11 @@ extension AppState {
             self?.performPane(command) ?? false
         }
         controller.onFocus = { [weak self] in self?.notePaneFocus(.editor) }
+        controller.onFollowLink = { [weak self] link in
+            guard let self else { return false }
+            self.openLink(link.href, where: .current, from: self.primaryLeaf, wiki: link.wiki)
+            return true
+        }
     }
 
     func adoptSplit(_ split: SplitScrollSync) {
@@ -228,8 +252,11 @@ extension AppState {
         case .find: MarkdownReading.find(.show, in: view)
         case .nextMatch: MarkdownReading.find(.next, in: view)
         case .prevMatch: MarkdownReading.find(.previous, in: view)
-        case .open:
-            if !MarkdownReading.followSelectedLink(in: view) { showToast("no link here · f labels the links") }
+        case .open, .follow:
+            followLinkInFocusedPane(.current)
+        case .explore: openFloatingExplorer()
+        case .hover: hoverFromKeyboard()
+        case .books: openFloatingExplorer(level: .books)
         case .yank:
             // Selection (or the current find match, which is selected),
             // else the whole note.
@@ -263,11 +290,13 @@ extension AppState {
     /// `⌃h⌃l panes` (or `⌃h books`) when a pane key does something here.
     var paneLegendItem: LegendItem? {
         guard preferences.ctrlHJKLPanes else { return nil }
+        if isSplit { return LegendItem("⌃h⌃j⌃k⌃l", "panes") }
         let layout = paneLayout
         if layout.preview == .tabbed { return LegendItem("⌃j ⌃k", "source/preview") }
         if layout.preview == .beside, focusedPane == .editor { return LegendItem("⌃l", "read preview") }
         if PaneGraph.panes(layout).count > 1 { return LegendItem("⌃h ⌃l", "panes") }
         if layout.main != nil, layout.sidebarAvailable { return LegendItem("⌃h", "books") }
+        if isNoteOpen { return LegendItem("⌃w v", "split") }
         return nil
     }
 }

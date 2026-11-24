@@ -58,9 +58,10 @@ final class AppState {
     /// is selected. Nil when no vault is open.
     var session: VaultSession?
 
-    /// Editor state for the currently open note. Reused across notes; switching
-    /// notes calls `load` to repopulate.
-    let editor = EditorState()
+    /// Editor state of the primary pane's local note. It comes from the
+    /// local document pool (`localDocs`), so a split pane on the same note
+    /// edits the very same buffer.
+    var editor = EditorState()
 
     /// Every account this device is signed into, keyed by
     /// (server_url, username). One API client per account — there is no
@@ -221,6 +222,57 @@ final class AppState {
     var noteLayout = PaneTree()
     @ObservationIgnored let layoutStore = PaneLayoutStore.shared
 
+    // MARK: Splits (SPEC-PARTE2 §2–§4)
+
+    /// A secondary note pane has the keyboard. nil = the primary pane (or
+    /// the sidebar, per `paneFocus`).
+    var secondaryFocus: PaneLeafID?
+    /// Vim status of each secondary pane's editor (status line, legend).
+    var paneVim: [PaneLeafID: VimStatus] = [:]
+    /// Mounted editors of secondary panes.
+    @ObservationIgnored var paneEditors: [PaneLeafID: WeakVimController] = [:]
+    /// Keyboard scrolling of secondary readers.
+    @ObservationIgnored var paneReaders: [PaneLeafID: ReadModeCoordinator] = [:]
+    /// Pane frames in window coordinates (a click focuses the pane).
+    @ObservationIgnored var paneGlobalFrames: [PaneLeafID: CGRect] = [:]
+    /// For `⌃w p` across panes.
+    @ObservationIgnored var previousSlot: FocusSlot?
+    /// Local notes open in panes: one `EditorState` per note, shared.
+    @ObservationIgnored let localDocs = SessionPool<String, EditorState>()
+    /// One fan-out per live session so several editors can share it.
+    @ObservationIgnored var fanouts: [ObjectIdentifier: DocumentFanout] = [:]
+    /// Each mounted editor's handle on its fan-out (held strongly here:
+    /// editors hold their document weakly).
+    @ObservationIgnored var fanoutViews: [String: DocumentFanout.View] = [:]
+
+    /// The floating explorer (`-`, `<leader>e`, `:explore`) — the only
+    /// navigation (SPEC-PARTE2 §2): files, or the books level (`gb`).
+    var showFloatingExplorer = false
+    var floatingLevel: FloatingLevel = .files
+    /// Books level: the accounts column (0) or the books column (1).
+    var booksColumn = 1
+    var booksGroupCursor = 0
+    var booksCursor = 0
+    @ObservationIgnored var floatingReturnSlot: FocusSlot?
+    /// Empty book home: cursor in the recent notes.
+    var homeCursor = 0
+    /// Last opened note and recents, per book, on this device.
+    @ObservationIgnored let bookMemory = BookMemoryStore.shared
+    /// Shared-element open: the explorer row the note grows from (shell
+    /// coordinates) — drawn as a morphing ghost for one transition.
+    var openMorph: OpenMorph?
+    /// Shell-space frames of the rows of the floating explorer.
+    @ObservationIgnored var rowFrames: [String: CGRect] = [:]
+    /// Bumped on every remote change to the open book (sync dot pulse).
+    var remotePulse = 0
+
+    /// The hover link preview card.
+    var hoverCard: HoverCardState?
+    @ObservationIgnored var hoverIntentStore: HoverIntent<HoverRequest>?
+    @ObservationIgnored let hoverCoordinator = ReadModeCoordinator()
+    @ObservationIgnored var hoverReturnSlot: FocusSlot?
+    @ObservationIgnored var hoverPendingCtrlW = false
+
     // MARK: Offline
 
     /// Sign out / remove account while offline edits are pending.
@@ -249,6 +301,7 @@ final class AppState {
         BeepSilencer.install()
         keyRouter = KeyRouter(appState: self)
         #endif
+        NoteViewHooks.registerBuiltIns()
         // Kick the math/diagram render service awake at launch so the
         // hidden KaTeX/Mermaid WebView finishes loading scripts in
         // the background while the user navigates. By the time the
@@ -269,10 +322,14 @@ final class AppState {
         wireOfflineHooks()
         sync.onNotesChanged = { [weak self] bookID, outcome in
             guard let self, let book = self.books.book(bookID), let vault = book.vaultUUID else { return }
+            if bookID == self.openBook?.id { self.remotePulse &+= 1 }
             Task { await self.remoteVaultsStore.applyCatchUp(outcome, vaultID: vault) }
         }
         if let active = books.activeBook {
             await selectBook(active, markOpened: false)
+        } else if !books.books.isEmpty {
+            // No book yet: the overlay at the books level is the way in.
+            openFloatingExplorer(level: .books)
         }
         await sync.syncAccounts()
     }
@@ -291,7 +348,13 @@ final class AppState {
         if editor.isDirty { editor.save() }
         selectedNoteID = nil
         selectedEntry = nil
-        editor.reset()
+        // Every pane's document belongs to the old book: save and drop.
+        editor = EditorState()
+        localDocs.clear()
+        fanouts = [:]
+        fanoutViews = [:]
+        hoverIntentStore?.hide()
+        if showFloatingExplorer { showFloatingExplorer = false }
         if selectedRemoteNoteID != nil {
             remoteVaultsStore.closeOpenNote()
             remoteEditor.reset()
@@ -315,6 +378,7 @@ final class AppState {
             setSession(session)
             selectedVaultID = book.id
             explorer.openLocal(root: session.rootURL, showHidden: preferences.explorerShowHidden)
+            showLastNoteOrHome(book)
         case .bound:
             setSession(nil)
             selectedVaultID = nil
@@ -326,6 +390,7 @@ final class AppState {
                 remoteVaultsStore.clear()
                 return
             }
+            defer { if openBook?.id == book.id, !isNoteOpen { showLastNoteOrHome(book) } }
             explorer.openRemote(vaultID: vault)
             remoteVaultsStore.setClient(client, account: key)
             await remoteVaultsStore.refresh()

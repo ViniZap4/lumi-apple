@@ -170,9 +170,13 @@ struct CommandPalette: View {
         appState.explorer.tree.allNotes.map { entry in
             PaletteItem(id: "n:" + entry.key, kind: .note, title: entry.name,
                         subtitle: NoteTree.dirOf(entry.path)) {
-                appState.closeNoteIfOpen()
                 appState.explorer.nav.reveal(noteID: entry.note?.id ?? entry.path)
-                appState.open(entry)
+                if appState.isNoteOpen {
+                    // Into the focused pane (⌘↩ would be a split: use :vsplit).
+                    appState.openNoteIn(entry.path, where: .current, from: appState.focusedLeaf)
+                } else {
+                    appState.open(entry)
+                }
             }
         }
     }
@@ -219,7 +223,20 @@ struct CommandPalette: View {
                 appState.preferences.explorerShowPreview.toggle()
             }
         }
+        if open {
+            cmd("explorer", "Explorer", "-", aliases: "files browse navigate floating yazi :explore") {
+                appState.openFloatingExplorer()
+            }
+        }
         if appState.isNoteOpen {
+            cmd("vsplit", "Split vertically (:vsplit)", "⌃w v", aliases: "pane window side by side") { appState.splitPane(.vertical) }
+            cmd("hsplit", "Split horizontally (:split)", "⌃w s", aliases: "pane window stacked below") { appState.splitPane(.horizontal) }
+            if appState.isSplit {
+                cmd("close-pane", "Close pane", "⌃w q", aliases: "pane window :close") { appState.closeFocusedPane() }
+                cmd("only-pane", "Keep only this pane", "⌃w o", aliases: "pane window :only") { appState.onlyPane() }
+                cmd("equal-panes", "Equalize panes", "⌃w =", aliases: "pane window resize") { appState.performLayout(.equalize) }
+            }
+            cmd("lumi-link", "Copy lumi:// link to this note", aliases: "deep link url share open copy") { appState.copyLumiLink() }
             cmd("edit", appState.isEditing ? "Read mode" : "Edit mode", "⌘E", aliases: "toggle") { appState.toggleEditing() }
             cmd("close", "Back to explorer", "q", aliases: "close quit") { appState.closeNote() }
             cmd("live", "Live Preview", ":live", aliases: "wysiwyg render inline edit mode") { appState.setNoteViewMode(.live) }
@@ -227,14 +244,18 @@ struct CommandPalette: View {
             cmd("split-preview", appState.splitPreviewShown ? "Hide split preview" : "Show split preview",
                 "\\p", aliases: "preview split side by side render :preview") { appState.toggleSplitPreview() }
         }
-        if appState.surface == .explorer || appState.surface == .reader {
-            cmd("hints", "Click by label (hints)", appState.surface == .explorer ? "f" : "F", aliases: "hint mode vimium mouse") {
+        if appState.surface == .reader {
+            cmd("hints", "Click by label (hints)", "F", aliases: "hint mode vimium mouse") {
                 // After the palette closes, so its rows aren't labelled.
                 Task { @MainActor in appState.startHints() }
             }
         }
-        cmd("switch-book", "Switch book…", "", aliases: "book open") {
-            appState.query(paletteFor: .books)
+        cmd("switch-book", "Switch book…", "gb", aliases: "book open accounts") {
+            appState.openFloatingExplorer(level: .books)
+        }
+        cmd("hover", appState.preferences.hoverPreviews ? "Turn off hover link previews" : "Turn on hover link previews", "K",
+            aliases: "preview link card popover") {
+            appState.preferences.hoverPreviews.toggle()
         }
         cmd("new-book", "New book…", aliases: "create book vault") { appState.showNewBook = true }
         cmd("link-folder", "Link folder…", aliases: "local folder open add") { appState.showLinkFolder = true }
@@ -243,7 +264,6 @@ struct CommandPalette: View {
             appState.signInPrefill = nil
             appState.showAddServer = true
         }
-        cmd("sidebar", "Toggle sidebar", "⌘\\", aliases: "panel") { appState.toggleSidebar() }
         cmd("theme", "Theme…", aliases: "colorscheme appearance") { appState.query(paletteFor: .themes) }
         cmd("settings", "Settings", "⌘,", aliases: "preferences vim escape vimrc :settings") { appState.showSettings = true }
         cmd("legend", appState.preferences.showKeybindsBar ? "Hide command legend" : "Show command legend", aliases: "view keys hints which-key") {
@@ -287,7 +307,7 @@ extension AppState {
         if isNoteOpen { closeNote() }
     }
 
-    func toggleSidebar() {
-        columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+    func toggleFloatingExplorer() {
+        if showFloatingExplorer { closeFloatingExplorer() } else { openFloatingExplorer() }
     }
 }

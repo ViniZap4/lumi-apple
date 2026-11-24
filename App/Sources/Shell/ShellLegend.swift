@@ -12,11 +12,18 @@ extension AppState {
             if case .filter = prompt.kind { return .filter }
             return .prompt
         }
-        if focusedPane == .sidebar { return .sidebar }
+        if hoverCard?.keyboard == true { return .preview }
+        if showFloatingExplorer { return floatingLevel == .books ? .books : .explorer }
+        if let leaf = focusedSecondary {
+            if paneView(leaf).isEditing {
+                return preferences.vimEnabled ? (paneVim[leaf]?.legendContext ?? .normal) : .insert
+            }
+            return .reader
+        }
         if focusedPane == .preview { return .preview }
         switch surface {
         case .empty: return .books
-        case .explorer: return .explorer
+        case .explorer: return .reader
         case .reader: return .reader
         case .editor: return preferences.vimEnabled ? liveVimStatus.legendContext : .insert
         }
@@ -29,9 +36,10 @@ extension AppState {
         case .explorer, .reader, .preview, .sidebar:
             return CommandLegend.shellItems(ctx, pending: shellPending, pane: ctx == .sidebar ? nil : paneLegendItem)
         default:
-            let s = liveVimStatus
+            let s = focusedSecondary.flatMap { paneVim[$0] } ?? liveVimStatus
             let editor = surface == .editor && !showPalette && !showHelp
-            if editor, activeEditor?.paneKeys.awaitingWindowCommand == true {
+            let ed = focusedSecondary.flatMap { paneEditors[$0]?.value } ?? activeEditor
+            if editor, ed?.paneKeys.awaitingWindowCommand == true {
                 return CommandLegend.windowCommands
             }
             let extras = CommandLegend.Extras(

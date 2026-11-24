@@ -15,6 +15,8 @@ extension AppState {
     var noteViewMode: NoteViewMode {
         guard isNoteOpen else { return .reading }
         guard isEditing else { return .reading }
+        // A pane remembers Live vs Source; new edits take the preference.
+        if case let .note(_, view)? = noteLayout.content(noteLayout.mainLeaf), view.isEditing { return view }
         return preferences.editMode == .live ? .live : .source
     }
 
@@ -28,6 +30,7 @@ extension AppState {
             if preferences.editMode != wanted {
                 withMotion(.standard) { preferences.editMode = wanted }
             }
+            if let path = openNotePath { noteLayout.setContent(.note(path: path, view: mode), for: noteLayout.mainLeaf) }
             // The split preview belongs to Source.
             if mode == .live, splitPreviewShown { setSplitPreview(false) }
             if !isEditing { setEditing(true) }
@@ -38,8 +41,8 @@ extension AppState {
     }
 
     /// Live Preview options for the editor (the reader's prose style).
-    func livePresentation(baseURL: URL?, vaultRoot: URL?) -> EditorPresentation {
-        guard preferences.editMode == .live else { return .source }
+    func livePresentation(baseURL: URL?, vaultRoot: URL?, live: Bool? = nil) -> EditorPresentation {
+        guard live ?? (noteViewMode == .live) else { return .source }
         let family: MarkdownFontFamily
         switch preferences.readingFontFamily {
         case .system: family = .system
@@ -50,28 +53,6 @@ extension AppState {
                                         vaultRoot: vaultRoot, readingWidth: preferences.readingWidth))
     }
 
-    /// ⌘-click on a Live Preview link: http(s)/mailto open in the
-    /// browser, note links open in the app (inside the book only).
-    func openLiveLink(_ link: LiveLink) {
-        switch link {
-        case let .external(href):
-            guard let safe = LivePreview.safeHref(href), let url = URL(string: safe) else { return }
-            #if canImport(AppKit)
-            NSWorkspace.shared.open(url)
-            #else
-            UIApplication.shared.open(url)
-            #endif
-        case let .note(href):
-            guard let from = openNotePath, let path = LivePreview.resolveNoteLink(href, from: from) else {
-                showToast("link leaves the book", tone: .warning)
-                return
-            }
-            if !openNote(atPath: path) { showToast("note not found: \(path)", tone: .warning) }
-        case .inert:
-            break
-        }
-    }
-
     /// Open a note of the current book by book-relative path. False when
     /// there is no such note.
     @discardableResult
@@ -80,10 +61,10 @@ extension AppState {
         switch explorer.source {
         case let .local(root):
             let url = root.appendingPathComponent(path)
-            guard (try? LumiOpenURL.localNoteURL(path, in: root)) != nil, let session else { return false }
-            if editor.isDirty { editor.save() }
+            guard (try? LumiOpenURL.localNoteURL(path, in: root)) != nil, session != nil else { return false }
+            if selectedRemoteNoteID != nil { selectedRemoteNoteID = nil }
             let entry = NoteEntry(url: url, relativePath: path, updatedAt: Date())
-            editor.load(noteID: path, at: url, vaultRoot: session.rootURL)
+            bindPrimaryLocal(path: path, url: url)
             selectedNoteID = path
             selectedEntry = entry
             editorMode = wantsEdit ? .edit : .view
@@ -146,6 +127,10 @@ extension AppState {
             noteLayout = PaneTree()
             return
         }
+        secondaryFocus = nil
+        paneVim = [:]
+        paneEditors = [:]
+        paneReaders = [:]
         if let saved = layoutStore.layout(forBook: book.id) {
             noteLayout = saved
         } else {
@@ -159,6 +144,7 @@ extension AppState {
     func syncLayoutContent() {
         let content: PaneContent = openNotePath.map { .note(path: $0, view: noteViewMode) } ?? .empty
         let main = noteLayout.mainLeaf
+        if let path = openNotePath, let book = openBook { bookMemory.noteOpened(path, inBook: book.id) }
         guard noteLayout.content(main) != content else { return }
         noteLayout.setContent(content, for: main)
         persistLayout()
@@ -169,27 +155,23 @@ extension AppState {
         layoutStore.save(noteLayout, forBook: id)
     }
 
-    /// `⌃w q` / `⌃w o` / `⌃w =` (and `:only`-like palette commands).
+    /// Layout pane commands: `⌃w q/c o = v s f F Enter < > + -`.
     func performLayout(_ command: PaneCommand) {
         switch command {
         case .close:
-            if focusedPane == .preview || (focusedPane == .editor && splitPreviewShown) {
-                let wasPreview = focusedPane == .preview
-                setSplitPreview(false)
-                if wasPreview { focusPane(.editor) }
-            } else if isNoteOpen {
-                // The last pane closes the note.
-                closeNote()
-            }
+            closeFocusedPane()
         case .only:
-            if splitPreviewShown {
-                setSplitPreview(false)
-                if focusedPane == .preview { focusPane(.editor) }
-            }
+            onlyPane()
         case .equalize:
-            if splitPreviewShown { withMotion(.standard) { noteLayout.equalize() } }
+            withMotion(.standard) { noteLayout.equalize() }
             preferences.splitPreviewRatio = 0.5
             persistLayout()
+        case let .split(axis):
+            splitPane(axis)
+        case let .follow(target):
+            followLinkInFocusedPane(target)
+        case let .resize(axis, steps):
+            resizeFocusedPane(axis, steps: steps)
         default:
             break
         }
@@ -210,7 +192,15 @@ enum Motion {
         }
     }
 
-    var animation: Animation { .smooth(duration: duration) }
+    /// Springs, not linear (SPEC-PARTE2 §1 "alive"): settle with a hint
+    /// of bounce, inside the 120–220 ms budget.
+    var animation: Animation {
+        switch self {
+        case .fast: return .snappy(duration: duration, extraBounce: 0.02)
+        case .standard: return .spring(duration: duration, bounce: 0.12)
+        case .slow: return .spring(duration: duration, bounce: 0.08)
+        }
+    }
 
     /// System Reduce Motion.
     @MainActor static var systemReduceMotion: Bool {
@@ -304,13 +294,15 @@ extension AppState {
 enum NoteRoute: Equatable {
     case reader
     case editor(live: Bool)
+    /// A view registered through `NoteViewHooks` (Board, Canvas, …).
+    case custom(NoteViewMode)
 }
 
 extension AppState {
     /// Views per note kind. Markdown: Reading | Live | Source. Kanban and
     /// canvas register here in the next batch (Board, Canvas); until
     /// then they open with markdown's views.
-    @MainActor static let noteViews: NoteViewRegistry<NoteRoute> = {
+    @MainActor static var noteViews: NoteViewRegistry<NoteRoute> = {
         var r = NoteViewRegistry<NoteRoute>()
         r.register(.markdown, views: NoteKind.markdown.views) { view in
             switch view {

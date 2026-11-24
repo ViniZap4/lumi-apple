@@ -97,9 +97,8 @@ extension AppState {
         case let .local(root):
             let url = root.appendingPathComponent(entry.path)
             let ne = NoteEntry(url: url, relativePath: entry.path, updatedAt: note.updatedAt ?? Date())
-            if editor.isDirty { editor.save() }
-            guard let session else { return }
-            editor.load(noteID: ne.relativePath, at: ne.url, vaultRoot: session.rootURL)
+            guard session != nil else { return }
+            bindPrimaryLocal(path: ne.relativePath, url: ne.url)
             selectedNoteID = ne.relativePath
             selectedEntry = ne
             editorMode = wantsEdit ? .edit : .view
@@ -129,6 +128,7 @@ extension AppState {
             selectedEntry = nil
             selectedNoteID = nil
             editorMode = .view
+            releasePrimaryLocal()
         } else if let remoteID = selectedRemoteNoteID {
             // Live (CRDT) edits are already on the server; only the REST
             // fallback (visionOS) has anything to save.
@@ -150,6 +150,8 @@ extension AppState {
             revealID = nil
         }
         if let revealID { explorer.revealPath(revealID) }
+        secondaryFocus = nil
+        homeCursor = 0
         keymap.reset()
         syncLayoutContent()
     }
@@ -229,6 +231,8 @@ extension AppState {
     private func routeShellKey(_ k: KeyStroke) -> Bool {
         if showPalette { return false }
         if hintSession != nil { return handleHintKey(k) }
+        if hoverCard != nil, handleHoverKey(k) { return true }
+        if showFloatingExplorer, !showHelp { return handleFloatingKey(k) }
         if MarkdownZoom.shared.item != nil {
             if k.command { return false }
             MarkdownZoom.shared.dismiss()
@@ -244,6 +248,12 @@ extension AppState {
 
         keymap.ctrlHJKLPanes = preferences.ctrlHJKLPanes
         let now = ProcessInfo.processInfo.systemUptime
+        if let leaf = focusedSecondary {
+            // A secondary pane: its editor owns its keys; its reader reads here.
+            if paneView(leaf).isEditing, paneEditors[leaf]?.value != nil { return false }
+            guard let action = keymap.feed(k, context: .reader, now: now) else { return false }
+            return dispatch(action) { self.performSecondaryReader($0, leaf: leaf) }
+        }
         let pane = focusedPane
         if pane == .sidebar {
             guard let action = keymap.feed(k, context: .sidebar, now: now) else { return false }
@@ -260,8 +270,8 @@ extension AppState {
             guard let action = keymap.feed(k, context: .explorer, now: now) else { return false }
             return dispatch(action) { self.performShared($0) }
         case .explorer:
-            guard let action = keymap.feed(k, context: .explorer, now: now) else { return false }
-            return dispatch(action) { self.performExplorer($0) }
+            // The book home: the floating explorer is the navigation.
+            return handleHomeKey(k)
         case .reader:
             guard let action = keymap.feed(k, context: .reader, now: now) else { return false }
             return dispatch(action) { self.performReader($0) }
@@ -305,12 +315,13 @@ extension AppState {
         case .nextBook: cycleBook(1)
         case .settings: showSettings = true
         case .hints: startHints()
+        case .books: openFloatingExplorer(level: .books)
         default: return false
         }
         return true
     }
 
-    private func performExplorer(_ action: ShellAction) -> Bool {
+    func performExplorer(_ action: ShellAction) -> Bool {
         if performShared(action) { return true }
         let ex = explorer
         let half = max(1, ex.pageRows / 2)
@@ -364,7 +375,13 @@ extension AppState {
         case let .page(d): c.scrollFullPage(direction: CGFloat(d))
         case .top: c.scrollTo(.top)
         case .bottom: c.scrollTo(.bottom)
-        case .parent, .close, .clearOrBack: closeNote()
+        case .close:
+            if isSplit { closeLeaf(primaryLeaf) } else { closeNote() }
+        case .parent, .clearOrBack:
+            if !MarkdownReading.closeFind(in: c.scrollView) { closeNote() }
+        case .explore: openFloatingExplorer()
+        case .hover: hoverFromKeyboard()
+        case .follow, .open: followLinkInFocusedPane(.current)
         case .edit: setEditing(true)
         case .yank: performYank()
         case .refresh: refreshBook()

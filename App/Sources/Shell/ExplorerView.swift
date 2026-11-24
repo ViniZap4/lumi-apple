@@ -2,10 +2,12 @@ import SwiftUI
 import LumiKit
 import LumiUI
 
-/// Yazi-style explorer: parent | current | preview. Keys come from the
-/// shell key router (`AppState.handleShellKey`); the mouse still works
+/// Yazi-style Miller columns: parent | current | preview — the body of
+/// the floating explorer (SPEC-PARTE2 §2; the full-screen explorer is
+/// gone). Keys come from the shell key router; the mouse works too
 /// (click selects / enters, double-click opens, parent rows jump).
-struct ExplorerView: View {
+struct ExplorerColumns: View {
+    var floating = true
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
 
@@ -66,7 +68,7 @@ struct ExplorerView: View {
                         explorer.nav.goTo(explorer.nav.parent ?? "", select: entry.key)
                     }
                 } onOpen: { _, entry in
-                    if entry.kind == .note { appState.open(entry) }
+                    if entry.kind == .note { appState.floatingOpen(entry, .current) }
                 }
             } else {
                 // At the book root the parent column names the book.
@@ -111,7 +113,7 @@ struct ExplorerView: View {
                 if entry.kind == .folder { _ = explorer.nav.right() }
             } onOpen: { i, entry in
                 explorer.nav.setCursor(i)
-                if entry.kind == .note { appState.open(entry) }
+                if entry.kind == .note { appState.floatingOpen(entry, appState.clickWhere) }
             }
             if explorer.isLoading {
                 HStack(spacing: 6) {
@@ -255,45 +257,13 @@ struct ExplorerColumn: View {
 
     @ViewBuilder
     private func row(_ entry: ExplorerEntry, index: Int) -> some View {
-        let isCursor = index == cursor
-        let isFolder = entry.kind == .folder
-        let isOpen = openKey != nil && entry.key == openKey
-        HStack(spacing: 8) {
-            Image(systemName: isFolder ? "folder" : "doc.text")
-                .font(.system(size: 10.5))
-                .foregroundStyle(isFolder ? theme.accent.opacity(0.9) : theme.textDim)
-                .frame(width: 14)
-            Text(entry.name)
-                .font(isFolder ? ShellFont.rowBold : ShellFont.row)
-                .foregroundStyle(nameColor(isFolder: isFolder, isOpen: isOpen, hidden: entry.isHidden))
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer(minLength: 4)
-            if isFolder {
-                Text("\(entry.count)")
-                    .font(ShellFont.small)
-                    .foregroundStyle(theme.textDim)
+        ExplorerRowLabel(name: entry.name, isFolder: entry.kind == .folder, count: entry.count,
+                         isCursor: index == cursor, active: active,
+                         isOpen: openKey != nil && entry.key == openKey, hidden: entry.isHidden)
+            .staggerIn(index, active: appState.motionEnabled)
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(shellHintSpace)) } action: { frame in
+                if active { appState.rowFrames[entry.key] = frame }
             }
-        }
-        .padding(.leading, 10)
-        .padding(.trailing, 10)
-        .frame(height: ShellMetrics.rowHeight)
-        .background(alignment: .leading) {
-            if isCursor {
-                ZStack(alignment: .leading) {
-                    Rectangle().fill(active ? theme.selectionRow : theme.text.opacity(0.06))
-                    if active {
-                        Rectangle().fill(theme.accent).frame(width: 2)
-                    }
-                }
-            }
-        }
-    }
-
-    private func nameColor(isFolder: Bool, isOpen: Bool, hidden: Bool) -> Color {
-        if isOpen { return theme.primary }
-        let base = isFolder ? theme.accent : theme.text
-        return hidden ? base.opacity(0.55) : base
     }
 }
 
@@ -421,7 +391,7 @@ struct PreviewColumn: View {
         ) { _, child in
             appState.explorer.nav.goTo(entry.path, select: child.key)
         } onOpen: { _, child in
-            if child.kind == .note { appState.open(child) }
+            if child.kind == .note { appState.floatingOpen(child, .current) }
         }
     }
 

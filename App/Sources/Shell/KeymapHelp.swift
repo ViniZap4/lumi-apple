@@ -7,37 +7,36 @@ struct KeymapHelpOverlay: View {
     @Environment(\.theme) private var theme
 
     static let sections: [(String, [(String, String)])] = [
-        ("Explore", [
-            ("j k  ↓ ↑", "move"), ("h  ←  -", "up a folder"), ("l  →  ⏎", "open / enter"),
-            ("gg  G", "top / bottom"), ("⌃d ⌃u", "half page"), ("5j", "count"),
-            ("H  L", "folder history"), ("~  gh", "book root"),
-            ("/", "filter in place"), ("n  N", "next / prev match"), ("⎋", "clear filter"),
+        ("Explorer (floating)", [
+            ("-  <leader>e  :explore", "open it (reader, editor, home)"), ("⌘\\  toolbar", "open it (mouse)"),
+            ("j k  h l  gg G", "move / folders"), ("⏎", "open here"), ("⌃v  ⌃s", "open in split / stacked"),
+            ("/  n N", "filter"), ("a r d  y p", "new, rename, delete, copy"), ("gb  h at the root", "books level"),
+            ("⎋  q  click outside", "close (⎋ clears a filter first)"),
         ]),
-        ("Files", [
-            ("a", "new note (a/b/name, dir/)"), ("r", "rename"), ("d", "delete (confirm)"),
-            ("y  p", "yank / paste copy"), (".", "show hidden"), ("zp", "preview column"),
-            ("R", "refresh"), ("⇧F10  right-click", "context menu"), ("drag", "note onto a folder: move"),
+        ("Links and preview", [
+            ("gf  ⏎ on a link", "follow here"), ("⌃w f  ⌃w ⏎", "follow into a split"), ("⌃w F", "follow, stacked"),
+            ("⌘-click  ⇧⌘-click", "split / stacked"), ("K", "hover card"), ("hover 350 ms", "hover card (mouse)"),
+            ("card: j k d u", "scroll"), ("card: ⏎  ⌃w f/F", "open / split"), ("card: ⎋ q", "close"),
         ]),
         ("Note", [
-            ("⏎  l", "read"), ("i  e  ⌘E", "edit (vim)"), ("q  h  ⎋", "back to explorer"),
+            ("i  e  ⌘E", "edit (vim)"), ("⌥⌘L  ⌥⌘S", "Live / Source"), ("q", "close the pane / note"),
             ("j k  d u", "scroll"), ("gg  G", "top / bottom"), ("y", "copy selection"),
-            (":q  :wq", "leave the editor"), ("\\p  :preview split", "preview beside source"),
+            (":q  :wq", "leave / close the pane"), ("\\p  :preview split", "preview beside source"),
         ]),
-        ("App", [
-            ("space  :  ⌘K", "command palette"), ("[  ]", "previous / next book"),
-            ("⌃1–9  g1–9", "book by number"), ("⌘\\", "sidebar"), ("⌥⌘,", "book settings"),
-            ("⌘,  ,  :settings", "settings"), ("f  F", "hints: click by label"), ("?", "this help"),
+        ("Splits", [
+            ("⌃w v  :vsplit [note]", "split side by side"), ("⌃w s  :split [note]", "split stacked"),
+            ("⌃w q  :q  :close", "close pane"), ("⌃w o  :only", "only this pane"), ("⌃w =", "equal sizes"),
+            ("⌃w < >  ⌃w + -", "narrower / wider, shorter / taller"), ("drag a divider", "resize"),
         ]),
         ("Panes", [
-            ("⌃h  ⌃l", "pane left / right"), ("⌃j  ⌃k", "pane down / up (narrow split)"),
-            ("⌃h", "at the left edge: books"), ("⌃w h j k l", "same, vim style"),
+            ("⌃h ⌃j ⌃k ⌃l", "pane that way"), ("⌃w h j k l", "same, vim style"),
             ("⌃w w  ⌃w W", "next / previous pane"), ("⌃w p", "last pane"),
             ("click", "focus that pane"), ("insert mode", "⌃h ⌫  ⌃j newline"),
         ]),
-        ("Preview (focused)", [
-            ("j k  d u  ␣ b", "scroll (editor follows)"), ("{ }  [[ ]]", "previous / next heading"),
-            ("gg  G", "top / bottom"), ("/  n N", "find"), ("f", "links, boxes, copy"),
-            ("⏎", "follow link at selection"), ("y", "copy selection"), ("q  ⎋  ⌃h  i", "back to the editor"),
+        ("App", [
+            ("space  :  ⌘K", "command palette"), ("gb  ⇧⌘B", "switch book"), ("[  ]", "previous / next book"),
+            ("⌃1–9  g1–9", "book by number"), ("⌥⌘,", "book settings"), ("⌘,  :settings", "settings"),
+            ("f  F", "hints: click by label"), ("?", "this help"),
         ]),
     ]
 

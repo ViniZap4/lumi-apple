@@ -24,9 +24,9 @@ final class KeyRouter {
         token = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.handle(event) ?? event
         }
-        // A click focuses the pane under it. The editor and the split
-        // preview report their own focus (first responder); this covers
-        // the sidebar and leaving it. Observes only — never consumes.
+        // A click focuses the pane under it. Editors report their own
+        // focus (first responder); this covers readers. Observes only —
+        // never consumes.
         mouseToken = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
             self?.mouseDown(event)
             return event
@@ -43,11 +43,8 @@ final class KeyRouter {
               let content = window.contentView else { return }
         var p = content.convert(event.locationInWindow, from: nil)
         if !content.isFlipped { p.y = content.bounds.height - p.y }
-        if appState.hintRegistry.sidebarGlobalFrame.contains(p) {
-            appState.notePaneFocus(.sidebar)
-        } else if appState.paneFocus == .sidebar {
-            appState.notePaneFocus(nil)
-        }
+        // The pane under the click takes the keyboard (splits).
+        appState.paneClicked(at: p)
     }
 
     private func handle(_ event: NSEvent) -> NSEvent? {

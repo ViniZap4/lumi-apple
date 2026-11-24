@@ -159,9 +159,12 @@ public struct ExplorerRowLabel: View {
     let active: Bool
     let isOpen: Bool
     let hidden: Bool
+    var icon: String?
     @Environment(\.theme) private var theme
 
-    public init(name: String, isFolder: Bool, count: Int, isCursor: Bool, active: Bool, isOpen: Bool, hidden: Bool) {
+    public init(name: String, isFolder: Bool, count: Int, isCursor: Bool, active: Bool, isOpen: Bool, hidden: Bool,
+                icon: String? = nil) {
+        self.icon = icon
         self.name = name
         self.isFolder = isFolder
         self.count = count
@@ -173,7 +176,7 @@ public struct ExplorerRowLabel: View {
 
     public var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: isFolder ? "folder" : "doc.text")
+            Image(systemName: icon ?? (isFolder ? "folder" : "doc.text"))
                 .font(.system(size: 10.5))
                 .foregroundStyle(isFolder ? theme.accent.opacity(0.9) : theme.textDim)
                 .frame(width: 14)
@@ -183,7 +186,7 @@ public struct ExplorerRowLabel: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 4)
-            if isFolder {
+            if isFolder, count > 0 || icon == nil {
                 Text("\(count)")
                     .font(ShellFont.small)
                     .foregroundStyle(theme.textDim)
@@ -220,13 +223,16 @@ public struct FloatingPanel<Content: View, Footer: View>: View {
     let title: String
     let path: String
     let hints: [(String, String)]
+    /// Narrow window: a full-height sheet instead of the centred card.
+    var compact = false
     let onDismiss: () -> Void
     let content: Content
     let footer: Footer
     @Environment(\.theme) private var theme
 
-    public init(title: String, path: String, hints: [(String, String)], onDismiss: @escaping () -> Void,
+    public init(title: String, path: String, hints: [(String, String)], compact: Bool = false, onDismiss: @escaping () -> Void,
                 @ViewBuilder content: () -> Content, @ViewBuilder footer: () -> Footer) {
+        self.compact = compact
         self.title = title
         self.path = path
         self.hints = hints
@@ -242,8 +248,14 @@ public struct FloatingPanel<Content: View, Footer: View>: View {
                     .contentShape(Rectangle())
                     .onTapGesture(perform: onDismiss)
                     .accessibilityHidden(true)
-                panel
-                    .frame(width: max(360, geo.size.width * 0.8), height: max(260, geo.size.height * 0.8))
+                if compact {
+                    panel
+                        .frame(width: geo.size.width - 12, height: geo.size.height - 8)
+                        .frame(maxHeight: .infinity, alignment: .bottom)
+                } else {
+                    panel
+                        .frame(width: max(360, geo.size.width * 0.8), height: max(260, geo.size.height * 0.8))
+                }
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }

@@ -118,7 +118,9 @@ struct ShellStatusLine: View {
                 .padding(.horizontal, 7)
                 .frame(height: 16)
                 .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(modeColor.opacity(0.16)))
-                .animation(appState.animation(.fast), value: modeLabel)
+                // The pill morphs between modes (width, colour, letters).
+                .contentTransition(appState.motionEnabled ? .interpolate : .identity)
+                .animation(appState.motionEnabled ? .spring(response: 0.2, dampingFraction: 0.8) : nil, value: modeLabel)
             Text(context)
                 .font(ShellFont.small)
                 .foregroundStyle(theme.textDim)
@@ -151,6 +153,14 @@ struct ShellStatusLine: View {
     }
 
     private var modeLabel: String {
+        if appState.showFloatingExplorer { return appState.floatingLevel == .books ? "BOOKS" : "BROWSE" }
+        if let leaf = appState.focusedSecondary {
+            guard appState.paneView(leaf).isEditing else { return "READ" }
+            guard appState.preferences.vimEnabled else { return "EDIT" }
+            let s = appState.paneVim[leaf] ?? VimStatus()
+            if s.mode == .normal, s.pending.op != nil { return "O-PENDING" }
+            return s.mode.shortLabel
+        }
         if appState.focusedPane == .preview { return "PREVIEW" }
         if appState.focusedPane == .sidebar { return "BOOKS" }
         switch appState.surface {
@@ -167,6 +177,11 @@ struct ShellStatusLine: View {
     }
 
     private var modeColor: Color {
+        if appState.showFloatingExplorer { return theme.accent }
+        if let leaf = appState.focusedSecondary {
+            guard appState.paneView(leaf).isEditing else { return theme.info }
+            return (appState.paneVim[leaf]?.mode ?? .normal).chromeColor(theme)
+        }
         if appState.focusedPane == .preview { return theme.info }
         if appState.focusedPane == .sidebar { return theme.accent }
         switch appState.surface {
@@ -179,15 +194,23 @@ struct ShellStatusLine: View {
     }
 
     private var context: String {
-        switch appState.surface {
-        case .empty: return "no book open"
-        case .explorer:
+        if appState.showFloatingExplorer, appState.floatingLevel == .files {
             let nav = appState.explorer.nav
             let dir = nav.dir.isEmpty ? "/" : "/" + nav.dir
             return nav.filter.isEmpty ? dir : "\(dir)  filter: \(nav.filter)"
-        case .reader, .editor:
-            return appState.openNotePath ?? ""
         }
+        switch appState.surface {
+        case .empty: return "no book open"
+        case .explorer:
+            return appState.openBook.map { "\($0.name) — - explorer · gb books" } ?? ""
+        case .reader, .editor:
+            let path = appState.panePath(appState.focusedLeaf) ?? ""
+            return appState.isSplit ? "\(path)  · pane \(paneIndex)/\(appState.visibleLayout.notePanes.count)" : path
+        }
+    }
+
+    private var paneIndex: Int {
+        (appState.visibleLayout.leaves.firstIndex(of: appState.focusedLeaf) ?? 0) + 1
     }
 
     private var right: [String] {
@@ -196,6 +219,10 @@ struct ShellStatusLine: View {
         case .explorer:
             let nav = appState.explorer.nav
             var out: [String] = []
+            guard appState.showFloatingExplorer else {
+                if appState.openBookPendingCount > 0 { out.append("\(appState.openBookPendingCount) pending") }
+                return out
+            }
             if let cached = appState.remoteVaultsStore.staleListingDate, appState.remoteVaultsStore.isOffline,
                !appState.explorer.isLocal {
                 out.append("offline · list from \(cached.formatted(.relative(presentation: .named)))")

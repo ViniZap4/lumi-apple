@@ -12,16 +12,10 @@ struct RootView: View {
 
     var body: some View {
         @Bindable var bound = appState
-        // Sidebar is optional (⌘\, hidden by default). The main area swaps
-        // between empty state, explorer, reader and editor; a top line and
-        // a status line frame it like a modal editor — no toolbar pills.
-        NavigationSplitView(columnVisibility: $bound.columnVisibility) {
-            VaultSidebar()
-                .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 320)
-                .navigationTitle("Books")
-        } detail: {
-            ShellMain()
-        }
+        // One surface (SPEC-PARTE2 §2): the note area (or the book home),
+        // framed by a top line and a status line like a modal editor.
+        // Navigation is the floating explorer; books are its top level.
+        ShellMain()
         #if os(macOS)
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         #endif
@@ -66,10 +60,9 @@ struct RootView: View {
         .onChange(of: appState.preferences.ctrlHJKLPanes) { _, on in
             appState.activeEditor?.paneKeys.ctrlHJKL = on
         }
-        .onChange(of: appState.columnVisibility) { _, visibility in
-            // The sidebar closed under the keyboard (⌘\, toolbar).
-            if visibility == .detailOnly, appState.paneFocus == .sidebar { appState.notePaneFocus(nil) }
-            if visibility == .detailOnly { appState.sidebarAutoShown = false }
+        .onChange(of: appState.explorer.tree.noteCount) { _, n in
+            // Notes deleted / moved outside the app: their panes close.
+            if n > 0 { appState.pruneDeletedPanes() }
         }
         .onChange(of: appState.remoteVaultsStore.openNotePhase) { _, _ in appState.publishEditorPhase() }
         .onChange(of: appState.remoteEditor.isDirty) { _, _ in appState.publishEditorPhase() }
@@ -119,6 +112,7 @@ struct RootView: View {
 struct ShellMain: View {
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
+    @State private var contentFrame: CGRect = .zero
 
     var body: some View {
         VStack(spacing: 0) {
@@ -127,12 +121,15 @@ struct ShellMain: View {
             #else
             ShellTopLine()
             #endif
-            if appState.isNoteOpen {
+            if appState.isNoteOpen, !appState.isSplit {
                 NoteBar()
             }
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay(alignment: .top) { mainPaneMarker }
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(shellHintSpace)) } action: { frame in
+                    contentFrame = frame
+                }
                 // Explorer ↔ reader ↔ editor: a short cross-fade with a
                 // small lift (instant under Reduce Motion).
                 .animation(appState.animation(.standard), value: appState.surface)
@@ -151,15 +148,35 @@ struct ShellMain: View {
             appState.hintRegistry.globalOrigin = origin
         }
         .overlay {
+            // The floating explorer: the navigation (SPEC-PARTE2 §2).
+            if appState.showFloatingExplorer {
+                FloatingExplorerOverlay()
+                    .transition(appState.transition(.scale(scale: 0.96).combined(with: .opacity)))
+            }
+        }
+        .overlay {
+            if let morph = appState.openMorph, appState.motionEnabled {
+                OpenMorphGhost(morph: morph, target: contentFrame) { appState.openMorph = nil }
+                    .id(morph.id)
+            }
+        }
+        .overlay { HoverCardOverlay() }
+        .overlay {
             if let session = appState.hintSession {
                 HintOverlay(session: session)
                     .transition(appState.transition(.opacity))
             }
         }
+        .animation(appState.animation(.standard), value: appState.showFloatingExplorer)
+        .animation(appState.animation(.standard), value: appState.isSplit)
         #if os(macOS)
         .toolbar {
             ToolbarItem(placement: .navigation) {
-                ShellBreadcrumb().padding(.horizontal, 6)
+                HStack(spacing: 6) {
+                    ExplorerButton()
+                    ShellBreadcrumb()
+                }
+                .padding(.horizontal, 6)
             }
             .glassHidden()
             ToolbarItem(placement: .primaryAction) {
@@ -221,33 +238,23 @@ struct ShellMain: View {
 
     @ViewBuilder
     private var content: some View {
-        if let entry = appState.selectedEntry, let session = appState.session {
-            NoteDetailView(
-                entry: entry,
-                baseURL: entry.url.deletingLastPathComponent(),
-                vaultRoot: session.rootURL
-            )
-            .transition(appState.transition(.opacity.combined(with: .offset(y: 8))))
-        } else if let vaultID = appState.selectedVaultID,
-                  let book = appState.books.book(vaultID) {
+        if appState.isNoteOpen {
+            NoteArea()
+                .transition(appState.transition(.opacity.combined(with: .offset(y: 8))))
+        } else if let vaultID = appState.selectedVaultID, let book = appState.books.book(vaultID) {
             if appState.session != nil {
-                ExplorerView()
+                BookHome(book: book)
                     .transition(appState.transition(.opacity.combined(with: .offset(y: -6))))
             } else {
                 BookUnavailableView(book: book)
             }
-        } else if let remoteID = appState.selectedRemoteVaultID,
-                  let remote = appState.remoteVaultsStore.vaults.first(where: { $0.id == remoteID }) {
-            if let noteID = appState.selectedRemoteNoteID,
-               let row = appState.remoteVaultsStore.notes.first(where: { $0.id == noteID }) {
-                RemoteNoteDetailView(vault: remote, listRow: row)
-                    .transition(appState.transition(.opacity.combined(with: .offset(y: 8))))
-            } else {
-                ExplorerView()
+        } else if let remoteID = appState.selectedRemoteVaultID, let book = appState.openBook {
+            if appState.remoteVaultsStore.vaults.contains(where: { $0.id == remoteID }) {
+                BookHome(book: book)
                     .transition(appState.transition(.opacity.combined(with: .offset(y: -6))))
+            } else {
+                BookUnavailableView(book: book)
             }
-        } else if appState.selectedRemoteVaultID != nil, let book = appState.openBook {
-            BookUnavailableView(book: book)
         } else {
             ShellEmptyState()
         }

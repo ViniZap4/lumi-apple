@@ -87,6 +87,8 @@ public enum ShellAction: Sendable, Equatable {
     case hover           // K
     /// `gf`: follow the focused link in the current pane.
     case follow          // gf
+    /// `gb`: the floating overlay at the books level (switch book).
+    case books           // gb
     /// First key of a chord (`g`, `z`) or a count digit: consumed, no-op.
     case pending
 }
@@ -195,6 +197,7 @@ public struct ShellKeymap: Sendable {
                     case "g": count = nil; return .top
                     case "h": count = nil; return .home
                     case "e": count = nil; return .bottom
+                    case "b": count = nil; return .books
                     case "f" where context == .reader || context == .preview: count = nil; return .follow
                     default: break
                     }

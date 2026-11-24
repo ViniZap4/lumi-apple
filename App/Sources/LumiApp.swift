@@ -52,8 +52,10 @@ struct LumiApp: App {
                     .keyboardShortcut(",", modifiers: [.command])
             }
             CommandGroup(replacing: .sidebar) {
-                Button("Toggle Sidebar") { appState.toggleSidebar() }
+                Button("Explorer") { appState.toggleFloatingExplorer() }
                     .keyboardShortcut("\\", modifiers: [.command])
+                Button("Switch Book…") { appState.openFloatingExplorer(level: .books) }
+                    .keyboardShortcut("b", modifiers: [.command, .shift])
             }
             CommandMenu("Go") {
                 Button("Command Palette…") { appState.openPalette() }

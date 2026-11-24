@@ -52,13 +52,15 @@ public enum CommandLegend {
     // MARK: Shell (explorer / reader)
 
     static let shellG: [LegendItem] = [
-        .init("gg", "top"), .init("ge", "bottom"), .init("gh", "book root"), .init("g1–9", "book n"),
+        .init("gg", "top"), .init("ge", "bottom"), .init("gf", "follow link"), .init("gb", "books"),
+        .init("gh", "book root"), .init("g1–9", "book n"),
     ]
     static let shellZ: [LegendItem] = [.init("zp", "preview"), .init("zh", "book root")]
     /// After `⌃w` (shell or editor).
     public static let windowCommands: [LegendItem] = [
-        .init("h j k l", "pane that way"), .init("w W", "next/prev pane"), .init("p", "last pane"),
-        .init("q", "close pane"), .init("o", "only this pane"), .init("=", "equal sizes"), .init("Esc", "cancel"),
+        .init("h j k l", "pane that way"), .init("v s", "split / stacked"), .init("f ⏎", "link → split"),
+        .init("F", "link → stacked"), .init("w W", "next/prev"), .init("p", "last"), .init("q c", "close"),
+        .init("o", "only this"), .init("=", "equal"), .init("< > + -", "resize"), .init("Esc", "cancel"),
     ]
     static let headingChord: [LegendItem] = [.init("[[", "prev heading"), .init("]]", "next heading")]
 
@@ -81,14 +83,15 @@ public enum CommandLegend {
         switch ctx {
         case .explorer:
             out = [
-                .init("j k", "move"), .init("h l", "folder"), .init("⏎", "open"), .init("e", "edit"),
-                .init("/", "filter"), .init("a", "new"), .init("r", "rename"), .init("d", "delete"),
-                .init("y p", "copy"), .init("H L", "history"), .init("f", "hints"), .init("space", "commands"), .init("?", "keys"),
+                .init("j k", "move"), .init("h l", "folder"), .init("⏎", "open"), .init("⌃v ⌃s", "split"),
+                .init("e", "edit"), .init("/", "filter"), .init("a", "new"), .init("r", "rename"), .init("d", "delete"),
+                .init("y p", "copy"), .init("gb", "books"), .init("Esc q", "close"), .init("?", "keys"),
             ]
         case .preview:
             out = [
                 .init("j k", "scroll"), .init("d u", "half page"), .init("{ }", "heading"), .init("gg G", "top/end"),
-                .init("/ n", "find"), .init("f", "links"), .init("y", "copy"), .init("q ⌃h", "editor"), .init("?", "keys"),
+                .init("/ n", "find"), .init("f", "links"), .init("gf K", "follow/peek"), .init("-", "files"),
+                .init("q ⌃h", "editor"), .init("?", "keys"),
             ]
         case .sidebar:
             out = [
@@ -97,8 +100,9 @@ public enum CommandLegend {
             ]
         default:
             out = [
-                .init("j k", "scroll"), .init("d u", "half page"), .init("gg G", "top/end"), .init("e i", "edit"),
-                .init("/ n", "find"), .init("q h", "back"), .init("y", "copy"), .init("F", "hints"), .init("space", "commands"), .init("?", "keys"),
+                .init("j k", "scroll"), .init("d u", "half page"), .init("e i", "edit"), .init("-", "files"),
+                .init("gf K", "follow/peek link"), .init("⌃w v", "split"), .init("/ n", "find"), .init("q", "close"),
+                .init("F", "hints"), .init("space", "commands"), .init("?", "keys"),
             ]
         }
         if let pane { out.insert(pane, at: out.count - 1) }
@@ -110,7 +114,7 @@ public enum CommandLegend {
     static let vimG: [LegendItem] = [
         .init("gg", "top"), .init("gj gk", "display line"), .init("ge", "word end back"), .init("g_", "last char"),
         .init("gu gU g~", "case"), .init("gv", "reselect"), .init("gJ", "join"), .init("gp gP", "put, after"),
-        .init("gi", "insert again"), .init("g* g#", "search part"), .init("g&", ":s all lines"),
+        .init("gi", "insert again"), .init("g* g#", "search part"), .init("g&", ":s all lines"), .init("gf", "follow link"),
     ]
     static let vimZ: [LegendItem] = [
         .init("zz", "center"), .init("zt", "to top"), .init("zb", "to bottom"), .init("z. z⏎ z-", "…+ first char"),
@@ -148,7 +152,7 @@ public enum CommandLegend {
             var out: [LegendItem] = [
                 .init("i a o", "insert"), .init("v V ^V", "visual"), .init("d c y", "cut/change/copy"),
                 .init("p", "paste"), .init("u ^R", "undo/redo"), .init(".", "repeat"),
-                .init("/ n", "search"), .init(":", "command"), .init("q @", "macro"),
+                .init("/ n", "search"), .init(":", "command"), .init("-", "files"), .init("gf K", "link"),
             ]
             if let r = extras.recording { out.insert(.init("q", "stop recording @\(r)"), at: 0) }
             if !extras.leaderMaps.isEmpty { out.append(.init(displayLeader(extras.leader), "leader")) }
@@ -199,7 +203,7 @@ public enum CommandLegend {
         case .confirm:
             return [.init("y ⏎", "confirm"), .init("n Esc", "cancel")]
         case .books:
-            return [.init("j k", "move"), .init("⏎ l", "open"), .init("g1–9", "book n"), .init("R", "refresh"), .init("Esc", "back")]
+            return [.init("j k", "move"), .init("h l", "accounts / books"), .init("⏎", "open book"), .init("[ ]", "cycle"), .init("Esc q", "close")]
         case .help:
             return [.init("any key", "close")]
         case .explorer, .reader, .preview, .sidebar:

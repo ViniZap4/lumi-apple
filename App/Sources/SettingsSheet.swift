@@ -318,8 +318,13 @@ struct SettingsSheet: View {
             )
             toggleRow(
                 title: "⌃h ⌃j ⌃k ⌃l move between panes",
-                detail: "Books ← explorer / note → split preview, like vim windows and vim-tmux-navigator. In the editor: normal and visual mode only, unless your .vimrc maps the key. ⌃w h/j/k/l, ⌃w w and ⌃w p always work.",
+                detail: "Between split panes and the split preview by position, like vim windows and vim-tmux-navigator. In the editor: normal and visual mode only, unless your .vimrc maps the key. ⌃w h/j/k/l, ⌃w w and ⌃w p always work; ⌃w v / s split, ⌃w q closes, ⌃w o keeps one, ⌃w = equalises, ⌃w < > + - resize.",
                 isOn: $prefs.ctrlHJKLPanes
+            )
+            toggleRow(
+                title: "Hover link previews",
+                detail: "Rest the pointer on a note link for a moment to see the note in a card (Open / Split). K on a link opens it from the keyboard either way; external links only show their address.",
+                isOn: $prefs.hoverPreviews
             )
             toggleRow(
                 title: "Leaving the preview moves the cursor",

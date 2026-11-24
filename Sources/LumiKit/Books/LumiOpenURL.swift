@@ -51,6 +51,28 @@ public enum LumiOpenURL {
 
     // MARK: Parse
 
+    /// Build the link for a request ("Copy lumi:// link to this note").
+    /// Round-trips through `parse`.
+    public static func link(_ request: Request) -> String? {
+        var comps = URLComponents()
+        comps.scheme = "lumi"
+        comps.host = "open"
+        var items: [URLQueryItem] = []
+        switch request {
+        case let .server(serverURL, account, vaultID, note):
+            items = [URLQueryItem(name: "server", value: serverURL), URLQueryItem(name: "account", value: account),
+                     URLQueryItem(name: "vault", value: vaultID.uuidString.lowercased())]
+            if let note { items.append(URLQueryItem(name: "note", value: note)) }
+        case let .local(path, note):
+            items = [URLQueryItem(name: "path", value: path)]
+            if let note { items.append(URLQueryItem(name: "note", value: note)) }
+        }
+        comps.queryItems = items
+        // `+` would read back as a space in some parsers; encode it.
+        comps.percentEncodedQuery = comps.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        return comps.string
+    }
+
     public static func parse(_ url: URL) throws(Failure) -> Request {
         let raw = url.absoluteString
         guard raw.utf8.count <= maxLength else { throw .malformed("too long") }

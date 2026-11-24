@@ -133,8 +133,9 @@ extension AppState {
                 let newURL = try FileOperations.rename(at: url, to: input)
                 let dir = NoteTree.dirOf(entry.path)
                 let newRel = (dir.isEmpty ? "" : dir + "/") + newURL.lastPathComponent
-                if selectedEntry?.relativePath == entry.path { closeNote() }
+                if selectedEntry?.relativePath == entry.path { closePrimaryNoteForRemoval() }
                 explorer.rescanLocal(reveal: newRel)
+                pruneDeletedPanes()
             } catch {
                 showToast(describe(error), tone: .error)
             }
@@ -173,10 +174,12 @@ extension AppState {
             do {
                 if let open = selectedEntry?.relativePath,
                    open == entry.path || open.hasPrefix(entry.path + "/") {
-                    closeNote()
+                    closePrimaryNoteForRemoval()
                 }
                 try FileOperations.delete(at: url)
                 explorer.rescanLocal()
+                pruneDeletedPanes()
+                if let book = openBook { bookMemory.forget(entry.path, inBook: book.id) }
                 showToast("moved \(entry.name) to the Trash")
             } catch {
                 showToast(describe(error), tone: .error)
@@ -185,9 +188,11 @@ extension AppState {
             guard let note = entry.note else { return }
             Task {
                 do {
-                    if selectedRemoteNoteID == note.id { closeNote() }
+                    if selectedRemoteNoteID == note.id { closePrimaryNoteForRemoval() }
                     try await remoteVaultsStore.deleteNote(noteID: note.id)
                     explorer.updateRemote(notes: remoteVaultsStore.notes, loading: false)
+                    pruneDeletedPanes()
+                    if let book = openBook { bookMemory.forget(entry.path, inBook: book.id) }
                     showToast("deleted \(entry.name)")
                 } catch {
                     showToast(describe(error), tone: .error)

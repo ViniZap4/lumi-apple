@@ -229,6 +229,7 @@ struct RemoteNoteDetailView: View {
             switch appState.noteRoute {
             case .reader: viewMode
             case .editor: editMode
+            case let .custom(mode): customView(mode)
             }
         } else if appState.remoteVaultsStore.openNoteIsLoading && appState.remoteEditor.status == .idle {
             loadingState
@@ -240,8 +241,17 @@ struct RemoteNoteDetailView: View {
                 viewMode
             case .editor:
                 editMode
+            case let .custom(mode):
+                customView(mode)
             }
         }
+    }
+
+    @ViewBuilder
+    private func customView(_ mode: NoteViewMode) -> some View {
+        let ctx = appState.noteViewContext(view: mode, kind: appState.openNoteKind, path: listRow.path.isEmpty ? listRow.id : listRow.path,
+                                           leaf: appState.primaryLeaf, text: readText)
+        if let v = NoteViewHooks.view(ctx) { v } else { viewMode }
     }
 
     @ViewBuilder
@@ -261,12 +271,12 @@ struct RemoteNoteDetailView: View {
                 fontFamily: markdownFontFamilyFromPreferences,
                 contentAnimations: appState.preferences.contentAnimations,
                 readingWidth: appState.preferences.readingWidth,
-                // No in-app link routing for server notes yet — the slug
-                // resolution endpoint isn't wired up.
-                onInAppLink: nil,
+                // Links resolve against the book's note list (paths / wiki).
+                onInAppLink: { url in appState.routeReaderURL(url, from: appState.primaryLeaf) },
                 yankFlashTrigger: appState.yankFlashAt,
                 onToggleTask: canEditNotes ? { appState.toggleTask($0) } : nil
             )
+            .environment(\.markdownLinkHover, appState.linkHover(from: appState.primaryLeaf))
         }
         .id(listRow.id)
     }
@@ -289,12 +299,14 @@ struct RemoteNoteDetailView: View {
             scale: appState.preferences.readingScale,
             fontFamily: markdownFontFamilyFromPreferences,
             onToggleTask: canEditNotes ? { appState.toggleTask($0) } : nil,
+            onInAppLink: { url in appState.routeReaderURL(url, from: appState.primaryLeaf) },
             focus: appState.splitFocusMarker,
             onSync: { appState.adoptSplit($0) }
         ) {
             editPane
         }
         .environment(\.vimControllerSink) { appState.adoptEditor($0) }
+        .environment(\.markdownLinkHover, appState.linkHover(from: appState.primaryLeaf))
     }
 
     @ViewBuilder
@@ -302,7 +314,7 @@ struct RemoteNoteDetailView: View {
         if let session = liveSession {
             if session.isEditable {
                 VimEditor(
-                    document: session,
+                    document: appState.docView(for: session, owner: "primary"),
                     vimEnabled: appState.preferences.vimEnabled,
                     onModeChange: { appState.liveVimMode = $0 },
                     onEffect: handleVimEffect,
@@ -315,8 +327,9 @@ struct RemoteNoteDetailView: View {
                     fileName: appState.openNotePath,
                     onStatusChange: { appState.liveVimStatus = $0 }
                 )
-                .presentation(appState.noteRoute == .editor(live: true) ? appState.livePresentation(baseURL: nil, vaultRoot: nil) : .source,
-                              onOpenLink: { appState.openLiveLink($0) })
+                .presentation(appState.noteRoute == .editor(live: true) ? appState.livePresentation(baseURL: nil, vaultRoot: nil, live: true) : .source,
+                              onOpenLink: { appState.openLiveLink($0, from: appState.primaryLeaf) })
+                .onHoverLink { link, rect in appState.liveLinkHovered(link, rect: rect, from: appState.primaryLeaf) }
                 .readableEditorWidth(appState.noteRoute != .editor(live: true))
                 // One editor per replica: a new session remounts it.
                 .id(ObjectIdentifier(session))
@@ -360,8 +373,8 @@ struct RemoteNoteDetailView: View {
                         fileName: appState.openNotePath,
                         onStatusChange: { appState.liveVimStatus = $0 }
                     )
-                    .presentation(appState.noteRoute == .editor(live: true) ? appState.livePresentation(baseURL: nil, vaultRoot: nil) : .source,
-                                  onOpenLink: { appState.openLiveLink($0) })
+                    .presentation(appState.noteRoute == .editor(live: true) ? appState.livePresentation(baseURL: nil, vaultRoot: nil, live: true) : .source,
+                                  onOpenLink: { appState.openLiveLink($0, from: appState.primaryLeaf) })
                     .readableEditorWidth(appState.noteRoute != .editor(live: true))
                 } else {
                     PlainTextEditor(text: $editor.currentText)
@@ -553,6 +566,7 @@ struct RemoteNoteDetailView: View {
             // just leave edit mode (there is nothing local to discard).
             switch effect {
             case .save: break
+            case .close where appState.isSplit: appState.closeLeaf(appState.primaryLeaf)
             case .saveAndClose, .close: appState.remoteEditorMode = .view
             case .scrollCursor, .scrollLines, .displayLines: break
             case let .host(command): appState.performHostCommand(command)

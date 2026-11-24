@@ -136,6 +136,8 @@ struct PanesPart2Tests {
         #expect(map.feed(.char("g"), context: .reader, now: 0) == .pending)
         #expect(map.feed(.char("f"), context: .reader, now: 0.1) == .follow)
         #expect(map.feed(.char("-"), context: .explorer, now: 0) == .parent)
+        #expect(map.feed(.char("g"), context: .explorer, now: 1) == .pending)
+        #expect(map.feed(.char("b"), context: .explorer, now: 1.1) == .books)
     }
 
     // MARK: Link routing
@@ -326,5 +328,33 @@ struct PanesPart2Tests {
         #expect(got1.last.map { if case .remote = $0 { return true }; return false } == true)
         hub.applyExternal([e])
         #expect(got1.count == 2 && got2.count == 3)
+    }
+
+    @Test("lumi:// links round-trip through the strict parser")
+    func lumiLink() throws {
+        let vault = UUID()
+        let server = LumiOpenURL.Request.server(serverURL: "https://lumi.example.com", account: "ana", vaultID: vault, note: "plan-q3")
+        let s1 = try #require(LumiOpenURL.link(server))
+        #expect(try LumiOpenURL.parse(URL(string: s1)!) == server)
+        let local = LumiOpenURL.Request.local(path: "/Users/ana/Notes book", note: "a b/c+d.md")
+        let s2 = try #require(LumiOpenURL.link(local))
+        #expect(try LumiOpenURL.parse(URL(string: s2)!) == local)
+    }
+
+    @Test("book memory: last note and recents per book, persisted")
+    func bookMemory() {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("bm-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let m = BookMemoryStore(url: url)
+        #expect(m.lastNote(forBook: "b") == nil)
+        for p in ["a.md", "b.md", "a.md"] { m.noteOpened(p, inBook: "b") }
+        #expect(m.lastNote(forBook: "b") == "a.md")
+        #expect(m.recent(forBook: "b") == ["a.md", "b.md"])
+        for i in 0..<20 { m.noteOpened("n\(i).md", inBook: "b") }
+        #expect(m.recent(forBook: "b").count == BookMemoryStore.recentLimit)
+        m.forget("n19.md", inBook: "b")
+        let again = BookMemoryStore(url: url)
+        #expect(again.lastNote(forBook: "b") == nil && again.recent(forBook: "b").first == "n18.md")
+        #expect(again.recent(forBook: "other").isEmpty)
     }
 }
