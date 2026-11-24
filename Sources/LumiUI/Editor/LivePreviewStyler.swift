@@ -688,8 +688,8 @@ final class LivePreviewStyler {
             a[.lumiLiveLink] = LiveLinkBox(link)
             #if canImport(AppKit)
             switch link {
-            case let .external(href): a[.toolTip] = "\(href) — ⌘-click to open"
-            case let .note(href): a[.toolTip] = "\(href) — ⌘-click to open the note"
+            case let .external(href): a[.toolTip] = "\(href) — ⌘-click opens in the browser"
+            case let .note(href): a[.toolTip] = "\(href) — ⌘-click: split · ⇧⌘-click: stacked"
             case .inert: break
             }
             #endif

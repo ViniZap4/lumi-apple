@@ -94,6 +94,8 @@ struct VimTextViewBridge: NSViewRepresentable {
     var presentation: EditorPresentation = .source
     /// ⌘-click on a Live Preview link.
     var onOpenLink: ((LiveLink) -> Void)?
+    /// Pointer over / off a Live Preview link (window-content rect).
+    var onHoverLink: ((LiveLink?, CGRect) -> Void)?
 
     func makeNSView(context: Context) -> NSScrollView {
         let textView = VimAppKitTextView(usingTextLayoutManager: true)
@@ -138,6 +140,7 @@ struct VimTextViewBridge: NSViewRepresentable {
         guard let textView = scrollView.documentView as? VimAppKitTextView else { return }
         textView.updateTheme(EditorStyler(theme: theme, fontSize: fontSize))
         textView.onOpenLink = onOpenLink
+        textView.onHoverLink = onHoverLink
         textView.applyPresentation(presentation, theme: theme)
         textView.applyWrapping(lineWrapping, in: scrollView)
         textView.caretColor = NSColor(mode == .insert || !controller.vimEnabled ? theme.primary : theme.accent)
@@ -209,6 +212,72 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
     private(set) var liveOverlays: LiveWidgetOverlays?
     /// ⌘-click on a Live Preview link.
     var onOpenLink: ((LiveLink) -> Void)?
+    /// Pointer over / off a Live Preview link (hover card).
+    var onHoverLink: ((LiveLink?, CGRect) -> Void)?
+    private var liveHoverArea: NSTrackingArea?
+    private var lastHoverLinkRange: NSRange?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let liveHoverArea { removeTrackingArea(liveHoverArea) }
+        let area = NSTrackingArea(rect: .zero, options: [.activeInKeyWindow, .mouseMoved, .mouseEnteredAndExited, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        liveHoverArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        guard live != nil, let onHoverLink, let storage = textStorage, storage.length > 0 else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        let idx = characterIndexForInsertion(at: point)
+        var hit: (LiveLink, NSRange)?
+        for c in [idx, idx - 1] where c >= 0 && c < storage.length {
+            var range = NSRange()
+            if let box = storage.attribute(.lumiLiveLink, at: c, longestEffectiveRange: &range,
+                                           in: NSRange(location: 0, length: storage.length)) as? LiveLinkBox,
+               box.link != .inert, let rect = segmentRect(range), rect.insetBy(dx: -2, dy: -2).contains(point) {
+                hit = (box.link, range)
+                break
+            }
+        }
+        guard hit?.1 != lastHoverLinkRange else { return }
+        lastHoverLinkRange = hit?.1
+        if let hit, let rect = segmentRect(hit.1) {
+            onHoverLink(hit.0, windowContentRect(rect))
+        } else {
+            onHoverLink(nil, .zero)
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        if lastHoverLinkRange != nil {
+            lastHoverLinkRange = nil
+            onHoverLink?(nil, .zero)
+        }
+    }
+
+    /// First glyph-segment rect of a character range (view coordinates).
+    private func segmentRect(_ range: NSRange) -> CGRect? {
+        guard let tlm = textLayoutManager, let content = tlm.textContentManager,
+              let s = content.location(content.documentRange.location, offsetBy: range.location),
+              let e = content.location(s, offsetBy: range.length), let tr = NSTextRange(location: s, end: e) else { return nil }
+        var out: CGRect?
+        let origin = textContainerOrigin
+        tlm.enumerateTextSegments(in: tr, type: .standard, options: []) { _, frame, _, _ in
+            out = frame.offsetBy(dx: origin.x, dy: origin.y)
+            return false
+        }
+        return out
+    }
+
+    private func windowContentRect(_ rect: CGRect) -> CGRect {
+        guard let content = window?.contentView else { return rect }
+        var r = content.convert(rect, from: self)
+        if !content.isFlipped { r.origin.y = content.bounds.height - r.maxY }
+        return r
+    }
 
     /// The font the cursor overlay and line metrics fall back to.
     var editorFont: NSFont {
@@ -1072,6 +1141,7 @@ struct VimTextViewBridge: UIViewRepresentable {
     var blockCursor: Bool = true
     var presentation: EditorPresentation = .source
     var onOpenLink: ((LiveLink) -> Void)?
+    var onHoverLink: ((LiveLink?, CGRect) -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 

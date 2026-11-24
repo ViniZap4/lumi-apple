@@ -151,6 +151,14 @@ public final class VimController {
     @ObservationIgnored public var onPaneCommand: ((PaneCommand) -> Bool)?
     /// The text view became first responder (click, pane move).
     @ObservationIgnored public var onFocus: (() -> Void)?
+    /// Enter in idle normal mode on a link: the host follows it in the
+    /// current pane (SPEC-PARTE2 §3). False → Enter keeps its vim meaning.
+    @ObservationIgnored public var onFollowLink: ((LinkAt) -> Bool)?
+
+    /// The link under the cursor (`gf`, `K`, `⌃w f`).
+    public var linkUnderCursor: LinkAt? {
+        LinkRouting.linkAt(buffer.text, buffer.cursor)
+    }
     /// The split this editor sits in (set by `SplitScrollSync.attach`).
     @ObservationIgnored public internal(set) weak var split: SplitScrollSync?
     @ObservationIgnored private var mapTimer: Task<Void, Never>?
@@ -248,6 +256,10 @@ public final class VimController {
                 }
                 if moved || !passIfUnhandled { return }
             }
+        }
+        if input == .return, let onFollowLink, state.mode == .normal, EditorPaneKeys.isIdle(state),
+           let link = linkUnderCursor, onFollowLink(link) {
+            return
         }
         guard isEditable else { return }
         if let document, interceptUndo(input, document: document) { return }

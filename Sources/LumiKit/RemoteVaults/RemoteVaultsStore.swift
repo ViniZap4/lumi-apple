@@ -80,6 +80,17 @@ public final class RemoteVaultsStore {
     /// (visionOS → REST 3-way `/diff`, see `RemoteEditorState`).
     public private(set) var openSession: OpenNoteSession?
 
+    #if canImport(YSwift)
+    /// Live sessions shared by panes (SPEC-PARTE2 §3): the open note's
+    /// session and every split pane's come from here, refcounted per
+    /// vault + note, so two panes on one note share one replica.
+    @ObservationIgnored private let sessionPool = SessionPool<String, NoteSyncSession>()
+    #endif
+
+    private static func poolKey(_ vaultID: UUID, _ noteID: String) -> String {
+        vaultID.uuidString.lowercased() + "\u{0}" + noteID
+    }
+
     /// "Reconnecting in Ns…" while the live socket waits out a backoff.
     public var reconnectStatus: ReconnectStatus? { openSession?.reconnectStatus }
 
@@ -208,7 +219,7 @@ public final class RemoteVaultsStore {
             notesHasMore = false
             openNoteSnapshot = nil
             openNoteError = nil
-            destroyOpenSession()
+            destroyAllSessions()
             return
         }
         selectedVaultID = id
@@ -223,7 +234,7 @@ public final class RemoteVaultsStore {
         notesHasMore = false
         openNoteSnapshot = nil
         openNoteError = nil
-        destroyOpenSession()
+        destroyAllSessions()
         // Sequential rather than `async let` — Swift 6 typed throws don't
         // propagate through `async let` bindings, and serializing a few short
         // requests is fine for the UI flow.
@@ -354,13 +365,55 @@ public final class RemoteVaultsStore {
             return
         }
         destroyOpenSession()
-        let session = makeSession(vaultID: vaultID, noteID: noteID, user: user)
-        openSession = session
-        session.onReplicaConflict = { [weak self, weak session] conflict in
-            guard let self, let session else { return }
-            self.handleReplicaConflict(conflict, from: session, user: user)
+        openSession = acquireSession(vaultID: vaultID, noteID: noteID, user: user)
+        #endif
+    }
+
+    /// Take a reference on the shared live session of a note (a split
+    /// pane, a board / canvas view), building and starting it when no
+    /// pane holds one. Release it with `releaseSession`. nil where there
+    /// is no local CRDT.
+    public func acquireSession(vaultID: UUID, noteID: String, user: AwarenessUser?) -> OpenNoteSession? {
+        #if canImport(YSwift)
+        var made = false
+        let session = sessionPool.acquire(Self.poolKey(vaultID, noteID)) {
+            made = true
+            let session = makeSession(vaultID: vaultID, noteID: noteID, user: user)
+            session.onReplicaConflict = { [weak self, weak session] conflict in
+                guard let self, let session else { return }
+                self.handleReplicaConflict(conflict, from: session, user: user)
+            }
+            return session
         }
-        session.start()
+        if made { session.start() }
+        return session
+        #else
+        return nil
+        #endif
+    }
+
+    /// Drop a pane's reference. The last one destroys the session — after
+    /// a short grace when `defer` (a pane hand-off picks it up again).
+    public func releaseSession(_ session: OpenNoteSession, defer deferred: Bool = false) {
+        #if canImport(YSwift)
+        sessionPool.release(Self.poolKey(session.vaultID, session.noteID), session: session, defer: deferred)
+        #endif
+    }
+
+    /// The shared session of a note, if a pane holds one.
+    public func pooledSession(vaultID: UUID, noteID: String) -> OpenNoteSession? {
+        #if canImport(YSwift)
+        return sessionPool.peek(Self.poolKey(vaultID, noteID))
+        #else
+        return nil
+        #endif
+    }
+
+    /// Destroy every live session (book switch, sign out, LGPD wipe).
+    public func destroyAllSessions() {
+        openSession = nil
+        #if canImport(YSwift)
+        sessionPool.clear()
         #endif
     }
 
@@ -462,6 +515,7 @@ public final class RemoteVaultsStore {
         for summary in store.pending(account: account, vaultID: vault) {
             guard selectedVaultID == vault, replicaAccount == account, !isOffline else { return }
             if let open = openSession, open.noteID == summary.key.noteID, open.vaultID == vault { continue }
+            if sessionPool.peek(Self.poolKey(vault, summary.key.noteID)) != nil { continue }
             let session = makeSession(vaultID: vault, noteID: summary.key.noteID, user: nil)
             session.onReplicaConflict = { [weak self] conflict in self?.recordConflict(conflict) }
             session.start()
@@ -482,8 +536,16 @@ public final class RemoteVaultsStore {
     @discardableResult
     public func purgeReplicas(account: AccountKey, vaultID: UUID? = nil, reason: RecoveredNote.Reason) -> [RecoveredNote] {
         guard let store = replicaStore else { return [] }
-        if replicaAccount == account, vaultID == nil || openSession?.vaultID == vaultID {
-            destroyOpenSession()
+        if replicaAccount == account {
+            if vaultID == nil {
+                destroyAllSessions()
+            } else {
+                if openSession?.vaultID == vaultID { destroyOpenSession() }
+                #if canImport(YSwift)
+                let prefix = vaultID!.uuidString.lowercased() + "\u{0}"
+                sessionPool.clear { $0.hasPrefix(prefix) }
+                #endif
+            }
         }
         let recovered = store.purge(account: account, vaultID: vaultID, reason: reason,
                                     materialize: ReplicaText.materialize)
@@ -491,10 +553,16 @@ public final class RemoteVaultsStore {
         return recovered
     }
 
-    /// Tear down the open note's session (if any).
+    /// Let go of the open note's session: destroyed unless a split pane
+    /// still holds it (then the pane keeps editing the same replica).
     public func destroyOpenSession() {
-        openSession?.destroy()
+        guard let s = openSession else { return }
         openSession = nil
+        #if canImport(YSwift)
+        releaseSession(s)
+        #else
+        s.destroy()
+        #endif
     }
 
     /// Bump the `updatedAt` of a cached note row to now. Used after a
@@ -756,7 +824,7 @@ public final class RemoteVaultsStore {
 
     /// Wipe all state. Call on sign-out so the next sign-in starts clean.
     public func clear() {
-        destroyOpenSession()
+        destroyAllSessions()
         isOffline = false
         staleListingDate = nil
         cachedCapabilities = nil
@@ -781,3 +849,10 @@ private func isForbidden(_ error: LumiAPIError) -> Bool {
     if case let .server(status, _, _) = error, status == 403 { return true }
     return false
 }
+
+#if canImport(YSwift)
+extension NoteSyncSession: PoolableSession {
+    /// Never handed to another pane once it stopped for good.
+    public var isPoolUsable: Bool { !isDestroyed && termination == nil }
+}
+#endif

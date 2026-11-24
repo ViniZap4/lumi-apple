@@ -80,7 +80,14 @@ public enum MarkdownReading {
     public static func hintTargets(in scrollView: NSScrollView?) -> [MarkdownHintTarget] {
         controller(scrollView)?.hintTargets() ?? []
     }
+
+    /// The link at the selection (after Tab, a find or a click): its URL
+    /// and rect in window-content coordinates (top-left origin).
+    public static func selectedLink(in scrollView: NSScrollView?) -> (url: URL, rect: CGRect)? {
+        controller(scrollView)?.selectedLink().map { ($0.0, $0.1) }
+    }
     #else
+    public static func selectedLink(in scrollView: UIScrollView?) -> (url: URL, rect: CGRect)? { nil }
     public static func headingOffsets(in scrollView: UIScrollView?) -> [CGFloat] { [] }
     public static func find(_ op: FindOp, in scrollView: UIScrollView?) {
         if op == .show, let tv = scrollView as? UITextView { tv.findInteraction?.presentFindNavigator(showingReplace: false) }

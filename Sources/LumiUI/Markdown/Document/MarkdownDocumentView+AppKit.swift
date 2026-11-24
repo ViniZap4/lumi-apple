@@ -173,6 +173,8 @@ final class MarkdownDocumentController: NSObject, NSTextViewDelegate {
     private let layoutDelegate = MarkdownLayoutDelegate()
     let overlays: MarkdownAttachmentOverlays
     private var linkAction: MarkdownLinkAction = .systemDefault
+    /// Hover-preview hook (the app's hover card); nil → path tooltip.
+    var linkHover: MarkdownLinkHover?
     private var vaultRoot: URL?
     private var style: MarkdownRenderStyle?
     private weak var attachedSink: NSScrollView?
@@ -440,9 +442,59 @@ final class MarkdownDocumentController: NSObject, NSTextViewDelegate {
 
     // MARK: Tooltip
 
+    /// Text-view rect → window content coordinates, top-left origin.
+    func windowRect(_ rect: CGRect) -> CGRect {
+        guard let content = textView.window?.contentView else { return rect }
+        var r = content.convert(rect, from: textView)
+        if !content.isFlipped { r.origin.y = content.bounds.height - r.maxY }
+        return r
+    }
+
+    /// The link at the selection / caret (keyboard `K`, `gf`): its value
+    /// and window rect.
+    func selectedLink() -> (URL, CGRect)? {
+        guard let storage = textView.textStorage else { return nil }
+        let index = textView.selectedRange().location
+        for candidate in [index, index - 1] where candidate >= 0 && candidate < storage.length {
+            var range = NSRange()
+            guard let value = storage.attribute(.link, at: candidate, longestEffectiveRange: &range,
+                                                in: NSRange(location: 0, length: storage.length)) else { continue }
+            let url = (value as? URL) ?? (value as? String).flatMap { URL(string: $0) }
+            guard let url, url.scheme?.hasPrefix("lumi-") != true else { continue }
+            var rect = CGRect.zero
+            if let tlm = textView.textLayoutManager, let content = tlm.textContentManager,
+               let s = content.location(content.documentRange.location, offsetBy: range.location),
+               let e = content.location(s, offsetBy: range.length), let tr = NSTextRange(location: s, end: e) {
+                let origin = textView.textContainerOrigin
+                tlm.enumerateTextSegments(in: tr, type: .standard, options: []) { _, frame, _, _ in
+                    rect = frame.offsetBy(dx: origin.x, dy: origin.y)
+                    return false
+                }
+            }
+            return (url, windowRect(rect))
+        }
+        return nil
+    }
+
     private func hoverChanged(_ hit: MarkdownLinkHit?) {
         pendingTooltip?.cancel()
         pendingTooltip = nil
+        if let linkHover {
+            let url: URL? = hit.flatMap { h in
+                if let u = h.value as? URL { return u }
+                return (h.value as? String).flatMap { URL(string: $0) }
+            }
+            if url?.scheme?.hasPrefix("lumi-") == true {
+                _ = linkHover.handle(nil, .zero)
+            } else if let hit, let url {
+                if linkHover.handle(url, windowRect(hit.rect)) {
+                    hideTooltip()
+                    return
+                }
+            } else {
+                _ = linkHover.handle(nil, .zero)
+            }
+        }
         guard let hit, let label = LinkTooltipLabel.label(for: hit.value, vaultRoot: vaultRoot) else {
             hideTooltip()
             return
@@ -527,6 +579,7 @@ struct MarkdownDocumentView: NSViewRepresentable {
     @Environment(\.markdownVaultRoot) private var vaultRoot
     @Environment(\.markdownScrollViewSink) private var scrollSink
     @Environment(\.markdownEmbedDepth) private var embedDepth
+    @Environment(\.markdownLinkHover) private var linkHover
 
     func makeCoordinator() -> MarkdownDocumentController { MarkdownDocumentController() }
 
@@ -551,6 +604,7 @@ struct MarkdownDocumentView: NSViewRepresentable {
             linkAction: linkAction, vaultRoot: vaultRoot, embedDepth: embedDepth,
             onToggleTask: onToggleTask, sync: sync
         )
+        controller.linkHover = linkHover
         controller.attachSink(scrollSink)
     }
 }

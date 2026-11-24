@@ -32,6 +32,8 @@ public struct VimEditor: View {
     var presentation: EditorPresentation = .source
     /// ⌘-click on a Live Preview link.
     var onOpenLink: ((LiveLink) -> Void)?
+    /// Pointer over / off a Live Preview link (window-content rect).
+    var onHoverLink: ((LiveLink?, CGRect) -> Void)?
 
     @State private var controller: VimController
 
@@ -113,7 +115,8 @@ public struct VimEditor: View {
                 blockRanges: controller.visualHighlightRanges,
                 blockCursor: blockCursor,
                 presentation: presentation,
-                onOpenLink: onOpenLink
+                onOpenLink: onOpenLink,
+                onHoverLink: onHoverLink
             )
             if case let .commandLine(prefix, buffer) = controller.state.mode {
                 VimCommandLineOverlay(prefix: prefix, buffer: buffer)
@@ -171,6 +174,13 @@ public extension VimEditor {
         var copy = self
         copy.presentation = p
         copy.onOpenLink = onOpenLink
+        return copy
+    }
+
+    /// Hover over Live Preview links (the app's hover card).
+    func onHoverLink(_ handler: ((LiveLink?, CGRect) -> Void)?) -> VimEditor {
+        var copy = self
+        copy.onHoverLink = handler
         return copy
     }
 }

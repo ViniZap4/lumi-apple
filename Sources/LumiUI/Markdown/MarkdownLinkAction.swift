@@ -31,3 +31,20 @@ public extension EnvironmentValues {
         set { self[MarkdownLinkActionKey.self] = newValue }
     }
 }
+
+/// Link hover hook for rendered notes (SPEC-PARTE2 §4 hover preview).
+/// Called with the hovered link's URL and its rect in window-content
+/// coordinates (top-left origin), and with `nil` when the pointer left
+/// the link. Return `true` to take the hover (the plain path tooltip is
+/// then not shown).
+public struct MarkdownLinkHover {
+    public let handle: @MainActor (URL?, CGRect) -> Bool
+
+    public init(handle: @escaping @MainActor (URL?, CGRect) -> Bool) {
+        self.handle = handle
+    }
+}
+
+public extension EnvironmentValues {
+    @Entry var markdownLinkHover: MarkdownLinkHover? = nil
+}
