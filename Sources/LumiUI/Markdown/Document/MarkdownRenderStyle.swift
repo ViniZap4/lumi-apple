@@ -71,7 +71,7 @@ public struct MarkdownRenderStyle: Hashable, Sendable {
     /// Marker's right edge, measured from the list's indent.
     var listMarkerWidth: CGFloat { 1.25 * em }
     var quoteIndent: CGFloat { 1.1 * em + 3 }
-    var quotePadding: CGFloat { 0.05 * em }
+    var quotePadding: CGFloat { 0.3 * em }
     var calloutPaddingH: CGFloat { 1.05 * em }
     var calloutPaddingV: CGFloat { 0.78 * em }
     var codePaddingH: CGFloat { 1.1 * em }
@@ -175,12 +175,51 @@ struct MarkdownPalette {
     let codeBorder: MarkdownPlatformColor
     /// Inline code pill (text at 7% alpha).
     let inlineBackground: MarkdownPlatformColor
-    /// Link underline (primary at 38% alpha).
+    /// Link underline (link ink at 45% alpha).
     let linkLine: MarkdownPlatformColor
-    /// `==mark==` (warning at 32% alpha).
+    /// `==mark==` (warning at 24–30% alpha).
     let markBackground: MarkdownPlatformColor
-    /// Quote bar (primary 40% into the rule colour).
+    /// Quote bar (secondary, readable) and its faint tint.
     let quoteBar: MarkdownPlatformColor
+    let quoteFill: MarkdownPlatformColor
+
+    // MARK: Prose colour system (shared mapping with the web's
+    // `--md-*` tokens; DESIGN-LANGUAGE §4 "prose in colour").
+    // Every ink is pushed towards `text` in OKLab only as far as needed
+    // to reach its contrast floor on the background, so all 12 themes,
+    // light and dark, keep the hue *and* pass.
+
+    /// Heading ink per level 1…6: h1 primary, h2 secondary, h3 accent,
+    /// h4 primary/text, h5 secondary/text, h6 muted ink.
+    let headings: [MarkdownPlatformColor]
+    /// Links and wikilinks (theme accent) + their underline.
+    let link: MarkdownPlatformColor
+    /// `**bold**`: warm ink (error⊕warning, 40% into text).
+    let strong: MarkdownPlatformColor
+    /// `_italic_`: secondary, 50% into text.
+    let emphasis: MarkdownPlatformColor
+    /// `~~strike~~`: dim text with an error-tinted line.
+    let strikeText: MarkdownPlatformColor
+    let strikeLine: MarkdownPlatformColor
+    /// `==mark==` ink (the fill is `markBackground`).
+    let markText: MarkdownPlatformColor
+    /// Inline `code`: primary-tinted pill.
+    let inlineCodeText: MarkdownPlatformColor
+    let inlineCodeStroke: MarkdownPlatformColor
+    /// Bullets, ordered numbers, checkbox ring.
+    let listMarker: MarkdownPlatformColor
+    let checkBorder: MarkdownPlatformColor
+    /// `#tag` chips.
+    let tagText: MarkdownPlatformColor
+    let tagFill: MarkdownPlatformColor
+    /// Table header tint and zebra rows.
+    let tableHeader: MarkdownPlatformColor
+    let tableZebra: MarkdownPlatformColor
+    /// `---`: primary → secondary gradient.
+    let hrStart: MarkdownPlatformColor
+    let hrEnd: MarkdownPlatformColor
+    /// Footnote references and back links.
+    let footnote: MarkdownPlatformColor
 
     init(_ theme: ThemeTokens) {
         text = Self.concrete(theme.text)
@@ -200,22 +239,125 @@ struct MarkdownPalette {
         rule = Self.mix(text, background, 0.13)
         codeBackground = Self.mix(text, background, 0.04)
         codeBorder = Self.mix(text, background, 0.10)
-        inlineBackground = text.withAlphaComponent(0.07)
-        linkLine = primary.withAlphaComponent(0.38)
-        markBackground = warning.withAlphaComponent(0.32)
-        quoteBar = Self.mix(primary, rule, 0.40)
+        let t = Self.rgbv(text), bg = Self.rgbv(background)
+        func ink(_ c: RGB, _ min: Double = 4.5) -> MarkdownPlatformColor {
+            Self.platform(OKLab.readable(c, ink: t, on: bg, minimum: min))
+        }
+        let p = Self.rgbv(primary), s2 = Self.rgbv(secondary), a = Self.rgbv(accent)
+        let w = Self.rgbv(warning), e = Self.rgbv(error), inf = Self.rgbv(info)
+        func pick(_ c: [RGB], _ min: Double = 4.5) -> MarkdownPlatformColor {
+            Self.platform(OKLab.pick(c, ink: t, on: bg, minimum: min))
+        }
+        // A heading must not read as body text: when the theme's text is
+        // itself tinted like primary (tokyo-day), fall to the next hue.
+        func distinct(_ c: [RGB]) -> MarkdownPlatformColor {
+            let made = c.map { OKLab.pick([$0], ink: t, on: bg, minimum: 4.5) }
+            let tl = OKLab.lab(t)
+            let far = made.first {
+                let l = OKLab.lab($0)
+                return hypot(hypot(l.l - tl.l, l.a - tl.a), l.b - tl.b) > 0.06
+            }
+            return Self.platform(far ?? made[0])
+        }
+        headings = [
+            distinct([p, s2, a]),
+            distinct([s2, p, a]),
+            pick([a, inf, s2]),
+            ink(OKLab.mix(p, t, 0.55)),
+            ink(OKLab.mix(s2, t, 0.45)),
+            ink(OKLab.mix(t, bg, 0.62), 3),
+        ]
+        link = pick([a, inf, p, s2])
+        linkLine = link.withAlphaComponent(0.45)
+        strong = ink(OKLab.mix(OKLab.mix(e, w, 0.5), t, 0.4))
+        emphasis = ink(OKLab.mix(s2, t, 0.5))
+        strikeText = ink(OKLab.mix(t, bg, 0.62), 3)
+        strikeLine = error.withAlphaComponent(0.7)
+        // Inks that sit on a tinted pill are checked against the pill.
+        func inkOn(_ c: RGB, fill: RGB, alpha: Double) -> MarkdownPlatformColor {
+            Self.platform(OKLab.readable(c, ink: t, on: OKLab.over(fill, alpha: alpha, on: bg), minimum: 4.5))
+        }
+        let markAlpha = theme.isDark ? 0.24 : 0.30
+        markText = inkOn(OKLab.mix(w, t, 0.28), fill: w, alpha: markAlpha)
+        markBackground = warning.withAlphaComponent(markAlpha)
+        let codeAlpha = theme.isDark ? 0.13 : 0.10
+        inlineCodeText = inkOn(OKLab.mix(p, t, 0.6), fill: p, alpha: codeAlpha)
+        inlineBackground = primary.withAlphaComponent(codeAlpha)
+        inlineCodeStroke = primary.withAlphaComponent(0.22)
+        listMarker = ink(p, 3)
+        checkBorder = Self.platform(OKLab.readable(p, ink: t, on: bg, minimum: 3)).withAlphaComponent(0.75)
+        let tagAlpha = theme.isDark ? 0.14 : 0.12
+        tagText = inkOn(OKLab.pick([a, inf, s2], ink: t, on: bg, minimum: 3), fill: a, alpha: tagAlpha)
+        tagFill = accent.withAlphaComponent(tagAlpha)
+        tableHeader = primary.withAlphaComponent(theme.isDark ? 0.12 : 0.10)
+        tableZebra = text.withAlphaComponent(theme.isDark ? 0.035 : 0.04)
+        hrStart = Self.platform(OKLab.mix(p, bg, 0.7))
+        hrEnd = Self.platform(OKLab.mix(s2, bg, 0.7))
+        footnote = ink(p)
+        quoteBar = Self.platform(OKLab.readable(s2, ink: t, on: bg, minimum: 3))
+        quoteFill = secondary.withAlphaComponent(theme.isDark ? 0.07 : 0.06)
+    }
+
+    /// One palette per theme, shared (the contrast search is not free).
+    static func shared(_ theme: ThemeTokens) -> MarkdownPalette {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        if let hit = cache[theme] { return hit }
+        let made = MarkdownPalette(theme)
+        cache[theme] = made
+        return made
+    }
+
+    private nonisolated(unsafe) static var cache: [ThemeTokens: MarkdownPalette] = [:]
+    private static let cacheLock = NSLock()
+
+    func heading(_ level: Int) -> MarkdownPlatformColor { headings[max(1, min(6, level)) - 1] }
+
+    static func rgbv(_ c: MarkdownPlatformColor) -> RGB {
+        let v = rgb(c)
+        return RGB(Double(v.r), Double(v.g), Double(v.b))
+    }
+
+    static func platform(_ c: RGB) -> MarkdownPlatformColor {
+        #if canImport(AppKit)
+        return NSColor(srgbRed: c.r, green: c.g, blue: c.b, alpha: 1)
+        #else
+        return UIColor(red: c.r, green: c.g, blue: c.b, alpha: 1)
+        #endif
     }
 
     /// Callout colour per kind (web `.md-callout[data-callout]`).
     func callout(_ kind: String) -> MarkdownPlatformColor {
-        switch kind {
-        case "info", "todo": return info
-        case "tip", "success", "abstract": return accent
-        case "question", "example": return secondary
-        case "warning": return warning
-        case "danger": return error
-        case "quote": return textDim
-        default: return primary
+        switch Self.calloutFamily(kind) {
+        case .info: return info
+        case .tip: return accent
+        case .question: return secondary
+        case .warning: return warning
+        case .danger: return error
+        case .quote: return textDim
+        case .note: return primary
+        }
+    }
+
+    /// Callout title ink: the kind's colour, made readable on the page.
+    func calloutTitle(_ kind: String) -> MarkdownPlatformColor {
+        let c = Self.rgbv(MarkdownPalette.mix(callout(kind), text, 0.85))
+        return Self.platform(OKLab.readable(c, ink: Self.rgbv(text), on: Self.rgbv(background), minimum: 4.5))
+    }
+
+    enum CalloutFamily { case note, info, tip, question, warning, danger, quote }
+
+    /// Obsidian's callout aliases folded into the seven colour families
+    /// (same table as the web's `.md-callout[data-callout]`).
+    static func calloutFamily(_ kind: String) -> CalloutFamily {
+        switch kind.lowercased() {
+        case "info", "todo", "abstract", "summary", "tldr": return .info
+        case "tip", "hint", "important", "success", "check", "done": return .tip
+        case "question", "help", "faq", "example": return .question
+        case "warning", "caution", "attention": return .warning
+        case "danger", "error", "failure", "fail", "missing", "bug": return .danger
+        case "quote", "cite": return .quote
+        default: return .note
         }
     }
 

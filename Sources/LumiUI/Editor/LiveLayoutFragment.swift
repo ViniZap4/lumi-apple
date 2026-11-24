@@ -89,14 +89,20 @@ final class LiveLayoutFragment: NSTextLayoutFragment {
         case .rule:
             if !lines.isNull {
                 let y = (point.y + lines.midY).rounded(.down)
-                let r = CGRect(x: col.x, y: y, width: usableWidth, height: 1)
-                gradient(r, colors: [p.rule.withAlphaComponent(0), p.rule, p.rule, p.rule.withAlphaComponent(0)],
-                         locations: [0, 0.15, 0.85, 1], in: context)
+                let r = CGRect(x: col.x, y: y, width: usableWidth, height: 1.5)
+                gradient(r, colors: [p.hrStart.withAlphaComponent(0), p.hrStart, p.hrEnd, p.hrEnd.withAlphaComponent(0)],
+                         locations: [0, 0.2, 0.8, 1], in: context)
             }
         case .none, .widget:
             break
         }
         if let c = d.callout { drawCallout(c, lines: lines, point: col, textPoint: point, context: context) }
+        if d.quoteDepth > 0, d.callout == nil {
+            context.setFillColor(p.quoteFill.cgColor)
+            let top = lines.isNull ? 0 : max(0, lines.minY - 0.3 * p.em)
+            let bottom = lines.isNull ? h : min(h, lines.maxY + 0.3 * p.em)
+            context.fill(CGRect(x: col.x, y: point.y + top, width: usableWidth, height: bottom - top))
+        }
         if d.quoteDepth > 0 {
             context.setFillColor(p.quoteBar.cgColor)
             for k in 0..<d.quoteDepth {

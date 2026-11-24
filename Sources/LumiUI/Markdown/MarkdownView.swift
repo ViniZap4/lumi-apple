@@ -355,7 +355,7 @@ struct BlockView: View {
     private func plainHeading(level: Int, attributed: AttributedString) -> some View {
         Text(attributed)
             .font(headingFont(level))
-            .foregroundStyle(theme.text)
+            .foregroundStyle(Color(MarkdownPalette.shared(theme).heading(level)))
             .padding(.top, (level <= 2 ? 8 : 4) * scale)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -462,11 +462,11 @@ struct BlockQuoteView: View {
         .padding(.vertical, 6)
         .overlay(alignment: .leading) {
             RoundedRectangle(cornerRadius: 2)
-                .fill(theme.accent.opacity(0.6))
+                .fill(Color(MarkdownPalette.shared(theme).quoteBar))
                 .frame(width: 3)
         }
         .background(
-            theme.accent.opacity(0.04)
+            Color(MarkdownPalette.shared(theme).quoteFill)
                 .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
         )
     }
@@ -544,13 +544,13 @@ private struct ListRowView: View {
         if let cb = item.checkbox {
             Image(systemName: cb == .checked ? "checkmark.square.fill" : "square")
                 .font(.body)
-                .foregroundStyle(cb == .checked ? theme.accent : theme.textDim)
+                .foregroundStyle(cb == .checked ? theme.primary : Color(MarkdownPalette.shared(theme).checkBorder))
                 .frame(minWidth: 18, alignment: .trailing)
                 .pointingHandOnHover()
         } else {
             Text(textMarker)
                 .font(.body.monospacedDigit())
-                .foregroundStyle(theme.textDim)
+                .foregroundStyle(Color(MarkdownPalette.shared(theme).listMarker))
                 .frame(minWidth: 18, alignment: .trailing)
         }
     }

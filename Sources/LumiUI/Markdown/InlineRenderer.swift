@@ -45,28 +45,33 @@ public enum InlineRenderer {
         case let .strong(children):
             var attr = render(children, theme: theme)
             attr.inlinePresentationIntent = .stronglyEmphasized
+            tint(&attr, MarkdownPalette.shared(theme).strong)
             return attr
 
         case let .emphasis(children):
             var attr = render(children, theme: theme)
             attr.inlinePresentationIntent = .emphasized
+            tint(&attr, MarkdownPalette.shared(theme).emphasis)
             return attr
 
         case let .strikethrough(children):
             var attr = render(children, theme: theme)
             attr.inlinePresentationIntent = .strikethrough
+            attr.strikethroughStyle = Text.LineStyle(pattern: .solid, color: Color(MarkdownPalette.shared(theme).strikeLine))
+            tint(&attr, MarkdownPalette.shared(theme).strikeText)
             return attr
 
         case let .code(s):
+            let p = MarkdownPalette.shared(theme)
             var attr = AttributedString(s)
             attr.inlinePresentationIntent = .code
-            attr.backgroundColor = theme.overlayBackground
-            attr.foregroundColor = theme.accent
+            attr.backgroundColor = Color(p.inlineBackground)
+            attr.foregroundColor = Color(p.inlineCodeText)
             return attr
 
         case let .link(destination, children):
             var attr = render(children, theme: theme)
-            attr.foregroundColor = theme.primary
+            attr.foregroundColor = Color(MarkdownPalette.shared(theme).link)
             attr.underlineStyle = .single
             if let url = URL(string: destination) {
                 attr.link = url
@@ -101,7 +106,9 @@ public enum InlineRenderer {
 
         case let .mark(children):
             var attr = render(children, theme: theme)
-            attr.backgroundColor = theme.warning.opacity(0.32)
+            let p = MarkdownPalette.shared(theme)
+            attr.backgroundColor = Color(p.markBackground)
+            tint(&attr, p.markText)
             return attr
 
         case let .kbd(s):
@@ -113,8 +120,17 @@ public enum InlineRenderer {
         case let .footnoteRef(_, number):
             var attr = AttributedString("\(number)")
             attr.baselineOffset = 6
-            attr.foregroundColor = theme.primary
+            attr.foregroundColor = Color(MarkdownPalette.shared(theme).footnote)
             return attr
+        }
+    }
+
+    /// Colour the runs that have no colour of their own (a link inside
+    /// bold stays a link).
+    private static func tint(_ attr: inout AttributedString, _ color: MarkdownPlatformColor) {
+        let c = Color(color)
+        for run in attr.runs where run.foregroundColor == nil {
+            attr[run.range].foregroundColor = c
         }
     }
 

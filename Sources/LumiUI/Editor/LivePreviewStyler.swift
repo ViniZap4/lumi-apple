@@ -132,6 +132,9 @@ final class LiveLineDecoration: NSObject {
         var panelBorder: MarkdownPlatformColor
         var rule: MarkdownPlatformColor
         var quoteBar: MarkdownPlatformColor
+        var quoteFill: MarkdownPlatformColor
+        var hrStart: MarkdownPlatformColor
+        var hrEnd: MarkdownPlatformColor
         var calloutColor: MarkdownPlatformColor
         var calloutTitle: MarkdownPlatformColor
         var em: CGFloat
@@ -207,7 +210,7 @@ final class LivePreviewStyler {
         self.options = options
         self.widgetsEnabled = widgetsEnabled
         self.style = MarkdownRenderStyle(theme: theme, scale: options.scale, fontFamily: options.fontFamily, tasksInteractive: true)
-        self.palette = MarkdownPalette(theme)
+        self.palette = MarkdownPalette.shared(theme)
         self.fonts = MarkdownFontBook(family: options.fontFamily)
     }
 
@@ -465,7 +468,7 @@ final class LivePreviewStyler {
             ctx.size = size
             ctx.weight = level == 1 ? .bold : .semibold
             ctx.tracking = MarkdownRenderStyle.headingTracking(level) * size
-            ctx.color = level == 5 ? palette.dim : level == 6 ? palette.marker : palette.text
+            ctx.color = palette.heading(level)
             ps.lineSpacing = lineGap(fonts.font(size: size, weight: .semibold), leading: MarkdownRenderStyle.headingLeading(level))
             ps.paragraphSpacingBefore = i == 0 ? 0 : max(0, (level <= 2 ? 0.55 : 0.45) * size)
             ps.paragraphSpacing = 0.1 * size
@@ -536,7 +539,7 @@ final class LivePreviewStyler {
                 if c.isTitle {
                     ctx.weight = .semibold
                     ctx.size = 0.95 * style.em
-                    ctx.color = MarkdownPalette.mix(palette.callout(c.kind), palette.text, 0.72)
+                    ctx.color = palette.calloutTitle(c.kind)
                     indent += 1.45 * ctx.size
                 }
                 calloutDeco = .init(kind: c.kind, label: c.rawKind.prefix(1).uppercased() + c.rawKind.dropFirst(),
@@ -558,8 +561,10 @@ final class LivePreviewStyler {
             if plan.drawsMarker {
                 listMarker = item.taskOffset != nil
                     ? LiveMarkerBox(.task(checked: item.checked),
-                                    color: palette.marker, accent: palette.primary, border: palette.marker)
-                    : LiveMarkerBox(.bullet(level: item.level), color: palette.marker, accent: palette.primary, border: palette.marker)
+                                    color: palette.listMarker, accent: palette.primary, border: palette.checkBorder)
+                    : LiveMarkerBox(.bullet(level: item.level),
+                                    color: item.level == 0 ? palette.listMarker : MarkdownPalette.mix(palette.listMarker, palette.background, 0.7),
+                                    accent: palette.primary, border: palette.marker)
             }
         } else {
             ps.headIndent = indent
@@ -666,23 +671,29 @@ final class LivePreviewStyler {
         }
         var a: [NSAttributedString.Key: Any] = [.font: font(for: f, ctx: ctx)]
         if f.marker { a[.foregroundColor] = palette.marker }
+        // Body ink only: emphasis inside a heading keeps the heading ramp.
+        if !f.marker, ctx.color == palette.text {
+            if f.strong { a[.foregroundColor] = palette.strong } else if f.em { a[.foregroundColor] = palette.emphasis }
+            if f.mark { a[.foregroundColor] = palette.markText }
+        }
         if f.strike {
             a[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
-            a[.foregroundColor] = palette.dim
+            a[.strikethroughColor] = palette.strikeLine
+            a[.foregroundColor] = palette.strikeText
         }
         if f.code {
-            a[.foregroundColor] = f.marker ? palette.marker : palette.text
+            a[.foregroundColor] = f.marker ? palette.marker : palette.inlineCodeText
             if !f.marker {
-                a[.lumiPill] = MarkdownPill(kind: .code, fill: palette.inlineBackground)
+                a[.lumiPill] = MarkdownPill(kind: .code, fill: palette.inlineBackground, stroke: palette.inlineCodeStroke)
             }
         }
         if f.mark, !f.marker { a[.lumiPill] = MarkdownPill(kind: .mark, fill: palette.markBackground) }
         if f.footnote {
-            a[.foregroundColor] = palette.primary
+            a[.foregroundColor] = palette.footnote
             a[.baselineOffset] = 0.42 * ctx.size
         }
         if let link = f.link, !f.marker {
-            a[.foregroundColor] = palette.primary
+            a[.foregroundColor] = palette.link
             a[.underlineStyle] = link == .inert ? 0 : NSUnderlineStyle.single.rawValue
             a[.underlineColor] = palette.linkLine
             a[.lumiLiveLink] = LiveLinkBox(link)
@@ -736,8 +747,9 @@ final class LivePreviewStyler {
     private func colors(calloutKind: String?) -> LiveLineDecoration.Colors {
         let c = calloutKind.map { palette.callout($0) } ?? palette.primary
         return .init(panel: palette.text.withAlphaComponent(0.045), panelBorder: palette.codeBorder, rule: palette.rule,
-                     quoteBar: palette.quoteBar, calloutColor: c,
-                     calloutTitle: MarkdownPalette.mix(c, palette.text, 0.72),
+                     quoteBar: palette.quoteBar, quoteFill: palette.quoteFill,
+                     hrStart: palette.hrStart, hrEnd: palette.hrEnd, calloutColor: c,
+                     calloutTitle: calloutKind.map { palette.calloutTitle($0) } ?? palette.heading(1),
                      em: style.em, quoteIndent: style.quoteIndent, calloutPadH: style.calloutPaddingH,
                      calloutPadV: style.calloutPaddingV, codePadV: style.codePaddingV)
     }

@@ -111,8 +111,10 @@ final class MarkdownLayoutFragment: NSTextLayoutFragment {
                 let line = CGRect(x: r.minX, y: y, width: r.width, height: 1)
                 if deco.padding > 0 {
                     // `hr`: fades in and out at the ends.
-                    drawGradient(line, colors: [deco.fill.withAlphaComponent(0), deco.fill, deco.fill, deco.fill.withAlphaComponent(0)],
-                                 locations: [0, 0.15, 0.85, 1], in: context)
+                    // `hr`: primary → secondary, fading in and out at the ends.
+                    let band = CGRect(x: line.minX, y: line.minY, width: line.width, height: 1.5)
+                    drawGradient(band, colors: [deco.fill.withAlphaComponent(0), deco.fill, deco.stroke, deco.stroke.withAlphaComponent(0)],
+                                 locations: [0, 0.2, 0.8, 1], in: context)
                 } else {
                     context.setFillColor(deco.fill.cgColor)
                     context.fill(line)
@@ -167,6 +169,10 @@ final class MarkdownLayoutFragment: NSTextLayoutFragment {
     }
 
     private func drawQuote(_ r: CGRect, deco: MarkdownDecoration, in context: CGContext) {
+        // Faint tint to the right of the bar (square on the bar side,
+        // rounded on the far side: an aside, not a box).
+        context.setFillColor(deco.fill.cgColor)
+        context.fill(CGRect(x: r.minX, y: r.minY, width: r.width, height: r.height))
         context.setFillColor(deco.stroke.cgColor)
         context.fill(CGRect(x: r.minX, y: r.minY, width: 3, height: r.height))
     }
@@ -273,6 +279,7 @@ final class MarkdownLayoutFragment: NSTextLayoutFragment {
                 case .code: padX = 0.4 * size; padY = 0.16 * size
                 case .kbd: padX = 0.45 * size; padY = 0.2 * size
                 case .mark: padX = 0.12 * size; padY = 0.04 * size
+                case .tag: padX = 0.42 * size; padY = 0.08 * size
                 }
                 var offset: CGFloat = 0
                 if let bo = attributed.attribute(.baselineOffset, at: sub.location, effectiveRange: nil) as? CGFloat { offset = bo }
@@ -280,7 +287,7 @@ final class MarkdownLayoutFragment: NSTextLayoutFragment {
                                   y: baseline - offset - ascender - padY,
                                   width: (x1 - x0) + 2 * padX,
                                   height: ascender - descender + 2 * padY)
-                let radius: CGFloat = pill.kind == .mark ? 3 : 5
+                let radius: CGFloat = pill.kind == .mark ? 3 : pill.kind == .tag ? rect.height / 2 : 5
                 context.addPath(CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil))
                 context.setFillColor(pill.fill.cgColor)
                 context.fillPath()
