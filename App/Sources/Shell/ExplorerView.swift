@@ -16,7 +16,8 @@ struct ExplorerColumns: View {
     var body: some View {
         VStack(spacing: 0) {
             GeometryReader { geo in
-                let showPreview = appState.preferences.explorerShowPreview
+                // A narrow sheet keeps parent | current; the preview needs room.
+                let showPreview = appState.preferences.explorerShowPreview && geo.size.width >= 680
                 let parentW = max(150, min(240, geo.size.width * 0.2))
                 let currentW = showPreview ? max(220, min(360, geo.size.width * 0.3)) : geo.size.width - parentW
                 HStack(spacing: 0) {

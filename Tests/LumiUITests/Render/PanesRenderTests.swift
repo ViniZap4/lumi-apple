@@ -203,7 +203,7 @@ struct PanesRenderTests {
         }
     }
 
-    static func explorerColumns(_ theme: LumiTheme) -> some View {
+    static func explorerColumns(_ theme: LumiTheme, preview: Bool = true) -> some View {
         let parent: [(String, Bool, Int)] = [("archive", true, 12), ("journal", true, 41), ("plans", true, 6), ("inbox.md", false, 0)]
         let current: [(String, Bool, Int)] = [("drafts", true, 3), ("q3", false, 0), ("routing", false, 0), ("hover-cards", false, 0),
                                               ("kanban", false, 0), ("canvas ideas", false, 0)]
@@ -225,10 +225,13 @@ struct PanesRenderTests {
                 Spacer()
             }
             .padding(.vertical, 4)
-            .frame(width: 300)
-            Hairline(vertical: true)
-            reader(routing, title: "Routing notes")
-                .environment(\.markdownLite, true)
+            .frame(width: preview ? 300 : nil)
+            .frame(maxWidth: preview ? nil : .infinity)
+            if preview {
+                Hairline(vertical: true)
+                reader(routing, title: "Routing notes")
+                    .environment(\.markdownLite, true)
+            }
         }
     }
 
@@ -261,7 +264,7 @@ struct PanesRenderTests {
         let view = ZStack {
             Self.reader(Self.plan, title: "Q3 plan")
             FloatingPanel(title: "Work", path: "/plans", hints: [("esc", "close")], compact: true, onDismiss: {}) {
-                Self.explorerColumns(theme)
+                Self.explorerColumns(theme, preview: false)
             } footer: { EmptyView() }
         }
         try Self.render(view, size: CGSize(width: 640, height: 720), theme: theme, name: "floating-explorer-narrow-dark")
