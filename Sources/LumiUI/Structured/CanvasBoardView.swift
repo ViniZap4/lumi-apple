@@ -7,7 +7,8 @@ import AppKit
 /// JSON Canvas view (SPEC-PARTE2 §6) over a `CanvasBoardModel`.
 ///
 /// Infinite board: pan by drag on empty space / space+drag / hjkl /
-/// arrows / trackpad scroll; zoom by pinch, ⌘-scroll, `+`/`-`, `0` fit.
+/// arrows / trackpad scroll; zoom by pinch, ⌘-scroll, `+ = zi ⌘+` /
+/// `_ zo ⌘-`, `0 zf` fit (`-` is the floating explorer, SPEC-PARTE2 §5b).
 /// Nodes are cards (text → compact prose, file → note preview, link → URL
 /// card without fetching, group → labelled frame); edges are curved with
 /// arrows, labels and colors. Node content is laid out at world size and
@@ -289,12 +290,12 @@ public struct CanvasBoardView: View {
             Spacer(minLength: 8)
             if model.hasSelection && model.isEditable { palette }
             HStack(spacing: 2) {
-                iconButton("minus", help: "Zoom out (-)") { model.zoom(by: 1 / CanvasGeometry.zoomStep) }
+                iconButton("minus", help: "Zoom out (_ zo ⌘-)") { model.zoom(by: 1 / CanvasGeometry.zoomStep) }
                 Text("\(Int((v.zoom * 100).rounded()))%")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(theme.textDim)
                     .frame(width: 42)
-                iconButton("plus", help: "Zoom in (+)") { model.zoom(by: CanvasGeometry.zoomStep) }
+                iconButton("plus", help: "Zoom in (+ = zi ⌘+)") { model.zoom(by: CanvasGeometry.zoomStep) }
                 iconButton("arrow.up.left.and.arrow.down.right", help: "Fit (0)") { model.fitAll() }
             }
             if let onSource { ViewToggle(selection: "Canvas", onSource: onSource) }

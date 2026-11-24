@@ -36,6 +36,14 @@ extension AppState {
         switch ctx {
         case .explorer, .reader, .preview, .sidebar, .home, .hover, .books:
             var items = CommandLegend.shellItems(ctx, pending: shellPending, pane: ctx == .sidebar ? nil : paneLegendItem)
+            // A focused canvas / board: its own keys first (`-` stays the
+            // explorer; zoom is + = zi / _ zo / 0 zf).
+            if ctx == .reader, shellPending.isEmpty, !paneView(focusedLeaf).isEditing, structuredKeySinks[focusedLeaf] != nil {
+                let canvas = panePath(focusedLeaf).map(NoteKind.isCanvasPath) ?? false
+                let extra = canvas ? CommandLegend.canvasItems : CommandLegend.boardItems
+                items.removeAll { item in extra.contains { $0.keys == item.keys } }
+                items.insert(contentsOf: extra, at: 0)
+            }
             if isSplit, ctx == .reader || ctx == .preview, shellPending.isEmpty {
                 items.insert(zoomLegendItem, at: min(items.count, 8))
             }

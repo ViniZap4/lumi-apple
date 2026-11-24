@@ -190,4 +190,51 @@ struct StructuredMiniTests {
         #expect(names == ["test · note", "test · canvas", "plan", "Test · board"])
         #expect(NoteKind.disambiguated([("a", .markdown), ("a", .markdown)]) == ["a", "a"])
     }
+
+    // MARK: - `-` always opens the explorer (SPEC-PARTE2 §5b)
+
+    @Test("a focused canvas leaves `-` to the shell, in Reading and Edit, selected or not")
+    @MainActor
+    func canvasLeavesMinus() throws {
+        let m = CanvasBoardModel(doc: CountingText(try Fixtures.text("canvas/obsidian.canvas")))
+        for reading in [true, false] {
+            m.readOnly = reading
+            for sel in [[], [m.nodes[0].id]] {
+                m.select(sel)
+                let before = m.viewport
+                #expect(m.handleKey(StructuredKey("-")) == false, "reading=\(reading) sel=\(sel.count)")
+                #expect(m.viewport == before, "- must not zoom")
+                #expect(StructuredModeKeys.before(StructuredKey("-"), reading: reading) == nil)
+                #expect(StructuredModeKeys.after(StructuredKey("-"), reading: reading, handled: false) == nil)
+            }
+        }
+        // …while `_` and `zo` zoom out, `+` and `zi` zoom in.
+        m.readOnly = true
+        let z0 = m.viewport.zoom
+        #expect(m.handleKey(StructuredKey("+")))
+        #expect(m.viewport.zoom > z0)
+        #expect(m.handleKey(StructuredKey("z")))
+        #expect(m.handleKey(StructuredKey("o")))
+        #expect(m.handleKey(StructuredKey("_")))
+        #expect(m.viewport.zoom < z0 * 1.01)
+    }
+
+    @Test("a focused board leaves `-` to the shell too")
+    @MainActor
+    func boardLeavesMinus() throws {
+        let m = KanbanBoardModel(doc: CountingText(try Fixtures.text("kanban/basic.md")))
+        for reading in [true, false] {
+            m.readOnly = reading
+            #expect(m.handleKey(StructuredKey("-")) == false, "reading=\(reading)")
+        }
+    }
+
+    @Test("the shell maps `-` to the explorer in the contexts a structured note sits in")
+    @MainActor
+    func shellMinusOpensExplorer() {
+        for ctx in [ShellKeymap.Context.reader, .preview] {
+            var map = ShellKeymap()
+            #expect(map.feed(.char("-"), context: ctx, now: 0) == .explore)
+        }
+    }
 }

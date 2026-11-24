@@ -418,3 +418,23 @@ public enum CommandLegend {
         return rhs.count > 14 ? String(rhs.prefix(13)) + "…" : rhs
     }
 }
+
+public extension CommandLegend {
+    /// Canvas keys (SPEC-PARTE2 §5b–6): `-` is the explorer everywhere;
+    /// zoom lives on `+ = zi ⌘+`, `_ zo ⌘-`, fit on `0 zf`.
+    static let canvasItems: [LegendItem] = [
+        LegendItem("-", "explorer", .keys("-"), tip: "The floating explorer — `-` opens it everywhere, a canvas or board too"),
+        LegendItem("+ = zi", "zoom in", .keys("+"), tip: "Zoom in: + = zi ⌘+ (pinch, ⌘-scroll)"),
+        LegendItem("_ zo", "zoom out", .keys("_"), tip: "Zoom out: _ zo ⌘- (pinch, ⌘-scroll)"),
+        LegendItem("0 zf", "fit", .keys("0"), tip: "Fit every node"),
+        LegendItem("Tab", "next node", .keys("Tab")),
+        LegendItem("hjkl", "pan"),
+    ]
+
+    /// Board keys in Reading / Edit: `-` is the explorer here too.
+    static let boardItems: [LegendItem] = [
+        LegendItem("-", "explorer", .keys("-"), tip: "The floating explorer — `-` opens it everywhere, a board too"),
+        LegendItem("hjkl", "card / column"),
+        LegendItem("HJKL", "move card"),
+    ]
+}

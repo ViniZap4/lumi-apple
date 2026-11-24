@@ -297,8 +297,37 @@ struct CanvasKeysTests {
         #expect(keys.feed(k("L"), hasSelection: true) == .nudge(dx: 20, dy: 0))
         #expect(keys.feed(k("ArrowUp", shift: true), hasSelection: true) == .nudge(dx: 0, dy: -20))
         #expect(keys.feed(k("+"), hasSelection: false) == .zoom(factor: 1.2))
-        if case .zoom? = keys.feed(k("-"), hasSelection: false) {} else { Issue.record("- zooms") }
+        #expect(keys.feed(k("-"), hasSelection: false) == nil, "- is the explorer (SPEC-PARTE2 §5b)")
         #expect(keys.feed(k("0"), hasSelection: false) == .fit)
+    }
+
+    @Test("§5b: zoom on + = zi ⌘+ / _ zo ⌘- / 0 zf; - is never taken")
+    func zoomKeys() {
+        var keys = CanvasKeys()
+        let zin = CanvasKeyAction.zoom(factor: CanvasKeys.zoomStep)
+        let zout = CanvasKeyAction.zoom(factor: 1 / CanvasKeys.zoomStep)
+        #expect(keys.feed(k("+"), hasSelection: false) == zin)
+        #expect(keys.feed(k("="), hasSelection: true) == zin)
+        #expect(keys.feed(k("_"), hasSelection: false) == zout)
+        #expect(keys.feed(k("z"), hasSelection: false) == nil)
+        #expect(keys.pending == "z")
+        #expect(keys.feed(k("i"), hasSelection: false) == zin)
+        _ = keys.feed(k("z"), hasSelection: false)
+        #expect(keys.feed(k("o"), hasSelection: false) == zout)
+        _ = keys.feed(k("z"), hasSelection: false)
+        #expect(keys.feed(k("f"), hasSelection: false) == .fit)
+        #expect(keys.feed(k("0"), hasSelection: false) == .fit)
+        #expect(keys.feed(k("+", meta: true), hasSelection: false) == zin)
+        #expect(keys.feed(k("=", meta: true), hasSelection: false) == zin)
+        #expect(keys.feed(k("-", meta: true), hasSelection: false) == zout)
+        // Plain `-`, with or without a selection, after any prefix: never.
+        for prefix in [nil, "g", "z", "c"] as [String?] {
+            for sel in [false, true] {
+                var ks = CanvasKeys()
+                if let prefix { _ = ks.feed(k(prefix), hasSelection: sel) }
+                #expect(ks.feed(k("-"), hasSelection: sel) == nil)
+            }
+        }
     }
 
     @Test("creates, deletes, colors")
