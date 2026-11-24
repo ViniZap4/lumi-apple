@@ -533,6 +533,9 @@ public enum VimEngine {
         case let .saveQuit(save):
             fx = save ? .saveAndClose(force: false) : .close(force: true)
 
+        case let .host(command):
+            fx = .host(command)
+
         case .fileInfo:
             let name = st.fileName.map { "\"\($0)\"" } ?? "[No Name]"
             let pct = doc.lineCount > 0 ? (line + 1) * 100 / doc.lineCount : 0

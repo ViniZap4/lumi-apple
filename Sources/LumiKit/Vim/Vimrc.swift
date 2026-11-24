@@ -548,6 +548,7 @@ public extension VimState {
     /// the same keys: `<leader>p` toggles the split preview.
     static let defaultLeaderMaps: [VimrcMap] = [
         VimrcMap(mode: .normal, lhs: "p", rhs: ":preview split<CR>", noremap: true, line: 0, leader: true),
+        VimrcMap(mode: .normal, lhs: "e", rhs: ":explore<CR>", noremap: true, line: 0, leader: true),
     ]
 
     mutating func addDefaultLeaderMaps() {

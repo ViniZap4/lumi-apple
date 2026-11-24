@@ -81,6 +81,12 @@ public enum ShellAction: Sendable, Equatable {
     case nextHeading     // } ]]
     case prevHeading     // { [[
     case find            // / (reader, preview)
+    /// `-` in the reader / preview, `<leader>e`: the floating explorer.
+    case explore         // -
+    /// `K`: hover card for the focused link.
+    case hover           // K
+    /// `gf`: follow the focused link in the current pane.
+    case follow          // gf
     /// First key of a chord (`g`, `z`) or a count digit: consumed, no-op.
     case pending
 }
@@ -189,6 +195,7 @@ public struct ShellKeymap: Sendable {
                     case "g": count = nil; return .top
                     case "h": count = nil; return .home
                     case "e": count = nil; return .bottom
+                    case "f" where context == .reader || context == .preview: count = nil; return .follow
                     default: break
                     }
                 } else if p == "[" || p == "]" {
@@ -225,6 +232,8 @@ public struct ShellKeymap: Sendable {
         case "j": return .move(takeCount())
         case "k": return .move(-takeCount())
         case "G": count = nil; return .bottom
+        case "-" where context == .reader || context == .preview: count = nil; return .explore
+        case "K" where context == .reader || context == .preview: count = nil; return .hover
         case "h", "-": count = nil; return .parent
         case "l": count = nil; return .open
         case "H": count = nil; return .historyBack
@@ -315,21 +324,22 @@ public struct ShellKeymap: Sendable {
             case .right: return .move(.right)
             case .up: return .move(.up)
             case .down: return .move(.down)
+            case .enter: return .follow(.vsplit)
             default: return nil
             }
         }
         guard let s = k.chars, s.count == 1 else { return nil }
         let c = k.control ? s.lowercased() : s
         if let d = direction(c) { return .move(d) }
-        switch c {
-        case "w": return .next
-        case "W": return .previous
-        case "p": return .last
-        case "q", "c": return .close
-        case "o": return .only
-        case "=": return .equalize
-        default: return nil
+        if k.control {
+            switch c {
+            case "v": return .split(.vertical)
+            case "s": return .split(.horizontal)
+            case "f": return .follow(.vsplit)
+            default: break
+            }
         }
+        return c.first.flatMap(PaneCommand.windowLetter)
     }
 
     private mutating func takeCount() -> Int {

@@ -68,6 +68,8 @@ enum NormalAction: Hashable {
     case scrollCursor(VimScrollPosition, firstNonBlank: Bool)
     case saveQuit(save: Bool)
     case fileInfo
+    /// A key the host owns (`gf` follow, `K` hover, `-` explore).
+    case host(String)
     case escape
     case nop
     // Visual mode only.
@@ -293,6 +295,13 @@ extension VimEngine {
             }
         }
 
+        // Host keys (SPEC-PARTE2 §2, §4): a bare `-` opens the floating
+        // explorer (`3-` stays the motion), `K` the link hover card.
+        if !visual, count1 == nil, register == nil, i + 1 == n, let c = k.char {
+            if c == "-" { return done(.host("explore")) }
+            if c == "K" { return done(.host("hover")) }
+        }
+
         switch parseMotion(keys, i) {
         case let .ok(m, end): return end == n ? done(.motion(m)) : .invalid
         case let .need(a): return .incomplete(a, nil)
@@ -382,6 +391,7 @@ extension VimEngine {
             case "i": return done(.insert(.gi))
             case "I": return done(.insert(.gI))
             case "&": return done(.repeatSubstitute(allLines: true))
+            case "f" where !visual: return done(.host("follow"))
             default: return .invalid
             }
         case "z":

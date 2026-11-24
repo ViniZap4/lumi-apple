@@ -90,7 +90,7 @@ struct VimMotionTableTests {
         .init("2G", "|a\n  b\nc", "a\n  |b\nc"),
         .init("gg", "a\nb\n|c", "|a\nb\nc"),
         .init("+", "|a\n  b", "a\n  |b"),
-        .init("-", "  a\n|b", "  |a\nb"),
+        .init("1-", "  a\n|b", "  |a\nb"),
         .init("<CR>", "|a\n  b", "a\n  |b"),
         .init("fc", "|abcabc", "ab|cabc"),
         .init("2fc", "|abcabc", "abcab|c"),
@@ -630,6 +630,20 @@ struct VimExTableTests {
         #expect(eff("ZZ") == .saveAndClose(force: false))
         #expect(eff("ZQ") == .close(force: true))
         #expect(eff("zz") == .scrollCursor(.center))
+        // Panes and links (SPEC-PARTE2 §2–§4): the host owns these.
+        #expect(eff("gf") == .host("follow"))
+        #expect(eff("K") == .host("hover"))
+        #expect(eff("-") == .host("explore"))
+        #expect(eff(":vsplit<CR>") == .host("vsplit"))
+        #expect(eff(":vs plan<CR>") == .host("vsplit plan"))
+        #expect(eff(":sp<CR>") == .host("split"))
+        #expect(eff(":only<CR>") == .host("only"))
+        #expect(eff(":close<CR>") == .host("close"))
+        #expect(eff(":Ex<CR>") == .host("explore"))
+        #expect(eff(":explore<CR>") == .host("explore"))
+        #expect(eff(":follow<CR>") == .host("follow"))
+        #expect(eff(":hover<CR>") == .host("hover"))
+        #expect(eff(":q<CR>") == .close(force: false))
     }
 
     @Test(":s over many lines is one ranged edit per match (CRDT stays minimal)")

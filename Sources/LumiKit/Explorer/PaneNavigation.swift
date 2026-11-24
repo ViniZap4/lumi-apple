@@ -33,6 +33,23 @@ public enum PaneCommand: Sendable, Hashable {
     case only
     /// `⌃w =`: equal sizes.
     case equalize
+    /// `⌃w v` (vertical, side by side) / `⌃w s` (horizontal, stacked):
+    /// split the focused pane on the same note.
+    case split(SplitAxis)
+    /// `⌃w f` / `⌃w Enter` (vertical split), `⌃w F` (horizontal): follow
+    /// the link under the cursor / the focused link into a new pane.
+    case follow(LinkOpenWhere)
+    /// `⌃w >` `<` (`.vertical`: wider / narrower), `⌃w +` `-`
+    /// (`.horizontal`: taller / shorter). `steps` is ±1 (× a count).
+    case resize(SplitAxis, Int)
+
+    /// Commands that change the layout rather than move focus.
+    public var isLayout: Bool {
+        switch self {
+        case .move, .next, .previous, .last: return false
+        default: return true
+        }
+    }
 }
 
 /// What is on screen, as far as pane focus is concerned.
@@ -119,7 +136,7 @@ public enum PaneGraph {
             guard visible.count > 1, let i = visible.firstIndex(of: from) else { return nil }
             let step = command == .next ? 1 : -1
             return PaneTarget(visible[(i + step + visible.count) % visible.count])
-        case .close, .only, .equalize:
+        case .close, .only, .equalize, .split, .follow, .resize:
             // Layout commands: the pane tree handles them, not focus.
             return nil
         case .last:
@@ -246,17 +263,10 @@ public struct EditorPaneKeys: Sendable {
             case .down: return .move(.down)
             }
         case .backspace: return .move(.left)  // ⌃w ⌃h arrives as <BS> on some layouts
+        case .return: return .follow(.vsplit)
         case let .character(c):
             if let d = direction(c) { return .move(d) }
-            switch c {
-            case "w": return .next
-            case "W": return .previous
-            case "p": return .last
-            case "q", "c": return .close
-            case "o": return .only
-            case "=": return .equalize
-            default: return nil
-            }
+            return PaneCommand.windowLetter(c)
         default:
             guard let c = input.ctrl else { return nil }
             if let d = direction(c) { return .move(d) }
@@ -265,8 +275,35 @@ public struct EditorPaneKeys: Sendable {
             case "p": return .last
             case "q", "c": return .close
             case "o": return .only
+            case "v": return .split(.vertical)
+            case "s": return .split(.horizontal)
+            case "f": return .follow(.vsplit)
             default: return nil
             }
+        }
+    }
+}
+
+extension PaneCommand {
+    /// A printed key after `⌃w` (case matters: `f` vs `F`). Shared by the
+    /// shell keymap and the editor (web `winCommand`).
+    public static func windowLetter(_ c: Character) -> PaneCommand? {
+        switch c {
+        case "w": return .next
+        case "W": return .previous
+        case "p": return .last
+        case "q", "c": return .close
+        case "o": return .only
+        case "=": return .equalize
+        case "v": return .split(.vertical)
+        case "s", "S": return .split(.horizontal)
+        case "f": return .follow(.vsplit)
+        case "F": return .follow(.hsplit)
+        case ">": return .resize(.vertical, 1)
+        case "<": return .resize(.vertical, -1)
+        case "+": return .resize(.horizontal, 1)
+        case "-": return .resize(.horizontal, -1)
+        default: return nil
         }
     }
 }

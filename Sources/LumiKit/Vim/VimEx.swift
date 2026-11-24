@@ -87,8 +87,10 @@ extension VimEngine {
             fx = .save(force: bang)
         case "wq", "x", "xi", "xit", "exi", "exit", "wqa", "wqall", "xa", "xall":
             fx = .saveAndClose(force: bang)
-        case "q", "quit", "qa", "qall", "quita", "quitall", "clo", "close":
+        case "q", "quit", "qa", "qall", "quita", "quitall":
             fx = .close(force: bang)
+        case "clo", "clos", "close":
+            fx = .host(bang ? "close!" : "close")
         case "preview", "prev":
             fx = .host(args.isEmpty ? "preview" : "preview " + args)
         case "settings":
@@ -97,6 +99,19 @@ extension VimEngine {
             fx = .host("live")
         case "source":
             fx = .host("source")
+        // Panes (SPEC-PARTE2 §3): the host owns the window layout.
+        case "vs", "vsp", "vspl", "vspli", "vsplit":
+            fx = .host(args.isEmpty ? "vsplit" : "vsplit " + args)
+        case "sp", "spl", "spli", "split":
+            fx = .host(args.isEmpty ? "split" : "split " + args)
+        case "on", "onl", "only":
+            fx = .host("only")
+        case "Ex", "Exp", "Explore", "exp", "expl", "explo", "explor", "explore":
+            fx = .host("explore")
+        case "follow":
+            fx = .host("follow")
+        case "hover":
+            fx = .host("hover")
 
         case "s", "su", "sub", "substitute":
             substitute(range: range, args: argsRaw, &st, &b)

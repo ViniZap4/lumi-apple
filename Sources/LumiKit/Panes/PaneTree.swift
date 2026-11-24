@@ -116,6 +116,15 @@ public struct PaneTree: Hashable, Codable, Sendable {
     /// For `⌃w p`.
     public private(set) var previous: PaneLeafID?
     private var nextID: Int
+    /// The primary note pane: the one the explorer / book selection
+    /// drives and the app's open-note state mirrors. Other note panes
+    /// are secondary (their own sessions from the pool).
+    public private(set) var primary: PaneLeafID?
+
+    /// Most panes on screen at once (web `MAX_PANES`).
+    public static let maxPanes = 8
+    /// Smallest share a divider drag / `⌃w < >` leaves (web `MIN_SIZE`).
+    public static let minSize = 0.12
 
     /// Weight bounds for a resized split child.
     public static let minWeight = 0.15
@@ -125,6 +134,7 @@ public struct PaneTree: Hashable, Codable, Sendable {
         root = .leaf(id, content)
         focused = id
         nextID = 2
+        primary = id
     }
 
     // MARK: Reading
@@ -140,9 +150,42 @@ public struct PaneTree: Hashable, Codable, Sendable {
 
     public var focusedContent: PaneContent { content(focused) ?? .empty }
 
-    /// The first note pane (the main note while splits are not exposed).
+    /// The primary note pane (falls back to the first note pane).
     public var mainLeaf: PaneLeafID {
-        Self.leaves(root).first { if case .note = $0.1 { return true }; if case .empty = $0.1 { return true }; return false }?.0 ?? focused
+        if let primary, let c = content(primary), Self.isNote(c) { return primary }
+        return Self.leaves(root).first { Self.isNote($0.1) }?.0 ?? focused
+    }
+
+    static func isNote(_ c: PaneContent) -> Bool {
+        if case .preview = c { return false }
+        return true
+    }
+
+    /// Note (and empty) panes in visual order — previews left out.
+    public var notePanes: [PaneLeafID] { Self.leaves(root).filter { Self.isNote($0.1) }.map(\.0) }
+
+    /// Make `id` the primary pane (promote on close / focus hand-off).
+    public mutating func setPrimary(_ id: PaneLeafID) {
+        guard let c = content(id), Self.isNote(c) else { return }
+        primary = id
+    }
+
+    /// The note path a pane shows, if it shows one.
+    public func notePath(_ id: PaneLeafID) -> String? {
+        if case let .note(path, _)? = content(id) { return path }
+        return nil
+    }
+
+    /// The same tree without the preview leaves (their space goes to the
+    /// note): the geometry the user sees while the split preview is
+    /// hidden (reader / Live).
+    public func withoutPreviews(except keep: Set<PaneLeafID> = []) -> PaneTree {
+        var t = self
+        for (id, c) in Self.leaves(root) {
+            if case .preview = c, !keep.contains(id), let r = Self.remove(id, from: t.root) { t.root = r }
+        }
+        if !t.leaves.contains(t.focused) { t.focused = t.mainLeaf }
+        return t
     }
 
     /// The preview pane following `id`, if any.
@@ -180,7 +223,7 @@ public struct PaneTree: Hashable, Codable, Sendable {
         nextID += 1
         let newContent = content ?? self.content(t) ?? .empty
         let r = min(1 - Self.minWeight, max(Self.minWeight, ratio))
-        root = Self.splitLeaf(root, target: t, axis: axis, newLeaf: .leaf(id, newContent), ratio: r)
+        root = Self.splitUnit(root, target: t, axis: axis, newLeaf: .leaf(id, newContent), ratio: r)
         if focusNew { focus(id) }
         return id
     }
@@ -200,7 +243,37 @@ public struct PaneTree: Hashable, Codable, Sendable {
             if let p = previous, remaining.contains(p) { focused = p } else { focused = leaves.first ?? focused }
         }
         if let p = previous, !remaining.contains(p) { previous = nil }
+        if let p = primary, !remaining.contains(p) {
+            primary = nil
+            if let c = content(focused), Self.isNote(c) { primary = focused } else { primary = notePanes.first }
+        }
         return true
+    }
+
+    /// `⌃w o` with several note panes: keep the focused note pane (and
+    /// its source + preview pair). It becomes the primary.
+    public mutating func onlyNote() {
+        var keep = focused
+        if case let .preview(of: src)? = content(focused), content(src) != nil { keep = src }
+        let pair = preview(of: keep)
+        for id in leaves where id != keep && id != pair {
+            if let r = Self.remove(id, from: root) { root = r }
+        }
+        focused = keep
+        previous = nil
+        primary = keep
+    }
+
+    /// Close every note pane whose note no longer exists (`exists` gets
+    /// the pane's path). The primary is never closed here — the app
+    /// closes its note itself. Returns the closed panes.
+    @discardableResult
+    public mutating func prune(_ exists: (String) -> Bool) -> [PaneLeafID] {
+        var gone: [PaneLeafID] = []
+        for id in notePanes where id != mainLeaf {
+            if let path = notePath(id), !exists(path), notePanes.count > 1, close(id) { gone.append(id) }
+        }
+        return gone
     }
 
     /// Keep only the focused pane (`⌃w o`); a focused preview keeps its
@@ -212,6 +285,7 @@ public struct PaneTree: Hashable, Codable, Sendable {
         root = .leaf(keep, c)
         focused = keep
         previous = nil
+        primary = keep
     }
 
     /// Equal weights everywhere (`⌃w =`).
@@ -305,7 +379,10 @@ public struct PaneTree: Hashable, Codable, Sendable {
         let src = id ?? mainLeaf
         let existing = preview(of: src)
         if on, existing == nil {
-            split(.vertical, content: .preview(of: src), target: src, ratio: ratio, focusNew: false)
+            let id = PaneLeafID(nextID)
+            nextID += 1
+            let r = min(1 - Self.minWeight, max(Self.minWeight, ratio))
+            root = Self.wrapLeaf(root, target: src, newLeaf: .leaf(id, .preview(of: src)), ratio: r)
         } else if !on, let existing {
             close(existing)
         }
@@ -318,7 +395,118 @@ public struct PaneTree: Hashable, Codable, Sendable {
         return p.weights[p.index]
     }
 
+    // MARK: Resizing (dividers, `⌃w < > + -`)
+
+    /// Child-index path from the root to the split node directly holding
+    /// leaf `id`'s unit, for every split on the way: `[(path, index)]`.
+    func ancestry(of id: PaneLeafID) -> [(path: [Int], index: Int)]? {
+        func walk(_ n: PaneNode, _ path: [Int]) -> [(path: [Int], index: Int)]? {
+            guard case let .split(_, kids, _) = n else { return nil }
+            for (i, k) in kids.enumerated() {
+                if case let .leaf(l, _) = k, l == id { return [(path, i)] }
+                if let rest = walk(k, path + [i]) { return [(path, i)] + rest }
+            }
+            return nil
+        }
+        return walk(root, [])
+    }
+
+    public func node(at path: [Int]) -> PaneNode? {
+        var n = root
+        for i in path {
+            guard case let .split(_, kids, _) = n, kids.indices.contains(i) else { return nil }
+            n = kids[i]
+        }
+        return n
+    }
+
+    private mutating func updateNode(at path: [Int], _ f: (PaneNode) -> PaneNode) {
+        func go(_ n: PaneNode, _ rest: ArraySlice<Int>) -> PaneNode {
+            guard let i = rest.first else { return f(n) }
+            guard case let .split(a, kids, w) = n, kids.indices.contains(i) else { return n }
+            var k = kids
+            k[i] = go(kids[i], rest.dropFirst())
+            return .split(a, k, w)
+        }
+        root = go(root, path[...])
+    }
+
+    /// Drag the divider after child `index` of the split at `path` to
+    /// `at` (0…1 along the split, from its start). Both neighbours keep at
+    /// least `minSize` (web `resizeSplit`).
+    public mutating func resizeDivider(at path: [Int], index: Int, to at: Double) {
+        updateNode(at: path) { n in
+            guard case let .split(a, kids, sizes) = n, index >= 0, index < kids.count - 1 else { return n }
+            let before = sizes[..<index].reduce(0, +)
+            let pair = sizes[index] + sizes[index + 1]
+            let lo = min(Self.minSize, pair / 2)
+            let left = min(pair - lo, max(lo, at - before))
+            var w = sizes
+            w[index] = left
+            w[index + 1] = pair - left
+            return .split(a, kids, w)
+        }
+    }
+
+    /// Grow (`delta` > 0) or shrink pane `id` along `axis` by moving the
+    /// nearest divider of the closest enclosing split on that axis (vim
+    /// `⌃w >` `<` for `.vertical`, `+` `-` for `.horizontal`). A pane in a
+    /// source + preview pair resizes the pair as one unit.
+    public mutating func nudge(_ id: PaneLeafID? = nil, axis: SplitAxis, by delta: Double) {
+        let target = id ?? focused
+        guard let chain = ancestry(of: target) else { return }
+        for step in chain.reversed() {
+            guard case let .split(a, kids, sizes)? = node(at: step.path), a == axis else { continue }
+            // The source + preview pair resizes as one unit.
+            if step.path == chain.last?.path, let n = node(at: step.path), Self.isUnit(n, target) { continue }
+            let i = step.index
+            let before = sizes[..<i].reduce(0, +)
+            if i < kids.count - 1 {
+                resizeDivider(at: step.path, index: i, to: before + sizes[i] + delta)
+            } else {
+                resizeDivider(at: step.path, index: i - 1, to: before - delta)
+            }
+            return
+        }
+    }
+
     // MARK: Helpers (pure recursion)
+
+    /// A leaf, or a source + preview pair, holding `target`.
+    static func isUnit(_ n: PaneNode, _ target: PaneLeafID) -> Bool {
+        switch n {
+        case let .leaf(id, _): return id == target
+        case let .split(.vertical, kids, _):
+            guard kids.count == 2, case let .leaf(l, _) = kids[0], l == target,
+                  case .leaf(_, .preview(of: target)) = kids[1] else { return false }
+            return true
+        default: return false
+        }
+    }
+
+    static func splitUnit(_ n: PaneNode, target: PaneLeafID, axis: SplitAxis, newLeaf: PaneNode, ratio: Double) -> PaneNode {
+        if isUnit(n, target) { return .split(axis, [n, newLeaf], [ratio, 1 - ratio]) }
+        guard case let .split(a, kids, w) = n else { return n }
+        if a == axis, let i = kids.firstIndex(where: { isUnit($0, target) }) {
+            var k = kids, ws = w
+            let share = ws[i]
+            ws[i] = share * ratio
+            k.insert(newLeaf, at: i + 1)
+            ws.insert(share * (1 - ratio), at: i + 1)
+            return .split(a, k, ws)
+        }
+        return .split(a, kids.map { splitUnit($0, target: target, axis: axis, newLeaf: newLeaf, ratio: ratio) }, w)
+    }
+
+    /// Replace leaf `target` with a nested vertical [target, newLeaf].
+    static func wrapLeaf(_ n: PaneNode, target: PaneLeafID, newLeaf: PaneNode, ratio: Double) -> PaneNode {
+        switch n {
+        case let .leaf(id, _):
+            return id == target ? .split(.vertical, [n, newLeaf], [ratio, 1 - ratio]) : n
+        case let .split(a, kids, w):
+            return .split(a, kids.map { wrapLeaf($0, target: target, newLeaf: newLeaf, ratio: ratio) }, w)
+        }
+    }
 
     static func leaves(_ n: PaneNode) -> [(PaneLeafID, PaneContent)] {
         switch n {
