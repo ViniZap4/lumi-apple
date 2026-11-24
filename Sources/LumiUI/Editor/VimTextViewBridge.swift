@@ -150,6 +150,7 @@ struct VimTextViewBridge: NSViewRepresentable {
         )
         textView.blockCursorPreference = blockCursor
         textView.yankColor = NSColor(theme.accent)
+        textView.remoteFlashColor = NSColor(theme.info)
         // Vim visual selection is drawn as a rendering attribute (like
         // the block selection) so it shows whatever the focus state —
         // AppKit greys out an unfocused native selection, which on some
@@ -819,7 +820,21 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
         } else {
             cursorView.glyph = nil
         }
-        if cursorView.frame != rect { cursorView.frame = rect }
+        if cursorView.frame != rect {
+            // Smooth caret (SPEC-PARTE2 §1): a 60 ms glide between nearby
+            // cells; jumps, Reduce Motion and offscreen views are instant.
+            let old = cursorView.frame
+            let near = old.width > 0 && abs(old.midY - rect.midY) < 64 && abs(old.midX - rect.midX) < 260
+            if near, window != nil, !cursorView.isHidden, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 0.06
+                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    cursorView.animator().frame = rect
+                }
+            } else {
+                cursorView.frame = rect
+            }
+        }
         cursorView.isHidden = false
         restartBlink(style.blinks)
     }
@@ -1047,7 +1062,41 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
     // MARK: Yank highlight
 
     var yankColor: NSColor = .systemTeal
+    var remoteFlashColor: NSColor = .systemBlue
     private var yankFlashView: YankFlashView?
+    private var remoteFlashView: YankFlashView?
+
+    func flashRemote(_ ranges: [NSRange]) {
+        // Short and soft; nothing under Reduce Motion.
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        let rects = flashRects(ranges)
+        guard !rects.isEmpty else { return }
+        remoteFlashView?.removeFromSuperview()
+        let view = YankFlashView(frame: bounds, rects: rects, color: remoteFlashColor.withAlphaComponent(0.55))
+        addSubview(view, positioned: .below, relativeTo: cursorView)
+        remoteFlashView = view
+        view.run(reduceMotion: false) { [weak self, weak view] in
+            view?.removeFromSuperview()
+            if self?.remoteFlashView === view { self?.remoteFlashView = nil }
+        }
+    }
+
+    private func flashRects(_ ranges: [NSRange]) -> [CGRect] {
+        guard let tlm = textLayoutManager, let tcm = tlm.textContentManager else { return [] }
+        let length = (string as NSString).length
+        var rects: [CGRect] = []
+        let origin = textContainerOrigin
+        for r in ranges.prefix(32) where r.length > 0 && NSMaxRange(r) <= length {
+            guard let start = tcm.location(tcm.documentRange.location, offsetBy: r.location),
+                  let end = tcm.location(start, offsetBy: r.length),
+                  let range = NSTextRange(location: start, end: end) else { continue }
+            tlm.enumerateTextSegments(in: range, type: .standard, options: []) { _, frame, _, _ in
+                if frame.width > 0.5 { rects.append(frame.offsetBy(dx: origin.x, dy: origin.y)) }
+                return true
+            }
+        }
+        return rects
+    }
 
     func flashYank(_ ranges: [NSRange]) {
         guard let tlm = textLayoutManager, let tcm = tlm.textContentManager else { return }

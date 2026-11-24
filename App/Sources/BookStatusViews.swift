@@ -8,8 +8,13 @@ import LumiUI
 struct BookStatusDot: View {
     let status: BookSyncStatus
     var size: CGFloat = 8
+    /// Bumped on a remote change: a ring pulses out once.
+    var pulse: Int = 0
     @Environment(\.theme) private var theme
-    @State private var pulse = false
+    @Environment(\.lumiMotion) private var motion
+    @State private var breathing = false
+    @State private var ring: CGFloat = 1
+    @State private var ringOpacity: Double = 0
 
     var body: some View {
         Group {
@@ -31,14 +36,34 @@ struct BookStatusDot: View {
             case .syncing:
                 Circle().fill(theme.info)
                     .frame(width: size, height: size)
-                    .opacity(pulse ? 0.3 : 1)
-                    .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: pulse)
-                    .onAppear { pulse = true }
+                    // Breathes while syncing (still under Reduce Motion).
+                    .opacity(breathing ? 0.3 : 1)
+                    .scaleEffect(breathing && motion ? 0.85 : 1)
+                    .animation(motion ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true) : nil, value: breathing)
+                    .onAppear { breathing = motion }
             case .upToDate:
                 Circle().fill(Color.green.opacity(0.85)).frame(width: size, height: size)
             }
         }
         .frame(width: size + 6, height: size + 6)
+        .overlay {
+            Circle()
+                .stroke(theme.info, lineWidth: 1.2)
+                .frame(width: size, height: size)
+                .scaleEffect(ring)
+                .opacity(ringOpacity)
+                .allowsHitTesting(false)
+        }
+        .onChange(of: pulse) { _, _ in
+            // A remote change arrived: one soft ring.
+            guard motion else { return }
+            ring = 1
+            ringOpacity = 0.8
+            withAnimation(.easeOut(duration: 0.6)) {
+                ring = 2.6
+                ringOpacity = 0
+            }
+        }
         .help(status.label)
         .accessibilityLabel(Text("sync status: \(status.label)"))
     }

@@ -32,6 +32,12 @@ extension AppState {
     /// The legend line's items for the current context and pending keys.
     var legendItems: [LegendItem] {
         let ctx = legendContext
+        if surface == .explorer, !showFloatingExplorer, !showPalette, !showHelp, hoverCard == nil {
+            // The book home: the floating explorer is the way in.
+            return [LegendItem("-", "explorer"), LegendItem("j k", "recent"), LegendItem("⏎", "open"),
+                    LegendItem("gb", "books"), LegendItem("a", "new note"), LegendItem("[ ]", "cycle books"),
+                    LegendItem("space", "commands"), LegendItem("?", "keys")]
+        }
         switch ctx {
         case .explorer, .reader, .preview, .sidebar:
             return CommandLegend.shellItems(ctx, pending: shellPending, pane: ctx == .sidebar ? nil : paneLegendItem)

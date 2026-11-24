@@ -10,6 +10,7 @@ struct ShellTopLine: View {
 
     var body: some View {
         HStack(spacing: 6) {
+            ExplorerButton()
             ShellBreadcrumb()
             Spacer(minLength: 12)
             ShellSyncDot()
@@ -88,7 +89,7 @@ struct ShellSyncDot: View {
             Button {
                 showDetails.toggle()
             } label: {
-                BookStatusDot(status: appState.sync.status(for: book), size: 7)
+                BookStatusDot(status: appState.sync.status(for: book), size: 7, pulse: appState.remotePulse)
                     .padding(4)
                     .contentShape(Rectangle())
             }
@@ -315,7 +316,8 @@ struct ShellToastOverlay: View {
             if let notice = appState.sync.pendingNotices.first {
                 federation(notice)
             }
-            if let toast = appState.toast {
+            // Toasts slide in from the bottom and stack (newest lowest).
+            ForEach(appState.toasts) { toast in
                 HStack(spacing: 8) {
                     Circle().fill(color(toast.tone)).frame(width: 6, height: 6)
                     Text(toast.text)
@@ -328,14 +330,15 @@ struct ShellToastOverlay: View {
                 .padding(.vertical, 8)
                 .frame(maxWidth: 380, alignment: .leading)
                 .background(card)
-                .onTapGesture { appState.toast = nil }
-                .transition(appState.transition(.opacity.combined(with: .move(edge: .bottom))))
-                .id(toast.id)
+                .onTapGesture { appState.toasts.removeAll { $0.id == toast.id } }
+                .transition(appState.transition(.asymmetric(
+                    insertion: .move(edge: .bottom).combined(with: .opacity),
+                    removal: .move(edge: .trailing).combined(with: .opacity))))
             }
         }
         .padding(.trailing, 14)
         .padding(.bottom, ShellMetrics.statusLineHeight + 10)
-        .animation(appState.animation(.standard), value: appState.toast)
+        .animation(appState.animation(.standard), value: appState.toasts)
     }
 
     private var card: some View {

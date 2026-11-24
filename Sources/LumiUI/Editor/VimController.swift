@@ -37,6 +37,8 @@ protocol EditorTextSurface: AnyObject {
     /// Briefly highlight these UTF-16 ranges (yank highlight). Purely
     /// visual: never touches the storage.
     func flashYank(_ ranges: [NSRange])
+    /// Gently highlight ranges a peer just edited (SPEC-PARTE2 §1).
+    func flashRemote(_ ranges: [NSRange])
     /// Source line (fractional, 0-based) at the top of the viewport;
     /// `-1` at the very top, `.infinity` at the very bottom.
     func viewportTopLine() -> Double?
@@ -52,6 +54,7 @@ extension EditorTextSurface {
     func scrollCursor(to position: VimScrollPosition, cursor: Int) {}
     func scrollLines(_ lines: Int) {}
     func flashYank(_ ranges: [NSRange]) {}
+    func flashRemote(_ ranges: [NSRange]) {}
     func viewportTopLine() -> Double? { nil }
     func scrollViewport(toLine line: Double) {}
     func focusEditor() {}
@@ -548,6 +551,21 @@ public final class VimController {
         }
     }
 
+    /// Where sequential edits' inserted text ends up (UTF-16, final text).
+    static func insertedRanges(_ edits: [TextEdit]) -> [NSRange] {
+        var out: [NSRange] = []
+        for (i, e) in edits.enumerated() {
+            let len = (e.replacement as NSString).length
+            guard len > 0 else { continue }
+            var loc = e.location
+            for later in edits[(i + 1)...] where later.location <= loc {
+                loc += (later.replacement as NSString).length - later.length
+            }
+            out.append(NSRange(location: max(0, loc), length: len))
+        }
+        return out
+    }
+
     private func applyIncoming(_ edits: [TextEdit], isUndo: Bool) {
         guard !edits.isEmpty else { return }
         surface?.discardMarkedText()
@@ -590,6 +608,7 @@ public final class VimController {
         cursor = buffer.cursor
 
         surface?.applyEdits(edits)
+        if !isUndo { surface?.flashRemote(Self.insertedRanges(edits)) }
         if let plainSelection {
             surface?.showSelection(plainSelection, scroll: isUndo)
         } else {

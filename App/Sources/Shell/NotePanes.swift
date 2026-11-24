@@ -157,6 +157,7 @@ struct SecondaryNotePane: View {
                           onClose: { appState.closeLeaf(leaf) })
             content(resolution?.route ?? .reader, resolved: resolution?.view ?? view)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
                 .id("\(path)#\(resolution?.view.rawValue ?? "")")
                 .transition(appState.transition(.opacity))
         }

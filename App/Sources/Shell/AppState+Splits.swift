@@ -108,11 +108,11 @@ extension AppState {
             editor.focusTextView()
         } else {
             resignTextResponder()
+            #if canImport(AppKit)
             if let view = paneReaders[id]?.scrollView?.documentView {
-                #if canImport(AppKit)
                 view.window?.makeFirstResponder(view)
-                #endif
             }
+            #endif
         }
     }
 

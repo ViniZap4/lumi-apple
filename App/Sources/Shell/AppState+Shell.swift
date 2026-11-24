@@ -65,9 +65,16 @@ extension AppState {
     func showToast(_ text: String, tone: ShellToast.Tone = .info) {
         let t = ShellToast(text: text, tone: tone)
         toast = t
+        withMotion(.standard) {
+            toasts.removeAll { $0.text == text }
+            toasts.append(t)
+            if toasts.count > 3 { toasts.removeFirst(toasts.count - 3) }
+        }
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: tone == .error ? 6_000_000_000 : 3_000_000_000)
-            if self?.toast?.id == t.id { self?.toast = nil }
+            guard let self else { return }
+            if self.toast?.id == t.id { self.toast = nil }
+            self.withMotion(.standard) { self.toasts.removeAll { $0.id == t.id } }
         }
     }
 

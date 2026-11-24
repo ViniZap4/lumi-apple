@@ -187,6 +187,8 @@ final class AppState {
     /// Small transient message (bottom of the window). Never wraps per
     /// syllable: one or two lines, fixed max width.
     var toast: ShellToast?
+    /// Toasts on screen, oldest first (they slide in and stack, max 3).
+    var toasts: [ShellToast] = []
     /// Key → action reader for the explorer and reader.
     @ObservationIgnored var keymap = ShellKeymap()
     /// The mounted vim editor (task toggles from the split preview go

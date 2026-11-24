@@ -244,7 +244,7 @@ public struct FloatingPanel<Content: View, Footer: View>: View {
     public var body: some View {
         GeometryReader { geo in
             ZStack {
-                Color.black.opacity(theme.isDark ? 0.42 : 0.18)
+                Color.black.opacity(theme.isDark ? 0.42 : 0.12)
                     .contentShape(Rectangle())
                     .onTapGesture(perform: onDismiss)
                     .accessibilityHidden(true)
@@ -322,6 +322,8 @@ public struct HoverCardView: View {
     let onSplit: (() -> Void)?
     let onClose: () -> Void
     var onScrollView: ((MarkdownPlatformScrollView) -> Void)?
+    /// Test seam: render the excerpt with another view (offscreen PNGs).
+    var excerptOverride: ((String) -> AnyView)?
     @Environment(\.theme) private var theme
 
     public static let size = CGSize(width: 460, height: 360)
@@ -425,11 +427,17 @@ public struct HoverCardView: View {
         case let .note(title, _, _, body, truncated, error):
             if let body {
                 VStack(spacing: 0) {
-                    MarkdownReader(title: title, text: body, scale: 0.84 * scale, fontFamily: fontFamily,
-                                   readingWidth: 420, showsHeader: false)
-                        .environment(\.markdownLite, true)
-                        .environment(\.markdownScrollViewSink, onScrollView.map { f in MarkdownScrollViewSink { f($0) } })
-                        .frame(maxHeight: .infinity)
+                    Group {
+                        if let excerptOverride {
+                            excerptOverride(body)
+                        } else {
+                            MarkdownReader(title: title, text: body, scale: 0.84 * scale, fontFamily: fontFamily,
+                                           readingWidth: 420, showsHeader: false)
+                                .environment(\.markdownLite, true)
+                                .environment(\.markdownScrollViewSink, onScrollView.map { f in MarkdownScrollViewSink { f($0) } })
+                        }
+                    }
+                    .frame(maxHeight: .infinity)
                     if truncated {
                         Text("…")
                             .font(ShellFont.small)

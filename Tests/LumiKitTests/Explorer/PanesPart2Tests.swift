@@ -357,4 +357,12 @@ struct PanesPart2Tests {
         #expect(again.lastNote(forBook: "b") == nil && again.recent(forBook: "b").first == "n18.md")
         #expect(again.recent(forBook: "other").isEmpty)
     }
+
+    @Test("wikilinks with spaces or headings stay links the router can resolve")
+    func wikiDestinations() {
+        #expect(MarkdownParser.preprocessWikilinks("see [[Hover cards]]") == "see [Hover cards](Hover%20cards.md)")
+        #expect(MarkdownParser.preprocessWikilinks("[[plan#Risks|r]]") == "[r](plan.md)")
+        let notes = [ExplorerNote(id: "Hover cards.md", path: "Hover cards.md", title: "Hover cards")]
+        #expect(LinkRouting.classify(notes, from: "x.md", href: "Hover%20cards.md") == .note(notes[0]))
+    }
 }

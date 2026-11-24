@@ -578,7 +578,7 @@ public enum MarkdownParser {
                 if let end = findWikilinkClose(chars: chars, from: i + 3) {
                     let inner = String(chars[(i + 3)..<end])
                     let (target, label) = splitWikilink(inner)
-                    out.append("![\(label ?? target)](\(target).md)")
+                    out.append("![\(label ?? target)](\(wikiDestination(target)))")
                     i = end + 2
                     atLineStart = false
                     continue
@@ -590,7 +590,7 @@ public enum MarkdownParser {
                 if let end = findWikilinkClose(chars: chars, from: i + 2) {
                     let inner = String(chars[(i + 2)..<end])
                     let (target, label) = splitWikilink(inner)
-                    out.append("[\(label ?? target)](\(target).md)")
+                    out.append("[\(label ?? target)](\(wikiDestination(target)))")
                     i = end + 2
                     atLineStart = false
                     continue
@@ -602,6 +602,16 @@ public enum MarkdownParser {
             i += 1
         }
         return out
+    }
+
+    /// `target.md` as a link destination: spaces percent-encoded so
+    /// `[[Hover cards]]` stays a link (CommonMark destinations end at a
+    /// space); `#heading` is dropped from the file part.
+    static func wikiDestination(_ target: String) -> String {
+        let file = String(target.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
+        let encoded = file.replacingOccurrences(of: "%", with: "%25").replacingOccurrences(of: " ", with: "%20")
+            .replacingOccurrences(of: "(", with: "%28").replacingOccurrences(of: ")", with: "%29")
+        return encoded.lowercased().hasSuffix(".md") ? encoded : encoded + ".md"
     }
 
     /// Find the closing `]]` for a wikilink that opens at `start`. Bails out

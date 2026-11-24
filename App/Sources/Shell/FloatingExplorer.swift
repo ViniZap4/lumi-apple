@@ -437,72 +437,17 @@ struct OpenMorphGhost: View {
     let morph: OpenMorph
     let target: CGRect
     let onDone: () -> Void
-    @Environment(\.theme) private var theme
-    @State private var grown = false
+    @State private var progress: CGFloat = 0
     @State private var gone = false
 
     var body: some View {
-        let r = grown ? target : morph.from
-        RoundedRectangle(cornerRadius: grown ? 6 : 4, style: .continuous)
-            .fill(theme.selectionRow)
-            .overlay(alignment: .topLeading) {
-                Text(morph.title)
-                    .font(grown ? .system(size: 22, weight: .semibold) : ShellFont.row)
-                    .foregroundStyle(theme.text)
-                    .padding(.horizontal, grown ? 40 : 34)
-                    .padding(.top, grown ? 34 : 5)
-                    .lineLimit(1)
-            }
-            .frame(width: r.width, height: r.height)
-            .position(x: r.midX, y: r.midY)
+        OpenMorphView(from: morph.from, to: target, progress: progress, title: morph.title)
             .opacity(gone ? 0 : 1)
             .allowsHitTesting(false)
             .onAppear {
-                withAnimation(.spring(response: 0.22, dampingFraction: 0.86)) { grown = true }
+                withAnimation(.spring(response: 0.22, dampingFraction: 0.86)) { progress = 1 }
                 withAnimation(.easeOut(duration: 0.14).delay(0.12)) { gone = true }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { onDone() }
             }
-    }
-}
-
-// MARK: - Motion helpers
-
-extension View {
-    /// List rows fade / slide in one after another when a list appears
-    /// (capped, so long lists land fast). Off under Reduce Motion.
-    func staggerIn(_ index: Int, active: Bool) -> some View {
-        modifier(StaggerIn(index: index, active: active))
-    }
-}
-
-private struct StaggerIn: ViewModifier {
-    let index: Int
-    let active: Bool
-    @State private var shown = false
-
-    func body(content: Content) -> some View {
-        content
-            .opacity(active && !shown ? 0 : 1)
-            .offset(y: active && !shown ? 6 : 0)
-            .onAppear {
-                guard active, !shown else { return }
-                withAnimation(.spring(response: 0.24, dampingFraction: 0.9).delay(Double(min(index, 14)) * 0.012)) { shown = true }
-            }
-    }
-}
-
-/// Hover lift and press scale for interactive chrome.
-struct LiftButtonStyle: ButtonStyle {
-    var enabled = true
-    @State private var hover = false
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(enabled && configuration.isPressed ? 0.95 : 1)
-            .offset(y: enabled && hover && !configuration.isPressed ? -0.5 : 0)
-            .shadow(color: .black.opacity(enabled && hover ? 0.12 : 0), radius: 3, y: 1)
-            .onHover { hover = $0 }
-            .animation(enabled ? .spring(response: 0.2, dampingFraction: 0.7) : nil, value: configuration.isPressed)
-            .animation(enabled ? .spring(response: 0.22, dampingFraction: 0.8) : nil, value: hover)
     }
 }
