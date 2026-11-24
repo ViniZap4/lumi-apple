@@ -59,10 +59,10 @@ struct PaneLegendTests {
         #expect(CommandLegend.shellItems(.preview, pending: "[").map(\.keys) == ["[[", "]]"])
     }
 
-    @Test("the pane hint lands before ?")
+    @Test("the pane hint lands after F hints, before space (web order)")
     func paneItem() {
-        let items = CommandLegend.shellItems(.reader, pane: LegendItem("⌃h ⌃l", "panes"))
-        #expect(items[items.count - 2] == LegendItem("⌃h ⌃l", "panes"))
-        #expect(items.last?.keys == "?")
+        let items = CommandLegend.shellItems(.reader, pane: LegendItem("⌃h ⌃l", "panes")).map(\.keys)
+        let i = items.firstIndex(of: "⌃h ⌃l")!
+        #expect(items[i - 1] == "F" && items[i + 1] == "space")
     }
 }

@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 import LumiKit
 import LumiUI
 #if canImport(AppKit)
@@ -207,7 +208,9 @@ extension AppState {
             ]
         }
         return [
-            ShellMenuItem(id: "open", label: "Open", keys: "⏎") { self.open(entry) },
+            ShellMenuItem(id: "open", label: "Open", keys: "⏎") { self.floatingOpen(entry, .current) },
+            ShellMenuItem(id: "open-right", label: "Open right", keys: "⌃v") { self.floatingOpen(entry, .vsplit) },
+            ShellMenuItem(id: "open-below", label: "Open below", keys: "⌃s") { self.floatingOpen(entry, .hsplit) },
             ShellMenuItem(id: "edit", label: "Edit", keys: "e", enabled: explorer.isLocal || can("note.write")) { self.open(entry, edit: true) },
             ShellMenuItem(id: "rename", label: "Rename / move…", keys: "r", enabled: !offline, separatorAbove: true) {
                 self.selectExplorerEntry(entry)
@@ -248,7 +251,31 @@ extension AppState {
 /// drop from elsewhere is never mistaken for a move.
 enum ExplorerDrag {
     static let prefix = "lumi-note:"
+    /// In-app only, and not text: an editor pane never takes the drop as
+    /// typed text, so the pane's edge targets get it (SPEC-PARTE2 §3).
+    static let type = UTType(exportedAs: "com.vinizap.lumi.note-ref", conformingTo: .data)
     static func payload(_ entry: ExplorerEntry) -> String { prefix + entry.path }
+
+    /// The drag item of a note row.
+    static func provider(_ entry: ExplorerEntry) -> NSItemProvider {
+        let p = NSItemProvider()
+        let data = Data(payload(entry).utf8)
+        p.registerDataRepresentation(forTypeIdentifier: type.identifier, visibility: .ownProcess) { done in
+            done(data, nil)
+            return nil
+        }
+        return p
+    }
+
+    /// Read a note path back from dropped providers.
+    static func loadPath(_ providers: [NSItemProvider], _ done: @escaping @Sendable (String) -> Void) -> Bool {
+        guard let p = providers.first(where: { $0.hasItemConformingToTypeIdentifier(type.identifier) }) else { return false }
+        _ = p.loadDataRepresentation(forTypeIdentifier: type.identifier) { data, _ in
+            guard let data, let text = String(data: data, encoding: .utf8), let path = path(from: text) else { return }
+            done(path)
+        }
+        return true
+    }
     static func path(from payload: String) -> String? {
         payload.hasPrefix(prefix) ? String(payload.dropFirst(prefix.count)) : nil
     }

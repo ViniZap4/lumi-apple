@@ -110,11 +110,13 @@ enum NoteViewHooks {
     /// the default); include `.source` to offer the markdown editor.
     static func register(_ kind: NoteKind, views: [NoteViewMode], make: @escaping Builder) {
         builders[kind] = make
+        let structured = views.contains { $0.isStructuredEdit }
         AppState.noteViews.register(kind, views: views) { view in
             switch view {
             case .source: return .editor(live: false)
             case .live: return .editor(live: true)
-            case .reading: return .reader
+            // A board / canvas reads in its own (read-only) view.
+            case .reading: return structured ? .custom(.reading) : .reader
             default: return .custom(view)
             }
         }

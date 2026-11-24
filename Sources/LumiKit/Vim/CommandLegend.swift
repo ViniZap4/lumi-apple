@@ -13,15 +13,38 @@ public enum LegendContext: String, Sendable, Hashable, CaseIterable {
     case commandLine, search
     case substituteConfirm
     case palette, prompt, confirm, filter, books, help
+    /// The book's empty home (no note open).
+    case home
+    /// A hover card opened with `K`.
+    case hover
+}
+
+/// What a click on a legend item does — the same as typing its keys.
+public enum LegendAction: Sendable, Hashable {
+    /// Shell keys, fed to the shell key handler (`j`, `gg`, `⌃w v` is
+    /// better as `.app`).
+    case keys(String)
+    /// Vim key notation sent to the focused editor (`i`, `<Esc>`, `za`).
+    case vim(String)
+    /// An app action (`vsplit`, `zoom`, `explorer`, `hints`, …).
+    case app(String)
+    /// An ex command the app runs (`preview split`, `only`).
+    case ex(String)
 }
 
 public struct LegendItem: Sendable, Hashable {
     public var keys: String
     public var label: String
+    /// Clicking the item runs this (nil: display only).
+    public var action: LegendAction?
+    /// Longer tooltip.
+    public var tip: String?
 
-    public init(_ keys: String, _ label: String) {
+    public init(_ keys: String, _ label: String, _ action: LegendAction? = nil, tip: String? = nil) {
         self.keys = keys
         self.label = label
+        self.action = action
+        self.tip = tip
     }
 }
 
@@ -40,73 +63,170 @@ public enum CommandLegend {
         public var escapeSequences: [String]
         /// Recording a macro into this register.
         public var recording: Character?
+        /// Source mode (the split preview keys apply).
+        public var source: Bool
+        /// The split preview shows.
+        public var split: Bool
+        /// The pane hint (`⌃h ⌃l panes`) when several panes show.
+        public var pane: LegendItem?
 
-        public init(leader: String = "\\", leaderMaps: [LegendItem] = [], escapeSequences: [String] = [], recording: Character? = nil) {
+        public init(leader: String = "\\", leaderMaps: [LegendItem] = [], escapeSequences: [String] = [], recording: Character? = nil,
+                    source: Bool = false, split: Bool = false, pane: LegendItem? = nil) {
             self.leader = leader
             self.leaderMaps = leaderMaps
             self.escapeSequences = escapeSequences
             self.recording = recording
+            self.source = source
+            self.split = split
+            self.pane = pane
         }
     }
 
-    // MARK: Shell (explorer / reader)
+    // MARK: Shell (explorer / reader) — web `legend.ts` parity, priority order
 
     static let shellG: [LegendItem] = [
-        .init("gg", "top"), .init("ge", "bottom"), .init("gf", "follow link"), .init("gb", "books"),
-        .init("gh", "book root"), .init("g1–9", "book n"),
+        .init("gg", "top", .keys("gg")), .init("ge", "bottom", .keys("ge")), .init("gf", "follow link", .keys("gf")),
+        .init("gb", "books", .app("books")), .init("gh", "book root", .keys("gh")), .init("g1–9", "book n"),
     ]
-    static let shellZ: [LegendItem] = [.init("zp", "preview"), .init("zh", "book root")]
-    /// After `⌃w` (shell or editor).
-    public static let windowCommands: [LegendItem] = [
-        .init("h j k l", "pane that way"), .init("v s", "split / stacked"), .init("f ⏎", "link → split"),
-        .init("F", "link → stacked"), .init("w W", "next/prev"), .init("p", "last"), .init("q c", "close"),
-        .init("o", "only this"), .init("=", "equal"), .init("< > + -", "resize"), .init("Esc", "cancel"),
-    ]
-    static let headingChord: [LegendItem] = [.init("[[", "prev heading"), .init("]]", "next heading")]
+    static let shellZ: [LegendItem] = [.init("zp", "preview", .keys("zp")), .init("zh", "book root", .keys("zh"))]
 
-    /// Explorer / reader / preview / sidebar legend; `pending` is the
-    /// shell keymap's pending keys (`g`, `z`, `^W`, a count). `pane` is
-    /// the pane hint the host adds (`⌃h⌃l panes`) when it applies.
+    /// After `⌃w` (shell or editor) — web `PANE_W` plus zoom.
+    public static let windowCommands: [LegendItem] = [
+        .init("v", "split right", .app("vsplit")), .init("s", "split below", .app("hsplit")),
+        .init("h j k l", "move to pane"), .init("z", "zoom", .app("zoom"), tip: "Zoom the pane to the whole area and back (tmux prefix z) — also :zoom, double-click the header"),
+        .init("q", "close pane", .app("closePane")), .init("o", "only this", .app("onlyPane")),
+        .init("=", "equalize", .app("equalPanes")), .init("f ⏎", "link → split"), .init("F", "link → below"),
+        .init("w", "next pane", .app("panes")), .init("p", "previous pane"), .init("< > + -", "resize"),
+        .init("Esc", "cancel"),
+    ]
+
+    /// The floating explorer, files level (web `FLOAT_ITEMS`).
+    public static let floatItems: [LegendItem] = [
+        .init("j k", "move", .keys("j")), .init("h l", "folders", .keys("l"), tip: "h at the book root climbs to the books"),
+        .init("⏎", "open here", .keys("⏎")), .init("⌃v", "split right", .keys("⌃v")), .init("⌃s", "split below", .keys("⌃s")),
+        .init("/", "filter", .keys("/")), .init("a r d", "new/rename/delete", .keys("a")), .init("y p", "copy", .keys("y")),
+        .init("Esc q", "close", .keys("Esc")), .init("f", "hints", .keys("f")), .init("gb", "books", .keys("gb")),
+        .init("e", "edit", .keys("e")), .init("⇧F10", "menu"), .init("gg G", "top/end", .keys("gg")),
+        .init("H L", "history", .keys("H")), .init(".", "hidden", .keys(".")), .init("zp", "preview", .keys("zp")),
+        .init("?", "keys", .keys("?")),
+    ]
+
+    /// The floating explorer, books level (web `BOOKS_ITEMS`).
+    public static let booksItems: [LegendItem] = [
+        .init("j k", "move", .keys("j")), .init("⏎ l", "open book", .keys("⏎")), .init("h", "accounts", .keys("h")),
+        .init("[ ]", "prev/next book", .keys("]")), .init("gg G", "top/end", .keys("g")), .init("Esc q", "close", .keys("Esc")),
+        .init("?", "keys", .keys("?")),
+    ]
+
+    /// A keyboard hover card (web `HOVER_ITEMS`).
+    public static let hoverItems: [LegendItem] = [
+        .init("j k", "scroll", .keys("j")), .init("d u", "half page", .keys("d")), .init("⏎", "open", .keys("⏎")),
+        .init("⌃w f", "open in split", .keys("v")), .init("⌃w F", "split below", .keys("s")), .init("Esc q", "close", .keys("Esc")),
+    ]
+
+    /// The book's empty home (web `home`).
+    public static let homeItems: [LegendItem] = [
+        .init("-", "explorer", .app("explorer"), tip: "The floating explorer: the only navigation (also l, ⏎, <leader>e, :explore)"),
+        .init("a", "new note", .keys("a")), .init("j k", "recent", .keys("j")),
+        .init("gb", "books", .app("books"), tip: "Switch book in the floating explorer (accounts → books)"),
+        .init("[ ]", "prev/next book", .keys("]")), .init("space", "commands", .keys(" ")), .init("?", "keys", .keys("?")),
+        .init("F", "hints", .app("hints"), tip: "Label everything clickable; type a label to click it"),
+        .init("H L", "history", .keys("H")), .init(":", "command", .keys(":")), .init("R", "refresh", .keys("R")),
+        .init("⌘,", "settings", .app("settings")),
+    ]
+
+    static let readerItems: [LegendItem] = [
+        .init("j k", "scroll", .keys("j")), .init("d u", "half page", .keys("d")),
+        .init("-", "explorer", .keys("-"), tip: "The floating explorer at this note (yazi) — also <leader>e, :explore"),
+        .init("e i", "edit", .keys("e")), .init("gg G", "top/end", .keys("gg")),
+        .init("q", "close", .keys("q"), tip: "Close the note (back to the book home); in a split, close the pane"),
+        .init("⌃w v", "split", .app("vsplit"), tip: "⌃w v / s split · q close · o only · z zoom · = equalize"),
+        .init("K", "preview link", .keys("K"), tip: "Preview the focused (or first visible) link"),
+        .init("gf", "follow link", .keys("gf"), tip: "gf / Enter: this pane · ⌃w f: split · ⌘-click: split"),
+        .init("H L", "back/forward", .keys("H"), tip: "Previous / next note opened here"),
+        .init("y", "copy", .keys("y")), .init("F", "hints", .app("hints"), tip: "Label links, tasks and buttons; type a label to click it"),
+        // (pane item lands here)
+        .init("space", "commands", .keys(" ")), .init("?", "keys", .keys("?")),
+        .init("/ n", "find", .keys("/")), .init("{ }", "heading", .keys("}")), .init("gb", "books", .app("books")),
+        .init("⌘E", "edit", .keys("e")), .init(":", "command", .keys(":")), .init("[ ]", "prev/next book", .keys("]")),
+        .init("⌘,", "settings", .app("settings")),
+    ]
+
+    static let previewItems: [LegendItem] = [
+        .init("j k", "scroll", .keys("j")), .init("d u", "half page", .keys("d")),
+        .init("{ }", "heading", .keys("}"), tip: "} next heading · { previous (also ]] [[)"),
+        .init("/", "find", .keys("/"), tip: "/ find in the preview · n N next/previous match"),
+        .init("f", "hints", .keys("f"), tip: "Label links, tasks and copy buttons; type a label to click it"),
+        .init("q ⌃h", "editor", .keys("q"), tip: "q, Esc, e, i or ⌃h: back to the editor"),
+        .init("y", "copy", .keys("y")), .init("gg G", "top/end", .keys("gg")), .init("n N", "next match", .keys("n")),
+        .init("⏎ gf", "open link"), .init("K", "preview link", .keys("K")), .init("-", "explorer", .keys("-")),
+        .init("space", "page", .keys(" ")), .init("⌃w w", "next pane", .app("panes")), .init("?", "keys", .keys("?")),
+    ]
+
+    static let headingChord: [LegendItem] = [.init("[[", "prev heading", .keys("[[")), .init("]]", "next heading", .keys("]]"))]
+
+    /// Explorer / reader / preview / sidebar / home / hover legend;
+    /// `pending` is the shell keymap's pending keys (`g`, `z`, `^W`, a
+    /// count). `pane` is the pane hint the host adds when it applies.
     public static func shellItems(_ ctx: LegendContext, pending: String = "", pane: LegendItem? = nil) -> [LegendItem] {
         let digits = pending.prefix(while: { $0.isASCII && $0.isNumber })
         let chord = pending.dropFirst(digits.count)
+        if ctx == .hover { return hoverItems }
+        if ctx == .books { return booksItems }
         if chord == "^W" { return windowCommands }
-        if chord == "g" { return shellG }
+        if chord == "g" { return ctx == .preview ? [.init("gg", "top", .keys("gg"))] : shellG }
         if chord == "z" { return shellZ }
         if chord == "[" || chord == "]" { return headingChord }
         if !digits.isEmpty {
-            return ctx == .explorer
-                ? [.init("\(digits)j", "down \(digits)"), .init("\(digits)k", "up \(digits)"), .init("Esc", "cancel")]
-                : [.init("\(digits)j", "scroll \(digits)"), .init("\(digits)k", "scroll \(digits) up")]
+            switch ctx {
+            case .explorer, .home:
+                return [.init("\(digits)j", "down \(digits)"), .init("\(digits)k", "up \(digits)"), .init("Esc", "cancel")]
+            case .preview:
+                return [.init("\(digits)j", "scroll \(digits)"), .init("\(digits)}", "\(digits) headings"), .init("Esc", "cancel")]
+            default:
+                return [.init("\(digits)j", "scroll \(digits)"), .init("\(digits)k", "scroll \(digits) up")]
+            }
         }
         var out: [LegendItem]
         switch ctx {
-        case .explorer:
-            out = [
-                .init("j k", "move"), .init("h l", "folder"), .init("⏎", "open"), .init("⌃v ⌃s", "split"),
-                .init("e", "edit"), .init("/", "filter"), .init("a", "new"), .init("r", "rename"), .init("d", "delete"),
-                .init("y p", "copy"), .init("gb", "books"), .init("Esc q", "close"), .init("?", "keys"),
-            ]
-        case .preview:
-            out = [
-                .init("j k", "scroll"), .init("d u", "half page"), .init("{ }", "heading"), .init("gg G", "top/end"),
-                .init("/ n", "find"), .init("f", "links"), .init("gf K", "follow/peek"), .init("-", "files"),
-                .init("q ⌃h", "editor"), .init("?", "keys"),
-            ]
+        case .explorer: return floatItems
+        case .home: out = homeItems
+        case .preview: out = previewItems
         case .sidebar:
-            out = [
+            return [
                 .init("j k", "move"), .init("⏎ l", "open book"), .init("gg G", "top/end"), .init("g1–9", "book n"),
                 .init("Esc ⌃l", "back"), .init("?", "keys"),
             ]
-        default:
-            out = [
-                .init("j k", "scroll"), .init("d u", "half page"), .init("e i", "edit"), .init("-", "files"),
-                .init("gf K", "follow/peek link"), .init("⌃w v", "split"), .init("/ n", "find"), .init("q", "close"),
-                .init("F", "hints"), .init("space", "commands"), .init("?", "keys"),
-            ]
+        default: out = readerItems
         }
-        if let pane { out.insert(pane, at: out.count - 1) }
+        if let pane, ctx == .reader || ctx == .preview {
+            // After `F` hints (web order), before `space`.
+            let at = out.firstIndex { $0.keys == "space" } ?? out.count
+            out.insert(pane, at: at)
+        }
         return out
+    }
+
+    /// Which items fit on one line (web `fitLegend`). `widths[i]` is item
+    /// i's measured width in priority order, `gap` the space between
+    /// items, `available` the room. Greedy in priority order: an item
+    /// that does not fit is skipped and smaller, lower-priority ones may
+    /// still take the remaining room; the result keeps priority order.
+    /// When something is left out, `reserve` (the "⋯" marker) stays free.
+    public static func fit(widths: [Double], available: Double, gap: Double, reserve: Double = 0) -> (shown: [Int], overflow: Bool) {
+        let total = widths.reduce(0, +) + gap * Double(max(0, widths.count - 1))
+        if total <= available { return (Array(widths.indices), false) }
+        let room = available - reserve - gap
+        var shown: [Int] = []
+        var used = 0.0
+        for (i, w) in widths.enumerated() {
+            let need = w + (shown.isEmpty ? 0 : gap)
+            if used + need <= room {
+                shown.append(i)
+                used += need
+            }
+        }
+        return (shown, shown.count < widths.count)
     }
 
     // MARK: Editor (vim)
@@ -137,7 +257,7 @@ public enum CommandLegend {
     /// Legend for the editor (and the generic overlays: palette, prompt …).
     public static func items(_ ctx: LegendContext, pending: VimPendingInfo = VimPendingInfo(), extras: Extras = Extras()) -> [LegendItem] {
         switch ctx {
-        case .explorer, .reader, .preview, .sidebar:
+        case .explorer, .reader, .preview, .sidebar, .home, .hover, .books:
             return shellItems(ctx, pending: pending.display)
         default:
             break
@@ -149,29 +269,51 @@ public enum CommandLegend {
 
         switch ctx {
         case .normal:
+            let leader = displayLeader(extras.leader)
             var out: [LegendItem] = [
-                .init("i a o", "insert"), .init("v V ^V", "visual"), .init("d c y", "cut/change/copy"),
-                .init("p", "paste"), .init("u ^R", "undo/redo"), .init(".", "repeat"),
-                .init("/ n", "search"), .init(":", "command"), .init("-", "files"), .init("gf K", "link"),
+                .init("i a o", "insert", .vim("i")), .init("v V", "visual", .vim("v")), .init("dd yy p", "cut/copy/paste"),
+                .init("u ⌃r", "undo/redo", .vim("u"), tip: "u undo · ⌃r redo"), .init("/ n", "search", .vim("/")),
+                .init("-", "explorer", .ex("explore"), tip: "Floating explorer at this note"),
             ]
-            if let r = extras.recording { out.insert(.init("q", "stop recording @\(r)"), at: 0) }
-            if !extras.leaderMaps.isEmpty { out.append(.init(displayLeader(extras.leader), "leader")) }
+            if extras.source {
+                out.append(.init("\(leader)p", extras.split ? "hide preview" : "preview", .ex("preview split"),
+                                 tip: "Rendered preview beside the source (⌥⌘P, :preview split)"))
+            }
+            if extras.split, extras.pane != nil {
+                out.append(.init("⌃l", "read preview", .app("readPreview"), tip: "⌃l focuses the preview: j/k, { }, /, f; q or ⌃h comes back"))
+            } else if let pane = extras.pane {
+                out.append(pane)
+            }
+            out += [
+                .init(":q", "close", .ex("q")),
+                .init("gf K", "follow/preview link", .ex("hover"), tip: "gf or Enter on a link follows it · K previews it · ⌃w f opens it in a split"),
+                .init("⌃w v", "split", .ex("vsplit"), tip: ":vsplit / :split [note] · ⌃w q close · o only · z zoom · = equalize"),
+                .init("⌘E", "reading", .app("reading")), .init("ciw", "change word", .vim("ciw")), .init(".", "repeat", .vim(".")),
+                .init(">> <<", "indent", .vim(">>")), .init("* #", "word search", .vim("*")), .init("gg G", "top/end", .vim("gg")),
+                .init("ma 'a", "marks", tip: "m{a-z} sets a mark, '{a-z} jumps to it"),
+                .init("\"a", "registers", tip: "\"{a-z} before y/d/p picks a register"), .init("zz", "center", .vim("zz")),
+                .init("⌥⌘L ⌥⌘S", extras.source ? "live preview" : "source", .app("toggleMode")), .init(":", "ex", .vim(":")),
+            ]
+            if extras.split { out.append(.init("⌥⌘P", "split", .ex("preview split"))) }
+            if let r = extras.recording { out.insert(.init("q", "stop recording @\(r)", .vim("q")), at: 0) }
+            if !extras.leaderMaps.isEmpty { out.insert(.init(leader, "leader"), at: min(6, out.count)) }
             return out
         case .insert:
             let esc = extras.escapeSequences.isEmpty ? "Esc" : "Esc " + extras.escapeSequences.joined(separator: " ")
             return [
-                .init(esc, "normal"), .init("^W", "delete word"), .init("^U", "delete line"),
-                .init("^R{r}", "paste register"), .init("^O", "one command"), .init("^T ^D", "indent"),
+                .init(esc, "normal", .vim("<Esc>")), .init("[[", "link a note"), .init("⌃w", "delete word"),
+                .init("⌃u", "delete line start"), .init("⌃o", "one normal cmd"), .init("⌘E", "reading", .app("reading")),
+                .init("⌃r{r}", "paste register"), .init("⌃t ⌃d", "indent"),
             ]
         case .replace:
             return [.init("Esc", "normal"), .init("⌫", "restore"), .init("^R{r}", "paste register")]
         case .visual, .visualLine:
             var out: [LegendItem] = [
-                .init("y d c", "copy/cut/change"), .init("> <", "indent"), .init("~ u U", "case"),
-                .init("iw ip i(", "select"), .init("o", "other end"), .init("J", "join"),
-                .init(":", "range command"), .init("Esc", "normal"),
+                .init("y d c", "copy/cut/change", .vim("y")), .init("> <", "indent", .vim(">")), .init("~ u U", "case", .vim("~")),
+                .init("Esc", "normal", .vim("<Esc>")), .init("o", "other end", .vim("o")), .init("iw ip", "select word/para"),
+                .init("J", "join", .vim("J")), .init(":", "ex on range", .vim(":")),
             ]
-            if ctx == .visualLine { out.remove(at: 3) }
+            if ctx == .visualLine { out.removeAll { $0.keys == "iw ip" } }
             return out
         case .visualBlock:
             return [
@@ -195,18 +337,16 @@ public enum CommandLegend {
                 .init("y", "replace"), .init("n", "skip"), .init("a", "all"), .init("l", "this, stop"), .init("q Esc", "stop"),
             ]
         case .palette:
-            return [.init("↑ ↓ ⌃n ⌃p", "select"), .init("⏎", "run"), .init("Esc", "close")]
+            return [.init("↑ ↓ ⌃n ⌃p", "select"), .init("⏎", "run"), .init("Esc", "close"), .init(":", "commands only")]
         case .prompt:
             return [.init("⏎", "confirm"), .init("Esc", "cancel"), .init("a/b/name", "in folders"), .init("dir/", "folder")]
         case .filter:
             return [.init("⏎", "keep filter"), .init("↑ ↓", "move"), .init("Esc", "clear"), .init("n N", "next/prev (after ⏎)")]
         case .confirm:
             return [.init("y ⏎", "confirm"), .init("n Esc", "cancel")]
-        case .books:
-            return [.init("j k", "move"), .init("h l", "accounts / books"), .init("⏎", "open book"), .init("[ ]", "cycle"), .init("Esc q", "close")]
         case .help:
             return [.init("any key", "close")]
-        case .explorer, .reader, .preview, .sidebar:
+        case .explorer, .reader, .preview, .sidebar, .home, .hover, .books:
             return []
         }
     }

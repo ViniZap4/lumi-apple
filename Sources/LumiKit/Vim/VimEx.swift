@@ -106,6 +106,8 @@ extension VimEngine {
             fx = .host(args.isEmpty ? "split" : "split " + args)
         case "on", "onl", "only":
             fx = .host("only")
+        case "zoom":
+            fx = .host("zoom")
         case "Ex", "Exp", "Explore", "exp", "expl", "explo", "explor", "explore":
             fx = .host("explore")
         case "follow":

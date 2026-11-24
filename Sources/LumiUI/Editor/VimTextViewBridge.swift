@@ -555,6 +555,10 @@ final class VimAppKitTextView: NSTextView, EditorTextSurface {
 
     // MARK: Key routing
 
+    /// The first click into an inactive window places the caret too
+    /// (click-to-focus, SPEC-PARTE2 §3: no dead first clicks).
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func mouseDown(with event: NSEvent) {
         controller?.onUserInteraction?()
         if handleLiveClick(event) { return }

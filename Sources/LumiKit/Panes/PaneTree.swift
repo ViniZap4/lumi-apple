@@ -38,8 +38,9 @@ public enum NoteKind: String, Codable, Sendable, CaseIterable {
     public var views: [NoteViewMode] {
         switch self {
         case .markdown: return [.reading, .live, .source]
-        case .kanban: return [.board, .source]
-        case .canvas: return [.canvas, .source]
+        // Reading | Edit | Source (SPEC-PARTE2 §5a): Reading first.
+        case .kanban: return [.reading, .board, .source]
+        case .canvas: return [.reading, .canvas, .source]
         }
     }
 
@@ -55,13 +56,27 @@ public enum NoteViewMode: String, Codable, Sendable, CaseIterable {
         case .reading: return "Reading"
         case .live: return "Live"
         case .source: return "Source"
-        case .board: return "Board"
-        case .canvas: return "Canvas"
+        // The interactive Board / Canvas is the structured "Edit" mode.
+        case .board: return "Edit"
+        case .canvas: return "Edit"
         }
     }
 
     /// The view edits text (vim editor mounted).
     public var isEditing: Bool { self == .live || self == .source }
+
+    /// The interactive (editing) Board / Canvas.
+    public var isStructuredEdit: Bool { self == .board || self == .canvas }
+
+    /// The "edit" view of a kind: Live/Source for markdown (per
+    /// preference), the Board / Canvas for structured notes.
+    public static func editView(for kind: NoteKind, markdown: NoteViewMode) -> NoteViewMode {
+        switch kind {
+        case .markdown: return markdown
+        case .kanban: return .board
+        case .canvas: return .canvas
+        }
+    }
 }
 
 // MARK: - Tree
@@ -120,6 +135,12 @@ public struct PaneTree: Hashable, Codable, Sendable {
     /// drives and the app's open-note state mirrors. Other note panes
     /// are secondary (their own sessions from the pool).
     public private(set) var primary: PaneLeafID?
+    /// tmux-style zoom (`⌃w z`, SPEC-PARTE2 §3): this pane (with its
+    /// source + preview pair) fills the note area; the others are hidden,
+    /// not closed. Never persisted (not in the coding keys).
+    public private(set) var zoomed: PaneLeafID?
+
+    private enum CodingKeys: String, CodingKey { case root, focused, previous, nextID, primary }
 
     /// Most panes on screen at once (web `MAX_PANES`).
     public static let maxPanes = 8
@@ -135,7 +156,48 @@ public struct PaneTree: Hashable, Codable, Sendable {
         focused = id
         nextID = 2
         primary = id
+        zoomed = nil
     }
+
+    // MARK: Zoom (tmux `prefix z`)
+
+    /// The zoomed pane, when it is still in the tree.
+    public var zoomedLeaf: PaneLeafID? {
+        guard let z = zoomed, leaves.contains(z) else { return nil }
+        return z
+    }
+
+    public var isZoomed: Bool { zoomedLeaf != nil }
+
+    /// Leaves on screen: every leaf, or the zoomed one and its preview.
+    public var visibleLeaves: [PaneLeafID] {
+        guard let z = zoomedLeaf else { return leaves }
+        return leaves.filter { $0 == z || content($0) == .preview(of: z) }
+    }
+
+    /// Toggle zoom on `id` (default: the focused pane). A preview zooms
+    /// its note. False — nothing changes — when there is nothing else to
+    /// hide (one pane, or only a source + preview pair).
+    @discardableResult
+    public mutating func toggleZoom(_ id: PaneLeafID? = nil) -> Bool {
+        if zoomedLeaf != nil {
+            zoomed = nil
+            return true
+        }
+        zoomed = nil
+        var target = id ?? focused
+        if case let .preview(of: src)? = content(target), content(src) != nil { target = src }
+        guard leaves.contains(target), !Self.isUnit(root, target) else { return false }
+        if focused != target {
+            previous = focused
+            focused = target
+        }
+        zoomed = target
+        return true
+    }
+
+    /// Back to the exact previous layout (weights never changed).
+    public mutating func unzoom() { zoomed = nil }
 
     // MARK: Reading
 
@@ -217,13 +279,14 @@ public struct PaneTree: Hashable, Codable, Sendable {
     /// and goes after (right / below) the target. Returns its id.
     @discardableResult
     public mutating func split(_ axis: SplitAxis, content: PaneContent? = nil, target: PaneLeafID? = nil,
-                               ratio: Double = 0.5, focusNew: Bool = true) -> PaneLeafID {
+                               ratio: Double = 0.5, focusNew: Bool = true, before: Bool = false) -> PaneLeafID {
         let t = target ?? focused
         let id = PaneLeafID(nextID)
         nextID += 1
+        zoomed = nil
         let newContent = content ?? self.content(t) ?? .empty
         let r = min(1 - Self.minWeight, max(Self.minWeight, ratio))
-        root = Self.splitUnit(root, target: t, axis: axis, newLeaf: .leaf(id, newContent), ratio: r)
+        root = Self.splitUnit(root, target: t, axis: axis, newLeaf: .leaf(id, newContent), ratio: r, before: before)
         if focusNew { focus(id) }
         return id
     }
@@ -236,6 +299,7 @@ public struct PaneTree: Hashable, Codable, Sendable {
         let dependents = Self.leaves(root).filter { $0.1 == .preview(of: target) }.map(\.0)
         let remaining = Set(leaves).subtracting([target]).subtracting(dependents)
         guard !remaining.isEmpty else { return false }
+        zoomed = nil
         for gone in [target] + dependents {
             if let r = Self.remove(gone, from: root) { root = r }
         }
@@ -256,6 +320,7 @@ public struct PaneTree: Hashable, Codable, Sendable {
         var keep = focused
         if case let .preview(of: src)? = content(focused), content(src) != nil { keep = src }
         let pair = preview(of: keep)
+        zoomed = nil
         for id in leaves where id != keep && id != pair {
             if let r = Self.remove(id, from: root) { root = r }
         }
@@ -282,6 +347,7 @@ public struct PaneTree: Hashable, Codable, Sendable {
         var keep = focused
         if case let .preview(of: src)? = content(focused), content(src) != nil { keep = src }
         let c = content(keep) ?? .empty
+        zoomed = nil
         root = .leaf(keep, c)
         focused = keep
         previous = nil
@@ -303,6 +369,7 @@ public struct PaneTree: Hashable, Codable, Sendable {
 
     public mutating func focus(_ id: PaneLeafID) {
         guard id != focused, leaves.contains(id) else { return }
+        if zoomedLeaf != nil, !visibleLeaves.contains(id) { zoomed = nil }
         previous = focused
         focused = id
     }
@@ -484,18 +551,23 @@ public struct PaneTree: Hashable, Codable, Sendable {
         }
     }
 
-    static func splitUnit(_ n: PaneNode, target: PaneLeafID, axis: SplitAxis, newLeaf: PaneNode, ratio: Double) -> PaneNode {
-        if isUnit(n, target) { return .split(axis, [n, newLeaf], [ratio, 1 - ratio]) }
+    /// `before`: the new pane goes left / above the target (a drop on
+    /// its left or top edge) instead of right / below.
+    static func splitUnit(_ n: PaneNode, target: PaneLeafID, axis: SplitAxis, newLeaf: PaneNode, ratio: Double,
+                          before: Bool = false) -> PaneNode {
+        if isUnit(n, target) {
+            return before ? .split(axis, [newLeaf, n], [1 - ratio, ratio]) : .split(axis, [n, newLeaf], [ratio, 1 - ratio])
+        }
         guard case let .split(a, kids, w) = n else { return n }
         if a == axis, let i = kids.firstIndex(where: { isUnit($0, target) }) {
             var k = kids, ws = w
             let share = ws[i]
             ws[i] = share * ratio
-            k.insert(newLeaf, at: i + 1)
-            ws.insert(share * (1 - ratio), at: i + 1)
+            k.insert(newLeaf, at: before ? i : i + 1)
+            ws.insert(share * (1 - ratio), at: before ? i : i + 1)
             return .split(a, k, ws)
         }
-        return .split(a, kids.map { splitUnit($0, target: target, axis: axis, newLeaf: newLeaf, ratio: ratio) }, w)
+        return .split(a, kids.map { splitUnit($0, target: target, axis: axis, newLeaf: newLeaf, ratio: ratio, before: before) }, w)
     }
 
     /// Replace leaf `target` with a nested vertical [target, newLeaf].
@@ -646,6 +718,9 @@ public final class PaneLayoutStore: @unchecked Sendable {
     public func save(_ tree: PaneTree, forBook id: String) {
         lock.lock(); defer { lock.unlock() }
         var all = loadLocked()
+        // Zoom is never remembered (SPEC-PARTE2 §3).
+        var tree = tree
+        tree.unzoom()
         guard all[id] != tree else { return }
         all[id] = tree
         cache = all

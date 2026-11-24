@@ -13,42 +13,71 @@ public struct PaneLayoutView<Leaf: View>: View {
     let root: PaneNode
     let focused: PaneLeafID?
     let showsFocus: Bool
+    /// tmux-style zoom (`⌃w z`): this pane (and its preview, if drawn)
+    /// fills the area; the others stay mounted — sessions, cursors and
+    /// scroll positions intact — but hidden and out of reach of the mouse.
+    let zoomed: PaneLeafID?
     let onResize: ([Int], Int, Double) -> Void
     let leaf: (PaneLeafID, PaneContent) -> Leaf
 
     @Environment(\.lumiMotion) private var motion
 
-    public init(root: PaneNode, focused: PaneLeafID?, showsFocus: Bool,
+    public init(root: PaneNode, focused: PaneLeafID?, showsFocus: Bool, zoomed: PaneLeafID? = nil,
                 onResize: @escaping ([Int], Int, Double) -> Void,
                 @ViewBuilder leaf: @escaping (PaneLeafID, PaneContent) -> Leaf) {
         self.root = root
         self.focused = focused
         self.showsFocus = showsFocus
+        self.zoomed = zoomed
         self.onResize = onResize
         self.leaf = leaf
     }
 
+    /// Spring for the zoom grow / shrink (instant under Reduce Motion).
+    public static var zoomAnimation: Animation { .spring(response: 0.3, dampingFraction: 0.84) }
+
     public var body: some View {
-        render(root, path: [])
+        render(root, path: [], hidden: false)
             .animation(motion ? .smooth(duration: 0.18) : nil, value: root)
             .animation(motion ? .smooth(duration: 0.12) : nil, value: focused)
+            .animation(motion ? Self.zoomAnimation : nil, value: zoomed)
     }
 
-    private func render(_ node: PaneNode, path: [Int]) -> AnyView {
+    private func render(_ node: PaneNode, path: [Int], hidden: Bool) -> AnyView {
         switch node {
         case let .leaf(id, content):
             return AnyView(
                 leaf(id, content)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
-                    .overlay { PaneFocusRing(active: showsFocus && focused == id) }
+                    .overlay { PaneFocusRing(active: showsFocus && zoomed == nil && focused == id) }
+                    // Hidden by zoom: moved out of the window (no clicks,
+                    // scrolls, drops or hovers reach it) without a resize,
+                    // so nothing reflows; the move itself never animates.
+                    .offset(x: hidden ? Self.away : 0)
+                    .animation(nil, value: hidden)
+                    .opacity(hidden ? 0 : 1)
+                    .allowsHitTesting(!hidden)
+                    .accessibilityHidden(hidden)
             )
         case let .split(axis, kids, weights):
+            let zoomIndex = zoomed.flatMap { z in kids.firstIndex { Self.contains($0, z) } }
             return AnyView(
-                PaneSplitStack(axis: axis, weights: weights, keys: kids.map(Self.key), path: path, onResize: onResize) { i in
-                    render(kids[i], path: path + [i])
+                PaneSplitStack(axis: axis, weights: weights, keys: kids.map(Self.key), path: path,
+                               zoomIndex: zoomIndex, onResize: onResize) { i in
+                    render(kids[i], path: path + [i], hidden: hidden || (zoomIndex != nil && zoomIndex != i))
                 }
             )
+        }
+    }
+
+    /// Far enough that no window is that wide.
+    static var away: CGFloat { 40_000 }
+
+    static func contains(_ n: PaneNode, _ id: PaneLeafID) -> Bool {
+        switch n {
+        case let .leaf(l, _): return l == id
+        case let .split(_, kids, _): return kids.contains { contains($0, id) }
         }
     }
 
@@ -76,11 +105,14 @@ struct PaneFocusRing: View {
 }
 
 /// One split: children sized by weight, hairline dividers between them.
+/// Laid out in a ZStack with explicit frames so a zoomed child can grow
+/// over its siblings while they keep their size (no reflow, same views).
 struct PaneSplitStack: View {
     let axis: SplitAxis
     let weights: [Double]
     let keys: [Int]
     let path: [Int]
+    var zoomIndex: Int?
     let onResize: ([Int], Int, Double) -> Void
     let child: (Int) -> AnyView
 
@@ -89,37 +121,58 @@ struct PaneSplitStack: View {
     var body: some View {
         GeometryReader { geo in
             let total = axis == .vertical ? geo.size.width : geo.size.height
-            let room = max(0, total - CGFloat(max(0, keys.count - 1)) * PaneDivider.thickness)
-            let sizes = Self.sizes(weights: weights, count: keys.count, room: room)
-            let stack = ForEach(Array(keys.enumerated()), id: \.element) { i, _ in
-                Group {
-                    if axis == .vertical {
-                        child(i).frame(width: sizes[i])
-                    } else {
-                        child(i).frame(height: sizes[i])
-                    }
+            let frames = Self.frames(weights: weights, count: keys.count, size: geo.size, axis: axis)
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(keys.enumerated()), id: \.element) { i, _ in
+                    let f = (zoomIndex == i) ? CGRect(origin: .zero, size: geo.size) : frames.panes[i]
+                    child(i)
+                        .frame(width: f.width, height: f.height)
+                        .offset(x: f.minX, y: f.minY)
+                        .zIndex(zoomIndex == i ? 1 : 0)
+                        .transition(motion
+                            ? .opacity.combined(with: .move(edge: axis == .vertical ? .trailing : .bottom))
+                            : .identity)
                 }
-                .transition(motion
-                    ? .opacity.combined(with: .move(edge: axis == .vertical ? .trailing : .bottom))
-                    : .identity)
-                if i < keys.count - 1 {
+                ForEach(Array(frames.dividers.enumerated()), id: \.offset) { i, d in
                     PaneDivider(axis: axis, path: path) { location in
                         // The divider's position along the split, in 0…1.
-                        guard room > 0 else { return }
+                        guard total > 0 else { return }
                         let at = Double(location / total)
                         onResize(path, i, min(1, max(0, at)))
                     }
+                    .frame(width: d.width, height: d.height)
+                    .offset(x: d.minX, y: d.minY)
+                    .opacity(zoomIndex == nil ? 1 : 0)
+                    .allowsHitTesting(zoomIndex == nil)
                 }
             }
-            Group {
-                if axis == .vertical {
-                    HStack(spacing: 0) { stack }
-                } else {
-                    VStack(spacing: 0) { stack }
-                }
-            }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
             .coordinateSpace(.named(PaneDivider.space(path)))
         }
+    }
+
+    /// Child and divider rects for a split of `size`.
+    static func frames(weights: [Double], count: Int, size: CGSize, axis: SplitAxis) -> (panes: [CGRect], dividers: [CGRect]) {
+        let total = axis == .vertical ? size.width : size.height
+        let room = max(0, total - CGFloat(max(0, count - 1)) * PaneDivider.thickness)
+        let sizes = Self.sizes(weights: weights, count: count, room: room)
+        var panes: [CGRect] = [], dividers: [CGRect] = []
+        var at: CGFloat = 0
+        for (i, s) in sizes.enumerated() {
+            if axis == .vertical {
+                panes.append(CGRect(x: at, y: 0, width: s, height: size.height))
+            } else {
+                panes.append(CGRect(x: 0, y: at, width: size.width, height: s))
+            }
+            at += s
+            if i < count - 1 {
+                let t = PaneDivider.thickness
+                dividers.append(axis == .vertical ? CGRect(x: at, y: 0, width: t, height: size.height)
+                                                  : CGRect(x: 0, y: at, width: size.width, height: t))
+                at += t
+            }
+        }
+        return (panes, dividers)
     }
 
     static func sizes(weights: [Double], count: Int, room: CGFloat) -> [CGFloat] {

@@ -193,7 +193,11 @@ public final class KanbanBoardModel {
         return lanes[c.lane].cards[c.card]
     }
 
-    public var isEditable: Bool { doc.isEditable }
+    /// Reading mode (SPEC-PARTE2 §5a): navigate, focus, follow links —
+    /// never an edit, a move, a delete or a checkbox toggle.
+    public var readOnly = false
+    public var isEditable: Bool { doc.isEditable && !readOnly }
+    var readOnlyNotice: String { readOnly ? "Reading — e to edit" : "Read-only" }
 
     public func setCursor(_ c: KanbanCursor) {
         let cl = clampKanbanCursor(c, shape)
@@ -216,8 +220,8 @@ public final class KanbanBoardModel {
     /// Plan against the CURRENT text and apply in one transaction.
     @discardableResult
     func exec(_ build: (KanbanBoard) -> KanbanOp?) -> Bool {
-        guard doc.isEditable else {
-            flash("Read-only")
+        guard isEditable else {
+            flash(readOnlyNotice)
             return false
         }
         let b = Kanban.parse(doc.read())
@@ -278,7 +282,7 @@ public final class KanbanBoardModel {
     }
 
     public func requestDelete(_ vm: CardVM) {
-        guard doc.isEditable else { return flash("Read-only") }
+        guard isEditable else { return flash(readOnlyNotice) }
         confirmKey = vm.id
     }
 
@@ -298,7 +302,7 @@ public final class KanbanBoardModel {
     // MARK: - Inline editing
 
     public func startEdit(_ vm: CardVM) {
-        guard doc.isEditable else { return flash("Read-only") }
+        guard isEditable else { return flash(readOnlyNotice) }
         editAnchor = doc.anchor(vm.card.start)
         editing = .card(key: vm.id, anchor: vm.card.start)
         draft = vm.card.text
@@ -306,7 +310,7 @@ public final class KanbanBoardModel {
     }
 
     public func startNew(lane: Int, index: Int) {
-        guard doc.isEditable else { return flash("Read-only") }
+        guard isEditable else { return flash(readOnlyNotice) }
         guard needsNoFilter(), board.lanes.indices.contains(lane) else { return }
         editAnchor = doc.anchor(board.lanes[lane].start)
         editing = .new(lane: lane, laneStart: board.lanes[lane].start, index: index)
@@ -314,7 +318,7 @@ public final class KanbanBoardModel {
     }
 
     public func startRename(lane: Int) {
-        guard doc.isEditable else { return flash("Read-only") }
+        guard isEditable else { return flash(readOnlyNotice) }
         guard board.lanes.indices.contains(lane) else { return }
         editAnchor = doc.anchor(board.lanes[lane].start)
         editing = .lane(lane: lane, laneStart: board.lanes[lane].start)
@@ -322,7 +326,7 @@ public final class KanbanBoardModel {
     }
 
     public func startNewLane() {
-        guard doc.isEditable else { return flash("Read-only") }
+        guard isEditable else { return flash(readOnlyNotice) }
         editAnchor = nil
         editing = .newLane
         draft = ""
@@ -406,14 +410,14 @@ public final class KanbanBoardModel {
         case .newLane: startNewLane()
         case .edit: if let vm { startEdit(vm) }
         case .toggle:
-            if !doc.isEditable { flash("Read-only") } else if let vm { toggle(vm) }
+            if !isEditable { flash(readOnlyNotice) } else if let vm { toggle(vm) }
         case .delete:
             if let vm { requestDelete(vm) }
         case .filter: filterOpen = true
         case .rename: startRename(lane: cur.lane)
         case let .moveLane(toIndex): moveLane(from: cur.lane, toIndex: toIndex)
-        case .undo: doc.undo()
-        case .redo: doc.redo()
+        case .undo: if isEditable { doc.undo() } else { flash(readOnlyNotice) }
+        case .redo: if isEditable { doc.redo() } else { flash(readOnlyNotice) }
         case .escape:
             if !filter.isEmpty || filterOpen {
                 filter = ""
@@ -441,7 +445,7 @@ public final class KanbanBoardModel {
     // MARK: - Drag and drop
 
     /// Press on a card / lane header: focus it; a drag starts on movement.
-    public func canDrag() -> Bool { doc.isEditable && !isFiltering && editing == nil }
+    public func canDrag() -> Bool { isEditable && !isFiltering && editing == nil }
 
     public func beginDrag(_ d: Drag) {
         guard canDrag() else { return }

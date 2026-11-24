@@ -43,6 +43,10 @@ final class MarkdownDocumentNSTextView: NSTextView {
         super.scrollWheel(with: event)
     }
 
+    /// The first click into an inactive window selects / follows a link
+    /// too (click-to-focus, SPEC-PARTE2 §3).
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func mouseDown(with event: NSEvent) {
         onInteraction?()
         let point = convert(event.locationInWindow, from: nil)

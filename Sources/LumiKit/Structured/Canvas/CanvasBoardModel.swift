@@ -119,7 +119,10 @@ public final class CanvasBoardModel {
     // MARK: - Derived
 
     public var invalid: String? { parse.error }
-    public var isEditable: Bool { doc.isEditable && invalid == nil }
+    /// Reading mode (SPEC-PARTE2 §5a): pan, zoom, select to read, follow
+    /// links — never an edit, a move or a delete.
+    public var readOnly = false
+    public var isEditable: Bool { doc.isEditable && invalid == nil && !readOnly }
     public var issues: [String] { parse.parsed?.issues ?? [] }
 
     var baseNodes: [CanvasNode] { parse.parsed?.nodes ?? lastGood.nodes }
@@ -156,7 +159,7 @@ public final class CanvasBoardModel {
     @discardableResult
     public func commit(_ op: @escaping CanvasOp) -> Bool {
         guard isEditable else {
-            flash(invalid != nil ? "Invalid JSON: fix it in Source" : "Read-only")
+            flash(readOnly ? "Reading — e to edit" : (invalid != nil ? "Invalid JSON: fix it in Source" : "Read-only"))
             return false
         }
         let cur = doc.read()
@@ -230,7 +233,7 @@ public final class CanvasBoardModel {
     }
 
     public func startEdit(_ n: CanvasNode, isNew: Bool = false) {
-        guard isEditable else { return flash("Read-only") }
+        guard isEditable else { return flash(readOnly ? "Reading — e to edit" : "Read-only") }
         select([n.id])
         switch n.type {
         case .text:
@@ -244,7 +247,7 @@ public final class CanvasBoardModel {
     }
 
     public func startEdgeEdit(_ e: CanvasEdge) {
-        guard isEditable else { return flash("Read-only") }
+        guard isEditable else { return flash(readOnly ? "Reading — e to edit" : "Read-only") }
         select([], edge: e.id)
         editing = .edge(id: e.id)
         draft = e.label ?? ""
@@ -291,7 +294,7 @@ public final class CanvasBoardModel {
     // MARK: - Creating
 
     public func addText(at p: CGPoint) {
-        guard isEditable else { return flash(invalid != nil ? "Invalid JSON: fix it in Source" : "Read-only") }
+        guard isEditable else { return flash(readOnly ? "Reading — e to edit" : (invalid != nil ? "Invalid JSON: fix it in Source" : "Read-only")) }
         let id = newID()
         let node = Canvas.textNode(id: id, text: "", x: JSNumber.round(p.x - 125), y: JSNumber.round(p.y - 30))
         if commit(Canvas.addNode(node)) {
@@ -313,7 +316,7 @@ public final class CanvasBoardModel {
     }
 
     public func openPicker(at: CGPoint? = nil) {
-        guard isEditable else { return flash("Read-only") }
+        guard isEditable else { return flash(readOnly ? "Reading — e to edit" : "Read-only") }
         picker = Picker(query: "", at: at ?? nextSlot(400), cursor: 0)
     }
 
@@ -615,8 +618,8 @@ public final class CanvasBoardModel {
         case .addFile: openPicker()
         case .delete: deleteSelection()
         case let .color(c): setColor(c)
-        case .undo: doc.undo()
-        case .redo: doc.redo()
+        case .undo: if isEditable { doc.undo() }
+        case .redo: if isEditable { doc.redo() }
         case .escape:
             if hasSelection { select([]) } else { return false }
         }

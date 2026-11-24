@@ -44,6 +44,8 @@ struct HoverCardState: Equatable, Identifiable {
     var body: String?
     var truncated = false
     var error: String?
+    /// A board / canvas target: drawn as a mini board / canvas.
+    var structured: StructuredMini?
 }
 
 extension AppState {
@@ -311,17 +313,17 @@ extension AppState {
         let path = note.path.isEmpty ? note.id : note.path
         // Unsaved text of an open note wins.
         if let doc = localDocs.peek(path) {
-            applyHoverBody(id, doc.currentText, error: nil)
+            applyHoverBody(id, doc.currentText, error: nil, path: path)
             return
         }
         if openNotePath == path, !openNoteText.isEmpty {
-            applyHoverBody(id, openNoteText, error: nil)
+            applyHoverBody(id, openNoteText, error: nil, path: path)
             return
         }
         switch explorer.source {
         case let .local(root):
             guard let url = try? LumiOpenURL.localNoteURL(path, in: root) else {
-                applyHoverBody(id, nil, error: "can't read this note")
+                applyHoverBody(id, nil, error: "can't read this note", path: path)
                 return
             }
             Task { @MainActor [weak self] in
@@ -330,20 +332,20 @@ extension AppState {
                     defer { try? h.close() }
                     return (try? h.read(upToCount: 256 * 1024)).map { String(decoding: $0, as: UTF8.self) }
                 }.value
-                self?.applyHoverBody(id, raw, error: raw == nil ? "can't read this note" : nil)
+                self?.applyHoverBody(id, raw, error: raw == nil ? "can't read this note" : nil, path: path)
             }
         case let .remote(vault):
             if let s = remoteVaultsStore.pooledSession(vaultID: vault, noteID: note.id), s.hasSynced {
-                applyHoverBody(id, s.text, error: nil)
+                applyHoverBody(id, s.text, error: nil, path: path)
                 return
             }
             let store = remoteVaultsStore
             Task { @MainActor [weak self] in
                 do {
                     let body = try await store.noteBody(noteID: note.id)
-                    self?.applyHoverBody(id, body, error: nil)
+                    self?.applyHoverBody(id, body, error: nil, path: path)
                 } catch {
-                    self?.applyHoverBody(id, nil, error: self?.describe(error) ?? "can't load this note")
+                    self?.applyHoverBody(id, nil, error: self?.describe(error) ?? "can't load this note", path: path)
                 }
             }
         case .none:
@@ -351,9 +353,11 @@ extension AppState {
         }
     }
 
-    private func applyHoverBody(_ id: UUID, _ raw: String?, error: String?) {
+    private func applyHoverBody(_ id: UUID, _ raw: String?, error: String?, path: String) {
         guard hoverCard?.id == id else { return }
         if let raw {
+            hoverCard?.structured = StructuredMini.make(path: path, text: raw)
+            noteKindLearned(path, text: raw)
             let ex = HoverPreview.excerpt(raw)
             hoverCard?.body = ex.text
             hoverCard?.truncated = ex.truncated

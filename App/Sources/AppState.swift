@@ -237,6 +237,20 @@ final class AppState {
     @ObservationIgnored var paneReaders: [PaneLeafID: ReadModeCoordinator] = [:]
     /// Pane frames in window coordinates (a click focuses the pane).
     @ObservationIgnored var paneGlobalFrames: [PaneLeafID: CGRect] = [:]
+    #if os(macOS)
+    /// Exact AppKit geometry of the mounted panes (click-to-focus).
+    @ObservationIgnored let paneProbes = PaneProbeRegistry()
+    #endif
+    /// Learned note kinds (kanban frontmatter) by book path.
+    var noteKindCache: [String: NoteKind] = [:]
+    @ObservationIgnored var noteKindPending: Set<String> = []
+    /// The open board / canvas is in Edit (not Reading) — SPEC-PARTE2 §5a.
+    var structuredEditing = false
+    /// A note row from the explorer is being dragged (its path).
+    var noteDrag: String?
+    @ObservationIgnored var noteDragWatch: Task<Void, Never>?
+    /// Where that drag would land: pane and zone (edge highlight).
+    var paneDrop: PaneDropTarget?
     /// For `⌃w p` across panes.
     @ObservationIgnored var previousSlot: FocusSlot?
     /// Local notes open in panes: one `EditorState` per note, shared.

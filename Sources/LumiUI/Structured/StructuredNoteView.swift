@@ -42,6 +42,13 @@ final class StructuredHostState {
     @ObservationIgnored private var task: Task<Void, Never>?
     let kanban: KanbanBoardModel?
     let canvas: CanvasBoardModel?
+    /// Reading mode: navigation only (SPEC-PARTE2 §5a).
+    var readOnly = false {
+        didSet {
+            kanban?.readOnly = readOnly
+            canvas?.readOnly = readOnly
+        }
+    }
 
     init(kind: StructuredKind, body: String) {
         self.kind = kind
@@ -138,6 +145,11 @@ public struct StructuredNoteView: View {
     /// Hosts that route keys per pane get the handler here (nil when the
     /// view goes); without it the view installs into `StructuredKeyRouting`.
     let keySink: ((((StructuredKey) -> Bool)?) -> Void)?
+    /// Reading (read-only) rather than Edit.
+    let readOnly: Bool
+    /// The view asks for Edit (`i` / `e` in Reading) or Reading (`Esc` /
+    /// `q` in Edit with nothing selected).
+    let onMode: ((StructuredModeKeys.Request) -> Void)?
 
     @State private var state: StructuredHostState
     @Environment(\.theme) private var theme
@@ -152,9 +164,13 @@ public struct StructuredNoteView: View {
         motion: Bool = true,
         openLink: @escaping (String, StructuredOpenTarget) -> Void = { _, _ in },
         onSource: (() -> Void)? = nil,
-        keySink: ((((StructuredKey) -> Bool)?) -> Void)? = nil
+        keySink: ((((StructuredKey) -> Bool)?) -> Void)? = nil,
+        readOnly: Bool = false,
+        onMode: ((StructuredModeKeys.Request) -> Void)? = nil
     ) {
         self.keySink = keySink
+        self.readOnly = readOnly
+        self.onMode = onMode
         self.kind = kind
         self.title = title
         self.restBody = body
@@ -194,10 +210,26 @@ public struct StructuredNoteView: View {
             content
         }
         .onAppear {
+            state.readOnly = readOnly
             state.start(source)
             wire()
-            let handler: ((StructuredKey) -> Bool)? = state.kanban.map { k in { k.handleKey($0) } }
+            let inner: ((StructuredKey) -> Bool)? = state.kanban.map { k in { k.handleKey($0) } }
                 ?? state.canvas.map { c in { c.handleKey($0) } }
+            let state = self.state, onMode = self.onMode
+            let handler: ((StructuredKey) -> Bool)? = inner.map { inner in
+                { key in
+                    if let onMode, let r = StructuredModeKeys.before(key, reading: state.readOnly) {
+                        onMode(r)
+                        return true
+                    }
+                    let handled = inner(key)
+                    if let onMode, let r = StructuredModeKeys.after(key, reading: state.readOnly, handled: handled) {
+                        onMode(r)
+                        return true
+                    }
+                    return handled
+                }
+            }
             if let keySink { keySink(handler) } else if let handler { StructuredKeyRouting.install(state, handler) }
         }
         .onDisappear {
@@ -205,6 +237,7 @@ public struct StructuredNoteView: View {
             state.stop()
         }
         .onChange(of: restBody) { _, b in state.updateBody(b) }
+        .onChange(of: readOnly) { _, r in state.readOnly = r }
         // Switch preview → live when the first SyncStep2 lands.
         .onChange(of: state.isLive) { _, _ in state.adopt() }
         .onChange(of: notes) { _, n in state.canvas?.notes = n }

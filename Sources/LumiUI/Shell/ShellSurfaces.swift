@@ -78,13 +78,20 @@ public struct PaneHeaderBar: View {
     let canEdit: Bool
     let focused: Bool
     var badge: String?
+    /// Kind glyph before the title (doc / board / canvas).
+    var icon: String?
+    /// tmux-style zoom: the pane fills the note area.
+    var zoomed: Bool
+    /// Zoom / unzoom (button, double-click); nil hides the button.
+    var onZoom: (() -> Void)?
     let onSelect: (NoteViewMode) -> Void
     let onClose: () -> Void
     @Environment(\.theme) private var theme
     @State private var hoverClose = false
+    @State private var hoverZoom = false
 
     public init(title: String, folder: String, views: [NoteViewMode], selection: NoteViewMode, canEdit: Bool,
-                focused: Bool, badge: String? = nil,
+                focused: Bool, badge: String? = nil, icon: String? = nil, zoomed: Bool = false, onZoom: (() -> Void)? = nil,
                 onSelect: @escaping (NoteViewMode) -> Void, onClose: @escaping () -> Void) {
         self.title = title
         self.folder = folder
@@ -93,6 +100,9 @@ public struct PaneHeaderBar: View {
         self.canEdit = canEdit
         self.focused = focused
         self.badge = badge
+        self.icon = icon
+        self.zoomed = zoomed
+        self.onZoom = onZoom
         self.onSelect = onSelect
         self.onClose = onClose
     }
@@ -110,11 +120,17 @@ public struct PaneHeaderBar: View {
                     .truncationMode(.head)
                     .layoutPriority(-1)
             }
+            if let icon {
+                Image(systemName: icon)
+                    .font(.system(size: 10))
+                    .foregroundStyle(theme.textDim)
+            }
             Text(title)
                 .font(ShellFont.chromeBold)
                 .foregroundStyle(focused ? theme.text : theme.textDim)
                 .lineLimit(1)
                 .truncationMode(.tail)
+            if zoomed { ZoomBadge() }
             if let badge {
                 Text(badge)
                     .font(ShellFont.small)
@@ -125,6 +141,9 @@ public struct PaneHeaderBar: View {
             Spacer(minLength: 6)
             if views.count > 1 {
                 ViewSwitchControl(views: views, selection: selection, canEdit: canEdit, compact: true, onSelect: onSelect)
+            }
+            if let onZoom {
+                PaneZoomButton(zoomed: zoomed, action: onZoom)
             }
             Button(action: onClose) {
                 Image(systemName: "xmark")
@@ -144,6 +163,156 @@ public struct PaneHeaderBar: View {
         .frame(height: 30)
         .background(focused ? theme.text.opacity(theme.isDark ? 0.035 : 0.025) : Color.clear)
         .overlay(alignment: .bottom) { Hairline() }
+        // Double-click the header: zoom (buttons inside keep their clicks).
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { onZoom?() }
+    }
+}
+
+/// "zoomed" pill (pane header, note bar, status line).
+public struct ZoomBadge: View {
+    @Environment(\.theme) private var theme
+    public init() {}
+    public var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 8, weight: .bold))
+            Text("zoomed")
+                .font(.system(size: 10, weight: .semibold))
+        }
+        .foregroundStyle(theme.primary)
+        .padding(.horizontal, 6)
+        .frame(height: 16)
+        .background(Capsule().fill(theme.primary.opacity(0.14)))
+        .fixedSize()
+        .accessibilityLabel("Pane zoomed")
+    }
+}
+
+/// Zoom / unzoom button (⌃w z).
+public struct PaneZoomButton: View {
+    let zoomed: Bool
+    let action: () -> Void
+    @Environment(\.theme) private var theme
+    @State private var hover = false
+
+    public init(zoomed: Bool, action: @escaping () -> Void) {
+        self.zoomed = zoomed
+        self.action = action
+    }
+
+    public var body: some View {
+        Button(action: action) {
+            Image(systemName: zoomed ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundStyle(zoomed ? theme.primary : (hover ? theme.text : theme.textDim))
+                .frame(width: 20, height: 18)
+                .background(RoundedRectangle(cornerRadius: 4).fill(zoomed ? theme.primary.opacity(0.12) : (hover ? theme.text.opacity(0.08) : .clear)))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help(zoomed ? "Unzoom (⌃w z · :zoom · double-click the header)" : "Zoom this pane (⌃w z · :zoom · double-click the header)")
+        .accessibilityLabel(zoomed ? "Unzoom pane" : "Zoom pane")
+    }
+}
+
+/// Where a dragged note will land on a pane: the half it will take
+/// (edges) or the whole pane (centre), with a caption.
+public struct PaneDropHighlight: View {
+    let zone: PaneDropZone
+    @Environment(\.theme) private var theme
+
+    public init(zone: PaneDropZone) { self.zone = zone }
+
+    public var body: some View {
+        GeometryReader { geo in
+            let r = zone.highlight
+            let rect = CGRect(x: r.x * geo.size.width, y: r.y * geo.size.height,
+                              width: r.width * geo.size.width, height: r.height * geo.size.height).insetBy(dx: 4, dy: 4)
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(theme.primary.opacity(0.14))
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(theme.primary.opacity(0.85), style: StrokeStyle(lineWidth: 2, dash: zone == .center ? [6, 4] : []))
+                Label(zone.label, systemImage: Self.symbol(zone))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(theme.primary)
+                    .padding(.horizontal, 10)
+                    .frame(height: 26)
+                    .background(Capsule().fill(theme.background.opacity(0.92)))
+            }
+            .frame(width: rect.width, height: rect.height)
+            .offset(x: rect.minX, y: rect.minY)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    public static func symbol(_ zone: PaneDropZone) -> String {
+        switch zone {
+        case .left: return "rectangle.lefthalf.inset.filled"
+        case .right: return "rectangle.righthalf.inset.filled"
+        case .top: return "rectangle.tophalf.inset.filled"
+        case .bottom: return "rectangle.bottomhalf.inset.filled"
+        case .center: return "rectangle.inset.filled"
+        }
+    }
+}
+
+/// Inline row actions in the explorer (hovered / selected note): Open,
+/// Open right, Open below.
+public struct ExplorerRowActions: View {
+    let onOpen: () -> Void
+    let onRight: () -> Void
+    let onBelow: () -> Void
+    @Environment(\.theme) private var theme
+
+    public init(onOpen: @escaping () -> Void, onRight: @escaping () -> Void, onBelow: @escaping () -> Void) {
+        self.onOpen = onOpen
+        self.onRight = onRight
+        self.onBelow = onBelow
+    }
+
+    public static let items: [(symbol: String, help: String)] = [
+        ("arrow.up.right.square", "Open (⏎)"),
+        ("rectangle.righthalf.inset.filled", "Open right (⌃v)"),
+        ("rectangle.bottomhalf.inset.filled", "Open below (⌃s)"),
+    ]
+
+    public var body: some View {
+        HStack(spacing: 2) {
+            RowActionButton(symbol: Self.items[0].symbol, help: Self.items[0].help, action: onOpen)
+            RowActionButton(symbol: Self.items[1].symbol, help: Self.items[1].help, action: onRight)
+            RowActionButton(symbol: Self.items[2].symbol, help: Self.items[2].help, action: onBelow)
+        }
+        .padding(.horizontal, 3)
+        .frame(height: ShellMetrics.rowHeight - 4)
+        .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(theme.overlayBackground.opacity(0.96)))
+        .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(theme.border.opacity(0.7), lineWidth: 0.5))
+    }
+}
+
+struct RowActionButton: View {
+    let symbol: String
+    let help: String
+    let action: () -> Void
+    @Environment(\.theme) private var theme
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 10.5))
+                .foregroundStyle(hover ? theme.primary : theme.textDim)
+                .frame(width: 22, height: 18)
+                .background(RoundedRectangle(cornerRadius: 4).fill(hover ? theme.primary.opacity(0.12) : .clear))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help(help)
+        .accessibilityLabel(help)
     }
 }
 
@@ -324,6 +493,9 @@ public struct HoverCardView: View {
     var onScrollView: ((MarkdownPlatformScrollView) -> Void)?
     /// Test seam: render the excerpt with another view (offscreen PNGs).
     var excerptOverride: ((String) -> AnyView)?
+    /// A canvas / board target: drawn as a mini canvas / board instead of
+    /// its raw text.
+    public var structured: StructuredMini?
     @Environment(\.theme) private var theme
 
     public static let size = CGSize(width: 460, height: 360)
@@ -372,10 +544,17 @@ public struct HoverCardView: View {
         switch kind {
         case let .note(title, folder, updated, _, _, _):
             VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.system(size: 13.5, weight: .semibold))
-                    .foregroundStyle(theme.text)
-                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    if let structured {
+                        Image(systemName: structured.kind.symbol)
+                            .font(.system(size: 11))
+                            .foregroundStyle(theme.textDim)
+                    }
+                    Text(title)
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(1)
+                }
                 HStack(spacing: 6) {
                     Image(systemName: "folder").font(.system(size: 9))
                     Text(folder.isEmpty ? "/" : folder)
@@ -425,7 +604,10 @@ public struct HoverCardView: View {
     private var content: some View {
         switch kind {
         case let .note(title, _, _, body, truncated, error):
-            if let body {
+            if let structured {
+                StructuredMiniView(structured)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let body {
                 VStack(spacing: 0) {
                     Group {
                         if let excerptOverride {

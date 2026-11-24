@@ -638,6 +638,7 @@ struct VimExTableTests {
         #expect(eff(":vs plan<CR>") == .host("vsplit plan"))
         #expect(eff(":sp<CR>") == .host("split"))
         #expect(eff(":only<CR>") == .host("only"))
+        #expect(eff(":zoom<CR>") == .host("zoom"))
         #expect(eff(":close<CR>") == .host("close"))
         #expect(eff(":Ex<CR>") == .host("explore"))
         #expect(eff(":explore<CR>") == .host("explore"))

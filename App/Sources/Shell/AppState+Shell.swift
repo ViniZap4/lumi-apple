@@ -181,7 +181,10 @@ extension AppState {
     }
 
     func toggleEditing() {
-        if isNoteOpen {
+        if isNoteOpen, openNoteKind != .markdown, !isEditing {
+            // Board / Canvas: Reading ⇄ Edit (SPEC-PARTE2 §5a).
+            setNoteViewMode(noteViewMode == .reading ? NoteViewMode.editView(for: openNoteKind, markdown: .live) : .reading)
+        } else if isNoteOpen {
             setEditing(!isEditing)
         } else if let cur = explorer.nav.current, cur.kind == .note {
             open(cur, edit: true)

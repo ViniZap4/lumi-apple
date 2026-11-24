@@ -14,9 +14,13 @@ extension AppState {
     /// What the open note shows.
     var noteViewMode: NoteViewMode {
         guard isNoteOpen else { return .reading }
-        // Board / Canvas notes: their view, or Source while editing.
+        // Board / Canvas notes (SPEC-PARTE2 §5a): Reading (default),
+        // Edit (the interactive board / canvas) or Source.
         let kind = openNoteKind
-        if kind != .markdown { return isEditing ? .source : kind.defaultView }
+        if kind != .markdown {
+            if isEditing { return .source }
+            return structuredEditing ? NoteViewMode.editView(for: kind, markdown: .live) : .reading
+        }
         guard isEditing else { return .reading }
         // A pane remembers Live vs Source; new edits take the preference.
         if case let .note(_, view)? = noteLayout.content(noteLayout.mainLeaf), view.isEditing { return view }
@@ -30,7 +34,11 @@ extension AppState {
         switch mode {
         case .source where openNoteKind != .markdown:
             // Structured Source never changes the markdown edit mode.
+            structuredEditing = false
             if !isEditing { setEditing(true) }
+        case .board, .canvas:
+            structuredEditing = true
+            if isEditing { setEditing(false) }
         case .live, .source:
             let wanted: LumiPreferences.EditMode = mode == .live ? .live : .source
             if preferences.editMode != wanted {
@@ -41,6 +49,7 @@ extension AppState {
             if mode == .live, splitPreviewShown { setSplitPreview(false) }
             if !isEditing { setEditing(true) }
         default:
+            structuredEditing = false
             setEditing(false)
         }
         syncLayoutContent()
@@ -64,6 +73,8 @@ extension AppState {
     @discardableResult
     func openNote(atPath path: String, edit: Bool? = nil) -> Bool {
         let wantsEdit = edit ?? isEditing
+        // Boards and canvases always open in Reading (SPEC-PARTE2 §5a).
+        if path != openNotePath { structuredEditing = false }
         switch explorer.source {
         case let .local(root):
             let url = root.appendingPathComponent(path)
@@ -163,7 +174,7 @@ extension AppState {
         layoutStore.save(noteLayout, forBook: id)
     }
 
-    /// Layout pane commands: `⌃w q/c o = v s f F Enter < > + -`.
+    /// Layout pane commands: `⌃w q/c o = v s f F Enter < > + - z`.
     func performLayout(_ command: PaneCommand) {
         switch command {
         case .close:
@@ -180,6 +191,8 @@ extension AppState {
             followLinkInFocusedPane(target)
         case let .resize(axis, steps):
             resizeFocusedPane(axis, steps: steps)
+        case .zoom:
+            toggleZoom()
         default:
             break
         }

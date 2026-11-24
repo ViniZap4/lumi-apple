@@ -42,6 +42,9 @@ public enum PaneCommand: Sendable, Hashable {
     /// `⌃w >` `<` (`.vertical`: wider / narrower), `⌃w +` `-`
     /// (`.horizontal`: taller / shorter). `steps` is ±1 (× a count).
     case resize(SplitAxis, Int)
+    /// `⌃w z` / `:zoom`: zoom the focused pane to the whole note area, or
+    /// back (tmux `prefix z`).
+    case zoom
 
     /// Commands that change the layout rather than move focus.
     public var isLayout: Bool {
@@ -136,7 +139,7 @@ public enum PaneGraph {
             guard visible.count > 1, let i = visible.firstIndex(of: from) else { return nil }
             let step = command == .next ? 1 : -1
             return PaneTarget(visible[(i + step + visible.count) % visible.count])
-        case .close, .only, .equalize, .split, .follow, .resize:
+        case .close, .only, .equalize, .split, .follow, .resize, .zoom:
             // Layout commands: the pane tree handles them, not focus.
             return nil
         case .last:
@@ -303,6 +306,7 @@ extension PaneCommand {
         case "<": return .resize(.vertical, -1)
         case "+": return .resize(.horizontal, 1)
         case "-": return .resize(.horizontal, -1)
+        case "z": return .zoom
         default: return nil
         }
     }

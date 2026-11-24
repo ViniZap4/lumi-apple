@@ -284,7 +284,7 @@ struct FloatingExplorerOverlay: View {
     var body: some View {
         GeometryReader { geo in
             let compact = geo.size.width < 720
-            FloatingPanel(title: title, path: path, hints: hints(compact), compact: compact,
+            FloatingPanel(title: title, path: path, hints: [], compact: compact,
                           onDismiss: { appState.closeFloatingExplorer() }) {
                 Group {
                     if appState.floatingLevel == .files {
@@ -295,8 +295,14 @@ struct FloatingExplorerOverlay: View {
                 }
                 .transition(appState.transition(.opacity))
             } footer: {
-                EmptyView()
+                // The navigation legend: clickable, fitted, with the count.
+                FloatingExplorerLegend()
             }
+            // Dragging a note onto a pane edge: the panes underneath take
+            // the drop, so the overlay steps aside.
+            .opacity(appState.noteDrag == nil ? 1 : 0.1)
+            .allowsHitTesting(appState.noteDrag == nil)
+            .animation(appState.animation(.fast), value: appState.noteDrag == nil)
         }
     }
 
@@ -312,13 +318,6 @@ struct FloatingExplorerOverlay: View {
         return "/" + dir + (filter.isEmpty ? "" : "  filter: \(filter)")
     }
 
-    private func hints(_ compact: Bool) -> [(String, String)] {
-        if compact { return [("esc", "close")] }
-        if appState.floatingLevel == .books {
-            return [("⏎", "open"), ("h l", "accounts / books"), ("esc", "close")]
-        }
-        return [("⏎", "open"), ("⌃v", "split"), ("⌃s", "stacked"), ("gb", "books"), ("esc", "close")]
-    }
 }
 
 /// Accounts → books, with a details column.

@@ -17,7 +17,7 @@ struct HoverCardOverlay: View {
                 let y = below + size.height <= geo.size.height - 8 ? below : max(8, card.anchor.minY - size.height - 6)
                 let anchorPoint = UnitPoint(x: max(0, min(1, (card.anchor.midX - x) / size.width)),
                                             y: y >= below ? 0 : 1)
-                HoverCardView(
+                Self.card(HoverCardView(
                     kind: card.kind(appState),
                     keyboard: card.keyboard,
                     scale: appState.preferences.readingScale,
@@ -26,7 +26,7 @@ struct HoverCardOverlay: View {
                     onSplit: card.isNote ? { appState.hoverOpen(.vsplit) } : nil,
                     onClose: { appState.closeHoverCard() },
                     onScrollView: { appState.hoverCoordinator.attach(scrollView: $0) }
-                )
+                ), structured: card.structured)
                 .onHover { inside in
                     if inside { appState.hoverIntentStore?.hold() } else if !card.keyboard { appState.hoverIntentStore?.leave() }
                 }
@@ -36,6 +36,12 @@ struct HoverCardOverlay: View {
             }
         }
         .animation(appState.motionEnabled ? .spring(response: 0.22, dampingFraction: 0.82) : nil, value: appState.hoverCard?.id)
+    }
+
+    static func card(_ v: HoverCardView, structured: StructuredMini?) -> HoverCardView {
+        var v = v
+        v.structured = structured
+        return v
     }
 }
 

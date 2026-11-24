@@ -24,8 +24,10 @@ import AppKit
 
 extension NoteViewHooks {
     static func registerStructured() {
-        register(.kanban, views: [.board, .source]) { ctx in AnyView(StructuredPane(context: ctx)) }
-        register(.canvas, views: [.canvas, .source]) { ctx in AnyView(StructuredPane(context: ctx)) }
+        // Reading | Edit | Source (SPEC-PARTE2 §5a): Reading is the
+        // read-only board / canvas, Edit the interactive one.
+        register(.kanban, views: [.reading, .board, .source]) { ctx in AnyView(StructuredPane(context: ctx)) }
+        register(.canvas, views: [.reading, .canvas, .source]) { ctx in AnyView(StructuredPane(context: ctx)) }
     }
 }
 
@@ -126,7 +128,9 @@ struct StructuredPane: View {
                     openLink: { context.openStructured($0, $1) },
                     // The pane header / note bar carries Board | Source.
                     onSource: nil,
-                    keySink: { context.registerKeys($0) }
+                    keySink: { context.registerKeys($0) },
+                    readOnly: context.view == .reading,
+                    onMode: modeRequest
                 )
                 .id(context.noteID)
             } else if let localText {
@@ -139,7 +143,9 @@ struct StructuredPane: View {
                     openLink: { context.openStructured($0, $1) },
                     // The pane header / note bar carries Board | Source.
                     onSource: nil,
-                    keySink: { context.registerKeys($0) }
+                    keySink: { context.registerKeys($0) },
+                    readOnly: context.view == .reading,
+                    onMode: modeRequest
                 )
             } else {
                 NoteSkeleton()
@@ -159,6 +165,20 @@ struct StructuredPane: View {
     }
 
     private var kind: StructuredKind { context.kind == .canvas ? .canvas : .kanban }
+
+    /// Reading ⇄ Edit from the board's keys (SPEC-PARTE2 §5a).
+    private var modeRequest: (StructuredModeKeys.Request) -> Void {
+        let ctx = context
+        return { r in
+            switch r {
+            case .edit:
+                guard !ctx.isReadOnly else { return }
+                ctx.switchView(NoteViewMode.editView(for: ctx.kind, markdown: .live))
+            case .reading:
+                ctx.switchView(.reading)
+            }
+        }
+    }
 
     private func bindLocal() {
         guard !context.isRemote, handle == nil, let h = context.acquireSession() else { return }

@@ -140,23 +140,6 @@ extension AppState {
         keymap.reset()
     }
 
-    /// A click landed in a pane (KeyRouter's mouse monitor).
-    func paneClicked(at point: CGPoint) {
-        guard isSplit, !showFloatingExplorer else { return }
-        let visible = Set(visibleLayout.leaves)
-        guard let hit = paneGlobalFrames.first(where: { visible.contains($0.key) && $0.value.contains(point) })?.key else { return }
-        if hit == primaryLeaf {
-            if secondaryFocus != nil {
-                previousSlot = currentSlot
-                secondaryFocus = nil
-                noteLayout.focus(hit)
-                keymap.reset()
-            }
-        } else {
-            noteSecondaryFocus(hit)
-        }
-    }
-
     private func leaveSidebarQuietly() {
         sidebarAutoShown = false
     }
@@ -175,6 +158,8 @@ extension AppState {
     /// `⌃h/j/k/l`, `⌃w h/j/k/l`: by geometry. The primary's own editor ⇄
     /// preview moves come first. (No sidebar: books are in the overlay.)
     func movePane(_ dir: PaneDirection) -> Bool {
+        // Moving to another pane unzooms first (tmux).
+        unzoom()
         switch currentSlot {
         case .sidebar:
             guard dir == .right else { return false }
@@ -220,6 +205,7 @@ extension AppState {
     }
 
     func cyclePane(_ step: Int) -> Bool {
+        unzoom()
         let slots = cycleSlots
         guard slots.count > 1 else { return false }
         let cur = currentSlot
@@ -230,6 +216,7 @@ extension AppState {
 
     func lastPane() -> Bool {
         guard let p = previousSlot, p != currentSlot else { return false }
+        unzoom()
         if case let .leaf(id) = p, noteLayout.notePath(id) == nil { return false }
         focusSlot(p)
         return true
@@ -240,7 +227,8 @@ extension AppState {
     /// `⌃w v` / `⌃w s`, `:vsplit [note]`, `:split [note]`, link → split.
     /// The new pane shows `note` (default: the target's note, in the
     /// target's view — vim's `⌃w v`) and takes the keyboard.
-    func splitPane(_ axis: SplitAxis, note: String? = nil, view: NoteViewMode? = nil, target: PaneLeafID? = nil) {
+    func splitPane(_ axis: SplitAxis, note: String? = nil, view: NoteViewMode? = nil, target: PaneLeafID? = nil,
+                   before: Bool = false) {
         guard isNoteOpen else {
             showToast("open a note first", tone: .warning)
             return
@@ -254,8 +242,9 @@ extension AppState {
         var v = view ?? (note == nil ? paneView(t) : .reading)
         if v.isEditing, !canWritePane(path) { v = .reading }
         var id = t
+        // Splitting unzooms first (PaneTree.split does).
         withMotion(.standard) {
-            id = noteLayout.split(axis, content: .note(path: path, view: v), target: t, focusNew: false)
+            id = noteLayout.split(axis, content: .note(path: path, view: v), target: t, focusNew: false, before: before)
         }
         persistLayout()
         focusLeaf(id)
@@ -508,7 +497,7 @@ extension AppState {
 
     // MARK: Ex commands for panes
 
-    /// `:vsplit` `:split` `:only` `:close` `:explore` `:follow` `:hover`.
+    /// `:vsplit` `:split` `:only` `:zoom` `:close` `:explore` `:follow` `:hover`.
     /// True when `command` was a pane command.
     func performPaneHostCommand(_ command: String) -> Bool {
         let parts = command.split(separator: " ", maxSplits: 1).map(String.init)
@@ -525,6 +514,7 @@ extension AppState {
                 showToast("no note matches “\(arg)”", tone: .warning)
             }
         case "only": onlyPane()
+        case "zoom": toggleZoom()
         case "close", "close!": closeFocusedPane()
         case "explore": openFloatingExplorer()
         case "follow": followLinkInFocusedPane(.current)

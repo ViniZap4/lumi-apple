@@ -134,7 +134,11 @@ struct PaneTreeTests {
         #expect(NoteKind.detect(path: "a.md", text: "---\ntitle: x\n---\nkanban-plugin: board\n") == .markdown)
         #expect(NoteKind.detect(path: "a.md", text: "# hi") == .markdown)
         #expect(NoteKind.markdown.views == [.reading, .live, .source])
-        #expect(NoteKind.kanban.defaultView == .board)
+        // Reading | Edit | Source (SPEC-PARTE2 §5a): Reading first.
+        #expect(NoteKind.kanban.defaultView == .reading)
+        #expect(NoteKind.kanban.views == [.reading, .board, .source])
+        #expect(NoteKind.canvas.views == [.reading, .canvas, .source])
+        #expect(NoteViewMode.board.label == "Edit" && NoteViewMode.canvas.label == "Edit")
         #expect(NoteViewMode.live.isEditing && !NoteViewMode.reading.isEditing)
     }
 }

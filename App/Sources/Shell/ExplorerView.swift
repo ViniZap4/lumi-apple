@@ -167,6 +167,7 @@ struct ExplorerColumn: View {
     @Environment(\.theme) private var theme
     @Environment(AppState.self) private var appState
     @State private var dropTarget: String?
+    @State private var hovered: String?
 
     var body: some View {
         if entries.isEmpty {
@@ -214,6 +215,9 @@ struct ExplorerColumn: View {
             .contentShape(Rectangle())
             .onTapGesture(count: 2) { onOpen(i, entry) }
             .onTapGesture { onPick(i, entry) }
+            .onHover { inside in
+                if inside { hovered = entry.key } else if hovered == entry.key { hovered = nil }
+            }
             .shellContextMenu(key: entry.key) { appState.explorerMenu(for: entry) }
             .hintTarget("\(hintPrefix):\(entry.key)") {
                 if entry.kind == .note { onOpen(i, entry) } else { onPick(i, entry) }
@@ -229,25 +233,46 @@ struct ExplorerColumn: View {
                             .allowsHitTesting(false)
                     }
                 }
-                .dropDestination(for: String.self) { items, _ in
-                    guard let path = items.compactMap(ExplorerDrag.path(from:)).first else { return false }
-                    appState.moveNote(path: path, toFolder: entry.path)
-                    return true
-                } isTargeted: { inside in
-                    if inside { dropTarget = entry.key } else if dropTarget == entry.key { dropTarget = nil }
+                .onDrop(of: [ExplorerDrag.type], isTargeted: Binding(
+                    get: { dropTarget == entry.key },
+                    set: { inside in if inside { dropTarget = entry.key } else if dropTarget == entry.key { dropTarget = nil } }
+                )) { providers in
+                    let folder = entry.path
+                    let appState = self.appState
+                    appState.endNoteDrag()
+                    return ExplorerDrag.loadPath(providers) { path in
+                        Task { @MainActor in appState.moveNote(path: path, toFolder: folder) }
+                    }
                 }
         } else {
-            base.draggable(ExplorerDrag.payload(entry)) {
-                HStack(spacing: 6) {
-                    Image(systemName: "doc.text")
-                    Text(entry.name).lineLimit(1)
+            base
+                .overlay(alignment: .trailing) {
+                    // Open · Open right · Open below (SPEC-PARTE2 §3) on the
+                    // hovered or selected note of the current column.
+                    if active, appState.noteDrag == nil, hovered == entry.key || i == cursor {
+                        ExplorerRowActions(
+                            onOpen: { appState.floatingOpen(entry, .current) },
+                            onRight: { appState.floatingOpen(entry, .vsplit) },
+                            onBelow: { appState.floatingOpen(entry, .hsplit) }
+                        )
+                        .padding(.trailing, 6)
+                        .transition(appState.transition(.opacity))
+                    }
                 }
-                .font(ShellFont.row)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(RoundedRectangle(cornerRadius: 5).fill(theme.overlayBackground))
-                .foregroundStyle(theme.text)
-            }
+                .onDrag {
+                    appState.beginNoteDrag(entry.path.isEmpty ? (entry.note?.id ?? entry.path) : entry.path)
+                    return ExplorerDrag.provider(entry)
+                } preview: {
+                    HStack(spacing: 6) {
+                        Image(systemName: appState.entryKind(entry).symbol)
+                        Text(entry.name).lineLimit(1)
+                    }
+                    .font(ShellFont.row)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(RoundedRectangle(cornerRadius: 5).fill(theme.overlayBackground))
+                    .foregroundStyle(theme.text)
+                }
         }
     }
 
@@ -256,11 +281,23 @@ struct ExplorerColumn: View {
         proxy.scrollTo(entries[cursor].key, anchor: nil)
     }
 
+    /// Note names with a kind suffix where two share a title
+    /// ("test · canvas").
+    private var displayNames: [String: String] {
+        let notes = entries.filter { $0.kind == .note }
+        let names = NoteKind.disambiguated(notes.map { (title: $0.name, kind: appState.entryKind($0)) })
+        return Dictionary(zip(notes.map(\.key), names), uniquingKeysWith: { a, _ in a })
+    }
+
     @ViewBuilder
     private func row(_ entry: ExplorerEntry, index: Int) -> some View {
-        ExplorerRowLabel(name: entry.name, isFolder: entry.kind == .folder, count: entry.count,
+        let isNote = entry.kind == .note
+        ExplorerRowLabel(name: isNote ? (displayNames[entry.key] ?? entry.name) : entry.name,
+                         isFolder: entry.kind == .folder, count: entry.count,
                          isCursor: index == cursor, active: active,
-                         isOpen: openKey != nil && entry.key == openKey, hidden: entry.isHidden)
+                         isOpen: openKey != nil && entry.key == openKey, hidden: entry.isHidden,
+                         icon: isNote ? appState.entryKind(entry).symbol : nil)
+            .task(id: entry.key) { if isNote { appState.learnKind(entry) } }
             .staggerIn(index, active: appState.motionEnabled)
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(shellHintSpace)) } action: { frame in
                 if active { appState.rowFrames[entry.key] = frame }
@@ -398,7 +435,22 @@ struct PreviewColumn: View {
 
     @ViewBuilder
     private func notePreview(_ entry: ExplorerEntry) -> some View {
-        if let doc = loader.text, loader.key == entry.key {
+        if loader.key == entry.key, let mini = loader.structured {
+            // Boards and canvases: a picture, not their raw text.
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 6) {
+                    Image(systemName: mini.kind.symbol).font(.system(size: 11)).foregroundStyle(theme.textDim)
+                    Text(loader.title ?? entry.name)
+                        .font(ShellFont.chromeBold)
+                        .foregroundStyle(theme.text)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 12)
+                StructuredMiniView(mini)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        } else if let doc = loader.text, loader.key == entry.key {
             MarkdownReader(
                 title: loader.title ?? entry.name,
                 tags: loader.tags,
@@ -444,10 +496,14 @@ final class PreviewLoader {
     private(set) var title: String?
     private(set) var tags: [String] = []
     private(set) var error: String?
+    /// A board / canvas, drawn instead of its text.
+    private(set) var structured: StructuredMini?
+    @ObservationIgnored weak var appState: AppState?
 
     nonisolated private static let softLimit = 512 * 1024
 
     func load(_ entry: ExplorerEntry, appState: AppState) async {
+        self.appState = appState
         try? await Task.sleep(nanoseconds: 110_000_000)
         if Task.isCancelled { return }
         switch appState.explorer.source {
@@ -481,8 +537,13 @@ final class PreviewLoader {
         self.error = error
         guard let raw else {
             text = nil
+            structured = nil
             return
         }
+        let path = entry.path.isEmpty ? (entry.note?.id ?? entry.path) : entry.path
+        // Capped / simplified for huge canvases (StructuredMini caps).
+        structured = StructuredMini.make(path: path, text: raw)
+        appState?.noteKindLearned(path, text: raw)
         let (fm, body) = FrontmatterParser.split(raw)
         title = fm.title ?? entry.note?.title.nilIfEmpty
         tags = fm.tags

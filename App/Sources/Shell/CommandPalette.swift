@@ -12,9 +12,12 @@ struct PaletteItem: Identifiable {
     var shortcut: String = ""
     /// Extra words the fuzzy matcher sees (`:book`, `q`, …).
     var aliases: String = ""
+    /// Kind glyph of a note (board / canvas).
+    var symbol: String?
     let run: @MainActor () -> Void
 
     var icon: String {
+        if let symbol { return symbol }
         switch kind {
         case .note: return "doc.text"
         case .book: return "books.vertical"
@@ -167,9 +170,12 @@ struct CommandPalette: View {
     }
 
     private var noteItems: [PaletteItem] {
-        appState.explorer.tree.allNotes.map { entry in
-            PaletteItem(id: "n:" + entry.key, kind: .note, title: entry.name,
-                        subtitle: NoteTree.dirOf(entry.path)) {
+        let all = appState.explorer.tree.allNotes
+        let kinds = all.map { appState.entryKind($0) }
+        let names = NoteKind.disambiguated(zip(all, kinds).map { (title: $0.name, kind: $1) })
+        return zip(all, zip(kinds, names)).map { entry, kn in
+            PaletteItem(id: "n:" + entry.key, kind: .note, title: kn.1,
+                        subtitle: NoteTree.dirOf(entry.path), aliases: kn.0.suffix, symbol: kn.0.symbol) {
                 appState.explorer.nav.reveal(noteID: entry.note?.id ?? entry.path)
                 if appState.isNoteOpen {
                     // Into the focused pane (⌘↩ would be a split: use :vsplit).
@@ -235,9 +241,19 @@ struct CommandPalette: View {
                 cmd("close-pane", "Close pane", "⌃w q", aliases: "pane window :close") { appState.closeFocusedPane() }
                 cmd("only-pane", "Keep only this pane", "⌃w o", aliases: "pane window :only") { appState.onlyPane() }
                 cmd("equal-panes", "Equalize panes", "⌃w =", aliases: "pane window resize") { appState.performLayout(.equalize) }
+                cmd("zoom-pane", appState.isZoomed ? "Unzoom pane" : "Zoom pane", "⌃w z",
+                    aliases: "pane window maximize focus tmux fullscreen :zoom") { appState.toggleZoom() }
             }
             cmd("lumi-link", "Copy lumi:// link to this note", aliases: "deep link url share open copy") { appState.copyLumiLink() }
-            cmd("edit", appState.isEditing ? "Read mode" : "Edit mode", "⌘E", aliases: "toggle") { appState.toggleEditing() }
+            cmd("edit", appState.noteViewMode == .reading ? "Edit mode" : "Read mode", "⌘E", aliases: "toggle reading") { appState.toggleEditing() }
+            if appState.openNoteKind != .markdown {
+                cmd("structured-reading", "Reading (read-only \(appState.openNoteKind == .canvas ? "canvas" : "board"))", "q",
+                    aliases: "view mode read only navigate") { appState.setNoteViewMode(.reading) }
+                cmd("structured-edit", "Edit \(appState.openNoteKind == .canvas ? "canvas" : "board")", "e",
+                    aliases: "view mode interactive move drag") {
+                    appState.setNoteViewMode(NoteViewMode.editView(for: appState.openNoteKind, markdown: .live))
+                }
+            }
             cmd("close", "Back to explorer", "q", aliases: "close quit") { appState.closeNote() }
             cmd("live", "Live Preview", ":live", aliases: "wysiwyg render inline edit mode") { appState.setNoteViewMode(.live) }
             cmd("source", "Source mode", ":source", aliases: "raw markdown edit mode") { appState.setNoteViewMode(.source) }

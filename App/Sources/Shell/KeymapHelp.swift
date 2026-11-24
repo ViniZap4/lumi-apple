@@ -10,6 +10,7 @@ struct KeymapHelpOverlay: View {
         ("Explorer (floating)", [
             ("-  <leader>e  :explore", "open it (reader, editor, home)"), ("⌘\\  toolbar", "open it (mouse)"),
             ("j k  h l  gg G", "move / folders"), ("⏎", "open here"), ("⌃v  ⌃s", "open in split / stacked"),
+            ("row buttons  right-click", "open · right · below"),
             ("/  n N", "filter"), ("a r d  y p", "new, rename, delete, copy"), ("gb  h at the root", "books level"),
             ("⎋  q  click outside", "close (⎋ clears a filter first)"),
         ]),
@@ -22,11 +23,14 @@ struct KeymapHelpOverlay: View {
             ("i  e  ⌘E", "edit (vim)"), ("⌥⌘L  ⌥⌘S", "Live / Source"), ("q", "close the pane / note"),
             ("j k  d u", "scroll"), ("gg  G", "top / bottom"), ("y", "copy selection"),
             (":q  :wq", "leave / close the pane"), ("\\p  :preview split", "preview beside source"),
+            ("board / canvas: e i ⌘E", "Reading → Edit"), ("board / canvas: ⎋ q", "Edit → Reading"),
         ]),
         ("Splits", [
             ("⌃w v  :vsplit [note]", "split side by side"), ("⌃w s  :split [note]", "split stacked"),
             ("⌃w q  :q  :close", "close pane"), ("⌃w o  :only", "only this pane"), ("⌃w =", "equal sizes"),
             ("⌃w < >  ⌃w + -", "narrower / wider, shorter / taller"), ("drag a divider", "resize"),
+            ("⌃w z  :zoom", "zoom / unzoom (tmux)"), ("double-click a header", "zoom (mouse)"),
+            ("drag a note onto an edge", "split there"),
         ]),
         ("Panes", [
             ("⌃h ⌃j ⌃k ⌃l", "pane that way"), ("⌃w h j k l", "same, vim style"),

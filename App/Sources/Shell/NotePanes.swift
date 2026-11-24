@@ -15,29 +15,37 @@ struct NoteArea: View {
             PrimaryNoteContent()
                 .registerPaneFrame(tree.mainLeaf)
         } else {
-            PaneLayoutView(root: tree.root, focused: appState.focusedLeaf, showsFocus: true,
+            PaneLayoutView(root: tree.root, focused: appState.focusedLeaf, showsFocus: true, zoomed: appState.zoomedLeaf,
                            onResize: { path, i, at in appState.resizeDivider(path: path, index: i, at: at) }) { id, content in
-                if id == tree.mainLeaf {
-                    VStack(spacing: 0) {
-                        NoteBar()
-                        PrimaryNoteContent()
+                Group {
+                    if id == tree.mainLeaf {
+                        VStack(spacing: 0) {
+                            NoteBar()
+                            PrimaryNoteContent()
+                        }
+                    } else if case let .note(path, view) = content {
+                        SecondaryNotePane(leaf: id, path: path, view: view)
+                    } else {
+                        theme.background
                     }
-                    .registerPaneFrame(id)
-                } else if case let .note(path, view) = content {
-                    SecondaryNotePane(leaf: id, path: path, view: view)
-                        .registerPaneFrame(id)
-                } else {
-                    theme.background
                 }
+                .registerPaneFrame(id)
+                .paneDropTarget(id)
             }
         }
     }
 }
 
 extension View {
-    /// Remember the pane's window frame: a click focuses the pane.
+    /// Remember the pane's geometry: a click focuses the pane.
     func registerPaneFrame(_ id: PaneLeafID) -> some View {
         modifier(PaneFrameModifier(id: id))
+    }
+
+    /// A note dragged from the explorer onto this pane: edge highlight,
+    /// split on drop.
+    func paneDropTarget(_ id: PaneLeafID) -> some View {
+        modifier(PaneDropModifier(id: id))
     }
 }
 
@@ -46,9 +54,32 @@ private struct PaneFrameModifier: ViewModifier {
     @Environment(AppState.self) private var appState
 
     func body(content: Content) -> some View {
-        content.onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
-            appState.paneGlobalFrames[id] = frame
-        }
+        content
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+                appState.paneGlobalFrames[id] = frame
+            }
+            #if os(macOS)
+            .background(PaneProbe(id: id, registry: appState.paneProbes))
+            #endif
+    }
+}
+
+private struct PaneDropModifier: ViewModifier {
+    let id: PaneLeafID
+    @Environment(AppState.self) private var appState
+    @State private var size: CGSize = .zero
+
+    func body(content: Content) -> some View {
+        content
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
+            .overlay {
+                if let drop = appState.paneDrop, drop.leaf == id, appState.noteDrag != nil {
+                    PaneDropHighlight(zone: drop.zone)
+                        .transition(appState.transition(.opacity))
+                }
+            }
+            .animation(appState.animation(.fast), value: appState.paneDrop)
+            .onDrop(of: [ExplorerDrag.type], delegate: PaneDropDelegate(leaf: id, size: size, appState: appState))
     }
 }
 
@@ -156,6 +187,9 @@ struct SecondaryNotePane: View {
             PaneHeaderBar(title: title, folder: NoteTree.dirOf(path), views: AppState.noteViews.views(for: kind),
                           selection: resolution?.view ?? view, canEdit: canEdit, focused: focused,
                           badge: local?.isDirty == true ? "modified" : nil,
+                          icon: kind == .markdown ? nil : kind.symbol,
+                          zoomed: appState.zoomedLeaf == leaf,
+                          onZoom: { appState.toggleZoom(leaf) },
                           onSelect: { appState.setPaneView(leaf, $0) },
                           onClose: { appState.closeLeaf(leaf) })
             content(resolution?.route ?? .reader, resolved: resolution?.view ?? view)

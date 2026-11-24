@@ -318,7 +318,7 @@ struct SettingsSheet: View {
             )
             toggleRow(
                 title: "⌃h ⌃j ⌃k ⌃l move between panes",
-                detail: "Between split panes and the split preview by position, like vim windows and vim-tmux-navigator. In the editor: normal and visual mode only, unless your .vimrc maps the key. ⌃w h/j/k/l, ⌃w w and ⌃w p always work; ⌃w v / s split, ⌃w q closes, ⌃w o keeps one, ⌃w = equalises, ⌃w < > + - resize.",
+                detail: "Between split panes and the split preview by position, like vim windows and vim-tmux-navigator. In the editor: normal and visual mode only, unless your .vimrc maps the key. ⌃w h/j/k/l, ⌃w w and ⌃w p always work; ⌃w v / s split, ⌃w q closes, ⌃w o keeps one, ⌃w = equalises, ⌃w < > + - resize, ⌃w z zooms (tmux).",
                 isOn: $prefs.ctrlHJKLPanes
             )
             toggleRow(

@@ -128,6 +128,7 @@ struct ShellStatusLine: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 8)
+            if appState.isZoomed, !appState.showFloatingExplorer { ZoomBadge() }
             ForEach(Array(right.enumerated()), id: \.offset) { _, item in
                 Text(item)
                     .font(ShellFont.small)

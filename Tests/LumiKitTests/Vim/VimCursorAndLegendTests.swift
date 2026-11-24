@@ -123,9 +123,9 @@ struct CommandLegendTests {
     @Test("insert legend lists escape sequences; normal shows recording")
     func extras() {
         let ins = CommandLegend.items(.insert, extras: .init(escapeSequences: ["jj", "jk"]))
-        #expect(ins.first == .init("Esc jj jk", "normal"))
+        #expect(ins.first?.keys == "Esc jj jk" && ins.first?.label == "normal")
         let normal = CommandLegend.items(.normal, extras: .init(recording: "a"))
-        #expect(normal.first == .init("q", "stop recording @a"))
+        #expect(normal.first?.keys == "q" && normal.first?.label == "stop recording @a")
     }
 
     @Test("describeRhs names common ex commands")

@@ -141,6 +141,8 @@ final class LiveWidgetHostView: NSView {
         frame.contains(point) ? self : nil
     }
 
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func mouseDown(with event: NSEvent) {
         onActivate(sourceLocation)
     }

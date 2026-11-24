@@ -38,13 +38,21 @@ final class KeyRouter {
         if let mouseToken { NSEvent.removeMonitor(mouseToken) }
     }
 
+    /// Click-to-focus (SPEC-PARTE2 §3). The pane under the click (exact
+    /// AppKit geometry) is focused before the view handles the click —
+    /// the click itself is never consumed, so it also places the caret /
+    /// follows the link / selects the card. Once the click was handled,
+    /// the keyboard is moved into the pane if nothing there took it.
     private func mouseDown(_ event: NSEvent) {
         guard let appState, let window = event.window, window.sheetParent == nil, !(window is NSPanel),
-              let content = window.contentView else { return }
-        var p = content.convert(event.locationInWindow, from: nil)
-        if !content.isFlipped { p.y = content.bounds.height - p.y }
-        // The pane under the click takes the keyboard (splits).
-        appState.paneClicked(at: p)
+              let leaf = appState.paneUnderClick(event.locationInWindow, in: window) else { return }
+        appState.paneMouseDown(leaf)
+        // After the event is dispatched (a text view's mouse-down runs its
+        // own tracking loop until mouse-up, so this sees its result).
+        DispatchQueue.main.async { [weak appState, weak window] in
+            guard let appState, let window else { return }
+            appState.paneClickSettled(leaf, in: window)
+        }
     }
 
     private func handle(_ event: NSEvent) -> NSEvent? {

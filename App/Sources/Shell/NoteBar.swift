@@ -29,6 +29,10 @@ struct NoteBar: View {
         .frame(height: ShellMetrics.noteBarHeight)
         .background(theme.background)
         .overlay(alignment: .bottom) { Hairline() }
+        // In a split the note bar is the primary pane's header: a
+        // double-click zooms it (tmux prefix z).
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { if appState.isSplit { appState.toggleZoom(appState.primaryLeaf) } }
     }
 
     private var lead: some View {
@@ -73,7 +77,14 @@ struct NoteBar: View {
                 Button {
                     beginRename()
                 } label: {
-                    Text(appState.openNoteTitle ?? "")
+                    HStack(spacing: 5) {
+                        if appState.openNoteKind != .markdown {
+                            Image(systemName: appState.openNoteKind.symbol)
+                                .font(.system(size: 11))
+                                .foregroundStyle(theme.textDim)
+                        }
+                        Text(appState.openNoteTitle ?? "")
+                    }
                         .font(ShellFont.chromeBold)
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
@@ -88,6 +99,7 @@ struct NoteBar: View {
                 .hintTarget("notebar:title") { beginRename() }
                 .padding(.horizontal, -6)
             }
+            if appState.zoomedLeaf == appState.primaryLeaf, appState.isZoomed { ZoomBadge() }
             presence
         }
     }
@@ -128,6 +140,12 @@ struct NoteBar: View {
             .disabled(!canWrite)
             iconButton("slider.horizontal.3", active: false, help: "Settings (⌘, · :settings)", id: "notebar:settings") {
                 appState.showSettings = true
+            }
+            if appState.isSplit {
+                PaneZoomButton(zoomed: appState.zoomedLeaf == appState.primaryLeaf) {
+                    appState.toggleZoom(appState.primaryLeaf)
+                }
+                .hintTarget("notebar:zoom") { appState.toggleZoom(appState.primaryLeaf) }
             }
             if editing {
                 Rectangle().fill(theme.border.opacity(0.6)).frame(width: 1, height: 16).padding(.horizontal, 4)
