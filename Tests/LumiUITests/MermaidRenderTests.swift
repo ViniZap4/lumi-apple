@@ -220,7 +220,7 @@ struct MermaidRenderTests {
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
-        let bg = RGB(background)
+        let bg = MermaidRGB(background)
         ctx.setFillColor(CGColor(srgbRed: bg.r, green: bg.g, blue: bg.b, alpha: 1))
         ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
         ctx.draw(img, in: CGRect(x: pad, y: pad, width: img.width, height: img.height))

@@ -18,9 +18,9 @@ public struct MermaidTheme: Hashable, Sendable {
     }
 
     public init(tokens t: ThemeTokens) {
-        let bg = RGB(t.background), text = RGB(t.text), dim = RGB(t.textDim)
-        let primary = RGB(t.primary), secondary = RGB(t.secondary), accent = RGB(t.accent)
-        let warning = RGB(t.warning), error = RGB(t.error), info = RGB(t.info), border = RGB(t.border)
+        let bg = MermaidRGB(t.background), text = MermaidRGB(t.text), dim = MermaidRGB(t.textDim)
+        let primary = MermaidRGB(t.primary), secondary = MermaidRGB(t.secondary), accent = MermaidRGB(t.accent)
+        let warning = MermaidRGB(t.warning), error = MermaidRGB(t.error), info = MermaidRGB(t.info), border = MermaidRGB(t.border)
         let tint: Double = t.isDark ? 0.22 : 0.16
         var v: [String: String] = [
             "darkMode": t.isDark ? "true" : "false",
@@ -88,7 +88,7 @@ public struct MermaidTheme: Hashable, Sendable {
         // Categorical series (pie slices, git branches, journey actors,
         // mindmap / timeline sections) cycle the theme's accents.
         let series = [primary, secondary, accent, warning, info, error]
-            + t.logoColors.map(RGB.init)
+            + t.logoColors.map(MermaidRGB.init)
         for i in 0..<12 {
             let c = series[i % series.count]
             let shade = i < series.count ? 0.0 : 0.25
@@ -112,7 +112,7 @@ public struct MermaidTheme: Hashable, Sendable {
 
 /// sRGB triple resolved from a SwiftUI `Color` (themes are built from
 /// sRGB hex, so this round-trips exactly).
-struct RGB: Hashable, Sendable {
+struct MermaidRGB: Hashable, Sendable {
     var r: Double, g: Double, b: Double
 
     init(r: Double, g: Double, b: Double) { self.r = r; self.g = g; self.b = b }
@@ -123,8 +123,8 @@ struct RGB: Hashable, Sendable {
     }
 
     /// Linear blend toward `other` by `t` (0 = self, 1 = other).
-    func mix(_ other: RGB, _ t: Double) -> RGB {
-        RGB(r: r + (other.r - r) * t, g: g + (other.g - g) * t, b: b + (other.b - b) * t)
+    func mix(_ other: MermaidRGB, _ t: Double) -> MermaidRGB {
+        MermaidRGB(r: r + (other.r - r) * t, g: g + (other.g - g) * t, b: b + (other.b - b) * t)
     }
 
     var hex: String {
