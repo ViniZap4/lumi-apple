@@ -189,7 +189,29 @@ public final class CanvasBoardModel {
 
     public func setViewport(_ v: CanvasViewport, ease: Bool = false) {
         viewportEased = ease
+        viewportCoasting = false
         viewport = v
+    }
+
+    /// The last viewport change is a released pan coasting to rest
+    /// (DESIGN-LANGUAGE §6.2.4: exponential friction, τ ≈ 260 ms).
+    public private(set) var viewportCoasting = false
+
+    /// Friction time constant of a released pan (s).
+    public static let coastTau = 0.26
+    /// Below this release speed (pt/s) a pan just stops.
+    public static let coastMinSpeed = 120.0
+    /// Longest coast (pt), so a flick never throws the board away.
+    public static let coastMax = 900.0
+
+    /// Distance a released pan travels: v·τ (the integral of v·e^(−t/τ)),
+    /// clamped; zero below the minimum speed.
+    public static func coastDistance(velocity: CGVector) -> CGVector {
+        let speed = hypot(velocity.dx, velocity.dy)
+        guard speed >= coastMinSpeed else { return .zero }
+        let d = speed * coastTau
+        let k = min(d, coastMax) / d
+        return CGVector(dx: velocity.dx * coastTau * k, dy: velocity.dy * coastTau * k)
     }
 
     public func fitAll(ease: Bool = true) {
@@ -530,9 +552,19 @@ public final class CanvasBoardModel {
         }
     }
 
-    public func pointerUp() {
+    /// `velocity` (pt/s) and `inertia` (motion allowed): a released pan
+    /// coasts on; under reduced motion it stops where it was let go.
+    public func pointerUp(velocity: CGVector = .zero, inertia: Bool = false) {
         guard let g = gesture else { return }
         gesture = nil
+        if case .pan = g, inertia {
+            let d = Self.coastDistance(velocity: velocity)
+            if d != .zero {
+                setViewport(CanvasGeometry.panBy(viewport, d.dx, d.dy), ease: true)
+                viewportCoasting = true
+            }
+            return
+        }
         let d = drafts
         switch g {
         case let .move(_, _, moved):

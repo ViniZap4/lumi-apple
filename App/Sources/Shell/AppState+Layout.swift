@@ -201,25 +201,18 @@ extension AppState {
 
 // MARK: - Motion (SPEC-PARTE2 §1)
 
-/// Durations for view changes: 120–220 ms, GPU-friendly properties only.
+/// Shell motion kinds, mapped onto the named springs of
+/// DESIGN-LANGUAGE §6.1 (`LumiSpring`).
 enum Motion {
-    case fast, standard, slow
+    case fast, standard, slow, travel, settle
 
-    var duration: Double {
+    var spring: LumiSpring {
         switch self {
-        case .fast: return 0.12
-        case .standard: return 0.18
-        case .slow: return 0.22
-        }
-    }
-
-    /// Springs, not linear (SPEC-PARTE2 §1 "alive"): settle with a hint
-    /// of bounce, inside the 120–220 ms budget.
-    var animation: Animation {
-        switch self {
-        case .fast: return .snappy(duration: duration, extraBounce: 0.02)
-        case .standard: return .spring(duration: duration, bounce: 0.12)
-        case .slow: return .spring(duration: duration, bounce: 0.08)
+        case .fast: return .snappy
+        case .standard: return .gentle
+        case .slow: return .soft
+        case .travel: return .glide
+        case .settle: return .bouncy
         }
     }
 
@@ -234,20 +227,23 @@ enum Motion {
 }
 
 extension AppState {
-    /// Motion is on: the app setting, the "animate" preference and the
-    /// system all allow it.
-    var motionEnabled: Bool {
-        preferences.contentAnimations && !preferences.reduceMotion && !Motion.systemReduceMotion
+    /// The motion policy: "Movimento" + the animate toggle + the system.
+    var motionPolicy: LumiMotion {
+        LumiMotion.resolve(setting: preferences.motionLevel, systemReduceMotion: Motion.systemReduceMotion,
+                           animationsOn: preferences.contentAnimations)
     }
+
+    /// Motion is on (anything but "reduzido").
+    var motionEnabled: Bool { motionPolicy.allowed }
 
     /// The animation for `kind`, or nil (instant) under Reduce Motion.
     func animation(_ kind: Motion = .standard) -> Animation? {
-        motionEnabled ? kind.animation : nil
+        motionPolicy.animation(kind.spring)
     }
 
     /// A transition that degrades to `.identity` under Reduce Motion.
     func transition(_ t: AnyTransition) -> AnyTransition {
-        motionEnabled ? t : .identity
+        motionPolicy.transition(t)
     }
 
     func withMotion(_ kind: Motion = .standard, _ body: () -> Void) {

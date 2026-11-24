@@ -35,8 +35,10 @@ extension AppState {
         let all = BookSwitcherOrder.flattened(books.books)
         var out: [BookGroup] = []
         let local = all.filter { $0.kind == .local }
-        out.append(BookGroup(id: "local", title: "This device", subtitle: "folders on this Mac", icon: "laptopcomputer",
-                             books: local, signedIn: true))
+        if !local.isEmpty {
+            out.append(BookGroup(id: "local", title: "Este Mac", subtitle: "pastas neste Mac", icon: "laptopcomputer",
+                                 books: local, signedIn: true))
+        }
         var seen = Set<String>()
         for acc in accounts.accounts {
             let key = acc.key
@@ -48,7 +50,7 @@ extension AppState {
         }
         let orphans = all.filter { $0.kind == .bound && !seen.contains($0.accountKey?.description ?? "") }
         if !orphans.isEmpty {
-            out.append(BookGroup(id: "other", title: "Other accounts", subtitle: "not signed in on this device",
+            out.append(BookGroup(id: "other", title: "Outras contas", subtitle: "sem sessão neste Mac",
                                  icon: "person.crop.circle.badge.questionmark", books: orphans, signedIn: false))
         }
         return out
@@ -164,44 +166,50 @@ extension AppState {
         return true
     }
 
+    /// The shelf cursor (AppState keeps it as column / group / row).
+    var shelfCursor: BooksShelf.Cursor {
+        get { BooksShelf.Cursor(level: booksColumn == 0 ? .accounts : .books, account: booksGroupCursor, book: booksCursor) }
+        set {
+            booksColumn = newValue.level == .accounts ? 0 : 1
+            booksGroupCursor = newValue.account
+            booksCursor = newValue.book
+        }
+    }
+
+    /// Books level keys (SPEC-PARTE2 §2): one Livros list across
+    /// accounts; the accounts layer only with many accounts.
     private func handleBooksKey(_ k: KeyStroke) -> Bool {
         let groups = bookGroups
         guard !groups.isEmpty else {
             if k.special == .escape || k.chars == "q" { closeFloatingExplorer() }
             return true
         }
-        booksGroupCursor = min(booksGroupCursor, groups.count - 1)
-        let books = groups[booksGroupCursor].books
-        func move(_ d: Int) {
-            if booksColumn == 0 {
-                booksGroupCursor = max(0, min(groups.count - 1, booksGroupCursor + d))
-                booksCursor = 0
-            } else if !books.isEmpty {
-                booksCursor = max(0, min(books.count - 1, booksCursor + d))
+        let sizes = groups.map(\.books.count)
+        func apply(_ key: BooksShelf.Key) {
+            let (c, outcome) = BooksShelf.step(sizes, shelfCursor, key)
+            withMotion(.travel) { shelfCursor = c }
+            switch outcome {
+            case .none: break
+            case let .open(a, b): openBookFromOverlay(groups[a].books[b])
+            case .atTop: showToast("Livros é o topo — sem camada de contas")
+            case let .emptyAccount(a):
+                if !groups[a].signedIn {
+                    closeFloatingExplorer(restore: false)
+                    signInPrefill = accounts.accounts.first { $0.key.description == groups[a].id }?.key
+                    showAddServer = true
+                } else {
+                    showToast("nenhum livro nesta conta ainda")
+                }
             }
         }
         switch (k.chars, k.special) {
-        case (_, .escape?), ("q", _):
-            if openBook != nil, explorer.source != .none, floatingReturnSlot != nil, isNoteOpen == false {
-                closeFloatingExplorer()
-            } else {
-                closeFloatingExplorer()
-            }
-        case ("j", _), (_, .down?): move(1)
-        case ("k", _), (_, .up?): move(-1)
-        case ("g", _): if booksColumn == 0 { booksGroupCursor = 0 } else { booksCursor = 0 }
-        case ("G", _): if booksColumn == 0 { booksGroupCursor = groups.count - 1 } else { booksCursor = max(0, books.count - 1) }
-        case ("h", _), (_, .left?), ("-", _): booksColumn = 0
-        case ("l", _), (_, .right?), (_, .enter?):
-            if booksColumn == 0 {
-                if !books.isEmpty { booksColumn = 1; booksCursor = 0 } else if !groups[booksGroupCursor].signedIn {
-                    closeFloatingExplorer(restore: false)
-                    signInPrefill = accounts.accounts.first { $0.key.description == groups[booksGroupCursor].id }?.key
-                    showAddServer = true
-                }
-            } else if books.indices.contains(booksCursor) {
-                openBookFromOverlay(books[booksCursor])
-            }
+        case (_, .escape?), ("q", _): closeFloatingExplorer()
+        case ("j", _), (_, .down?): apply(.move(1))
+        case ("k", _), (_, .up?): apply(.move(-1))
+        case ("g", _): apply(.top)
+        case ("G", _): apply(.bottom)
+        case ("h", _), (_, .left?), ("-", _): apply(.parent)
+        case ("l", _), (_, .right?), (_, .enter?): apply(.open)
         case ("[", _): cycleBook(-1)
         case ("]", _): cycleBook(1)
         case (":", _), (" ", _):
@@ -284,7 +292,9 @@ struct FloatingExplorerOverlay: View {
     var body: some View {
         GeometryReader { geo in
             let compact = geo.size.width < 720
-            FloatingPanel(title: title, path: path, hints: [], compact: compact,
+            FloatingPanel(title: title, path: path, hints: [], compact: compact, origin: UnitPoint(x: 0.12, y: 0),
+                          icon: appState.floatingLevel == .books
+                            ? BooksShelf.symbol(appState.booksColumn == 0 ? .server : .shelf) : BooksShelf.symbol(.book),
                           onDismiss: { appState.closeFloatingExplorer() }) {
                 Group {
                     if appState.floatingLevel == .files {
@@ -293,7 +303,11 @@ struct FloatingExplorerOverlay: View {
                         BooksColumns()
                     }
                 }
-                .transition(appState.transition(.opacity))
+                // A scope change, not a folder push: the camera pulls back
+                // to the shelf (content settles from 1.05) or dives into
+                // the book (from 0.95).
+                .lumiEnter(appState.floatingLevel == .books ? MotionFrom(scale: 1.05, opacity: 0) : MotionFrom(scale: 0.95, opacity: 0),
+                           spring: .gentle, trigger: appState.floatingLevel)
             } footer: {
                 // The navigation legend: clickable, fitted, with the count.
                 FloatingExplorerLegend()
@@ -307,12 +321,26 @@ struct FloatingExplorerOverlay: View {
     }
 
     private var title: String {
-        if appState.floatingLevel == .books { return "books" }
+        if appState.floatingLevel == .books {
+            return appState.booksColumn == 0 ? "Contas e servidores" : "Livros"
+        }
         return appState.openBook?.name ?? "explorer"
     }
 
+    /// Breadcrumb: Contas › user@host › Livros (each level its own icon
+    /// in the header; the shelf is a scope, never a folder).
     private var path: String {
-        if appState.floatingLevel == .books { return "accounts → books" }
+        if appState.floatingLevel == .books {
+            let groups = appState.bookGroups
+            let sizes = groups.map(\.books.count)
+            let layer = BooksShelf.hasAccountsLayer(sizes)
+            let g = groups.indices.contains(appState.booksGroupCursor) ? groups[appState.booksGroupCursor] : nil
+            let acct = g.map { $0.id == "local" ? $0.title : "\($0.title)@\($0.subtitle)" }
+            let crumbs = BooksShelf.crumbs(level: appState.booksColumn == 0 ? .accounts : .books, account: acct, hasLayer: layer)
+            let all = groups.reduce(0) { $0 + $1.books.count }
+            let tail = BooksShelf.plural(all, "livro", "livros") + " · " + BooksShelf.plural(groups.count, "conta", "contas")
+            return crumbs.dropLast().map(\.1).joined(separator: " › ") + (crumbs.count > 1 ? "  ·  " : "") + tail
+        }
         let dir = appState.explorer.nav.dir
         let filter = appState.explorer.nav.filter
         return "/" + dir + (filter.isEmpty ? "" : "  filter: \(filter)")
@@ -320,110 +348,51 @@ struct FloatingExplorerOverlay: View {
 
 }
 
-/// Accounts → books, with a details column.
+/// The books level: the Livros shelf (LumiUI `BooksShelfView`).
 struct BooksColumns: View {
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
 
     var body: some View {
         let groups = appState.bookGroups
-        let g = min(appState.booksGroupCursor, max(0, groups.count - 1))
-        GeometryReader { geo in
-            HStack(spacing: 0) {
-                column(active: appState.booksColumn == 0) {
-                    ForEach(Array(groups.enumerated()), id: \.element.id) { i, group in
-                        ExplorerRowLabel(name: group.title, isFolder: true, count: group.books.count,
-                                         isCursor: i == g, active: appState.booksColumn == 0, isOpen: false,
-                                         hidden: !group.signedIn, icon: group.icon)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                appState.booksGroupCursor = i
-                                appState.booksCursor = 0
-                                appState.booksColumn = 0
-                            }
-                            .staggerIn(i, active: appState.motionEnabled)
-                    }
+        let order = BookSwitcherOrder.flattened(appState.books.books)
+        BooksShelfView(
+            accounts: groups.map { g in
+                ShelfAccount(id: g.id, user: g.title, host: g.subtitle, isLocal: g.id == "local", signedIn: g.signedIn,
+                             books: g.books.map { book in shelfBook(book, number: order.firstIndex(of: book).map { $0 + 1 }) })
+            },
+            cursor: appState.shelfCursor,
+            onPick: { c in appState.withMotion(.travel) { appState.shelfCursor = c } },
+            onOpen: { c in
+                appState.shelfCursor = c
+                if c.level == .books, groups.indices.contains(c.account), groups[c.account].books.indices.contains(c.book) {
+                    appState.openBookFromOverlay(groups[c.account].books[c.book])
+                } else if c.level == .accounts {
+                    appState.withMotion(.travel) { appState.shelfCursor = BooksShelf.Cursor(level: .books, account: c.account, book: 0) }
                 }
-                .frame(width: max(170, min(250, geo.size.width * 0.28)))
-                Hairline(vertical: true)
-                column(active: appState.booksColumn == 1) {
-                    if groups.indices.contains(g) {
-                        let books = groups[g].books
-                        if books.isEmpty {
-                            Text(groups[g].signedIn ? "no books on this account yet · palette: New book…" : "signed out · ⏎ to sign in")
-                                .font(ShellFont.chrome)
-                                .foregroundStyle(theme.textDim)
-                                .padding(12)
-                        }
-                        ForEach(Array(books.enumerated()), id: \.element.id) { i, book in
-                            HStack(spacing: 0) {
-                                ExplorerRowLabel(name: book.name, isFolder: false, count: 0,
-                                                 isCursor: i == appState.booksCursor && appState.booksColumn == 1,
-                                                 active: true, isOpen: book.id == appState.openBook?.id, hidden: false,
-                                                 icon: book.kind == .local ? "folder" : "cloud")
-                                BookStatusDot(status: appState.sync.status(for: book), size: 6)
-                                    .padding(.trailing, 12)
-                            }
-                            .contentShape(Rectangle())
-                            .onTapGesture(count: 2) { appState.openBookFromOverlay(book) }
-                            .onTapGesture {
-                                appState.booksColumn = 1
-                                appState.booksCursor = i
-                            }
-                            .staggerIn(i, active: appState.motionEnabled)
-                        }
-                    }
-                }
-                .frame(width: max(220, min(360, geo.size.width * 0.34)))
-                Hairline(vertical: true)
-                details(groups: groups, g: g)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
-        }
+        )
     }
 
-    private func column<C: View>(active: Bool, @ViewBuilder _ content: () -> C) -> some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) { content() }
-                .padding(.vertical, 4)
-        }
-        .scrollIndicators(.never)
-        .background(active ? Color.clear : theme.overlayBackground.opacity(0.35))
+    private func shelfBook(_ book: Book, number: Int?) -> ShelfBook {
+        let status = appState.sync.status(for: book)
+        let open = book.id == appState.openBook?.id
+        return ShelfBook(
+            id: book.id, name: book.name, isLocal: book.kind == .local,
+            noteCount: open ? appState.explorer.tree.noteCount : appState.bookNoteCounts[book.id],
+            lastNote: appState.bookMemory.lastNote(forBook: book.id).map(NoteTree.stem),
+            number: number.flatMap { $0 <= 9 ? $0 : nil }, isOpen: open,
+            statusLabel: status.label, statusColor: Self.color(status, theme), syncing: status == .syncing
+        )
     }
 
-    @ViewBuilder
-    private func details(groups: [BookGroup], g: Int) -> some View {
-        if groups.indices.contains(g), groups[g].books.indices.contains(appState.booksCursor) {
-            let book = groups[g].books[appState.booksCursor]
-            let status = appState.sync.status(for: book)
-            VStack(alignment: .leading, spacing: 10) {
-                Text(book.name)
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(theme.text)
-                HStack(spacing: 6) {
-                    BookStatusDot(status: status, size: 7)
-                    Text(status.label).font(ShellFont.chrome).foregroundStyle(theme.textDim)
-                }
-                Text(book.kind == .local ? (book.path.map { ($0 as NSString).abbreviatingWithTildeInPath } ?? "this device")
-                                         : "\(book.account ?? "")@\(book.serverURL.map(ServerURL.displayHost) ?? "")")
-                    .font(ShellFont.small)
-                    .foregroundStyle(theme.textDim)
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-                if let last = appState.bookMemory.lastNote(forBook: book.id) {
-                    HStack(spacing: 6) {
-                        Text("last note").font(ShellFont.small).foregroundStyle(theme.textDim)
-                        Text(NoteTree.stem(last)).font(ShellFont.chromeBold).foregroundStyle(theme.text)
-                    }
-                }
-                Text("⏎ open the book · [ ] cycle")
-                    .font(ShellFont.small)
-                    .foregroundStyle(theme.textDim)
-                    .padding(.top, 6)
-            }
-            .padding(18)
-        } else {
-            Color.clear
+    static func color(_ s: BookSyncStatus, _ theme: ThemeTokens) -> Color {
+        switch s {
+        case .local, .readOnly, .offline: return theme.ramp.ink3
+        case .needsSignIn: return theme.warning
+        case .error: return theme.error
+        case .syncing: return theme.info
+        case .upToDate: return Color.green.opacity(0.85)
         }
     }
 }
@@ -444,9 +413,12 @@ struct OpenMorphGhost: View {
             .opacity(gone ? 0 : 1)
             .allowsHitTesting(false)
             .onAppear {
-                withAnimation(.spring(response: 0.22, dampingFraction: 0.86)) { progress = 1 }
-                withAnimation(.easeOut(duration: 0.14).delay(0.12)) { gone = true }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { onDone() }
+                // The row grows into the note on glide (1% overshoot reads
+                // as weight); the ghost leaves at exit speed once the
+                // note has arrived (70 ms behind, §6.2.6).
+                withAnimation(LumiSpring.glide.animation) { progress = 1 }
+                withAnimation(.easeOut(duration: LumiDuration.exit).delay(0.2)) { gone = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.36) { onDone() }
             }
     }
 }

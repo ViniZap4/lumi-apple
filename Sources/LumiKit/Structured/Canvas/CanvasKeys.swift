@@ -7,7 +7,10 @@ import Foundation
 //   Enter           edit text node / group label, open file or link node
 //   gf              open file node        C-w f   open it in a split
 //   h j k l, arrows pan                   H J K L  move the selected node (S-arrows too)
-//   + / =  -  0     zoom in / out / fit   a        new text node
+//   + = zi ⌘+       zoom in               _ zo ⌘-  zoom out
+//   0 zf            fit                   a        new text node
+//   -               never taken: it opens the floating explorer
+//                   (SPEC-PARTE2 §5b), so the host's shell gets it
 //   f               new file node (note picker)
 //   d, x, Backspace, Delete  delete selection
 //   c 1..6 / c 0    color / clear color   (Enter on a selected edge edits its label)
@@ -33,6 +36,7 @@ public enum CanvasKeyAction: Sendable, Equatable {
 public struct CanvasKeys: Sendable {
     public static let panStep = 80.0
     public static let nudgeStep = 20.0
+    public static let zoomStep = 1.2
 
     public var pending: String?
 
@@ -42,10 +46,27 @@ public struct CanvasKeys: Sendable {
 
     /// `hasSelection`: a node or edge is selected.
     public mutating func feed(_ e: StructuredKey, hasSelection: Bool) -> CanvasKeyAction? {
-        if e.meta || e.alt { return nil }
+        if e.alt { return nil }
         let k = e.key
+        // ⌘+ / ⌘= / ⌘- (SPEC-PARTE2 §5b); other ⌘ keys belong to the app.
+        if e.meta {
+            switch k {
+            case "+", "=": return .zoom(factor: Self.zoomStep)
+            case "-", "_": return .zoom(factor: 1 / Self.zoomStep)
+            default: return nil
+            }
+        }
         let p = pending
         pending = nil
+
+        if p == "z" {
+            switch k {
+            case "i": return .zoom(factor: Self.zoomStep)
+            case "o": return .zoom(factor: 1 / Self.zoomStep)
+            case "f": return .fit
+            default: return nil
+            }
+        }
 
         if p == "C-w" { return k == "f" || k == "Enter" ? .openFile(split: true) : nil }
         if p == "g" { return k == "f" ? .openFile(split: false) : nil }
@@ -94,9 +115,12 @@ public struct CanvasKeys: Sendable {
         case "L": return hasSelection ? nudge(1, 0) : nil
         case "J": return hasSelection ? nudge(0, 1) : nil
         case "K": return hasSelection ? nudge(0, -1) : nil
-        case "+", "=": return .zoom(factor: 1.2)
-        case "-", "_": return .zoom(factor: 1 / 1.2)
+        case "+", "=": return .zoom(factor: Self.zoomStep)
+        case "_": return .zoom(factor: 1 / Self.zoomStep)
         case "0": return .fit
+        case "z":
+            pending = "z"
+            return nil
         case "a": return .addText
         case "f": return .addFile
         case "d", "x", "Backspace", "Delete": return hasSelection ? .delete : nil

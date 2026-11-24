@@ -46,7 +46,7 @@ struct MarkdownCodeBlockView: View {
     }
 
     var body: some View {
-        let palette = MarkdownPalette(theme)
+        let palette = MarkdownPalette.shared(theme)
         VStack(alignment: .leading, spacing: 0) {
             header(palette)
             Rectangle().fill(Color(palette.codeBorder)).frame(height: 1)
@@ -193,7 +193,7 @@ struct MarkdownTableView: View {
     }
 
     var body: some View {
-        let palette = MarkdownPalette(theme)
+        let palette = MarkdownPalette.shared(theme)
         ScrollView(.horizontal) {
             Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
                 GridRow {
@@ -201,14 +201,14 @@ struct MarkdownTableView: View {
                         cellView(cell, col: col, header: true, palette: palette)
                     }
                 }
-                .background(Color(palette.codeBackground))
+                .background(Color(palette.tableHeader))
                 ForEach(Array(table.rows.enumerated()), id: \.offset) { index, row in
                     GridRow {
                         ForEach(Array(row.enumerated()), id: \.offset) { col, cell in
                             cellView(cell, col: col, header: false, palette: palette, last: index == table.rows.count - 1)
                         }
                     }
-                    .background(index % 2 == 1 ? theme.text.opacity(0.025) : Color.clear)
+                    .background(index % 2 == 1 ? Color(palette.tableZebra) : Color.clear)
                 }
             }
             .frame(minWidth: max(0, width - 2), alignment: .leading)
@@ -233,7 +233,7 @@ struct MarkdownTableView: View {
         let size = 0.92 * em
         return Text(InlineRenderer.render(cell, theme: theme))
             .font(.system(size: size, weight: header ? .semibold : .regular).monospacedDigit())
-            .foregroundStyle(theme.text)
+            .foregroundStyle(header ? Color(palette.heading(1)) : theme.text)
             .multilineTextAlignment(textAlign)
             .lineSpacing(size * 0.25)
             .fixedSize(horizontal: header, vertical: true)

@@ -20,7 +20,10 @@ public struct PaneLayoutView<Leaf: View>: View {
     let onResize: ([Int], Int, Double) -> Void
     let leaf: (PaneLeafID, PaneContent) -> Leaf
 
-    @Environment(\.lumiMotion) private var motion
+    @Environment(\.lumiMotionPolicy) private var motion
+    @Environment(\.theme) private var theme
+    /// The focus light travels between panes in this namespace.
+    @Namespace private var focusSpace
 
     public init(root: PaneNode, focused: PaneLeafID?, showsFocus: Bool, zoomed: PaneLeafID? = nil,
                 onResize: @escaping ([Int], Int, Double) -> Void,
@@ -33,14 +36,18 @@ public struct PaneLayoutView<Leaf: View>: View {
         self.leaf = leaf
     }
 
-    /// Spring for the zoom grow / shrink (instant under Reduce Motion).
-    public static var zoomAnimation: Animation { .spring(response: 0.3, dampingFraction: 0.84) }
+    /// Spring for the zoom grow / shrink (instant under Reduce Motion):
+    /// glide, the spring for things that travel.
+    public static var zoomAnimation: Animation { LumiSpring.glide.animation }
 
     public var body: some View {
+        // Splits: neighbours spring to their new size (glide, 1% overshoot
+        // reads as weight). Focus: the light travels (glide). Zoom: the
+        // pane grows from its old box (glide).
         render(root, path: [], hidden: false)
-            .animation(motion ? .smooth(duration: 0.18) : nil, value: root)
-            .animation(motion ? .smooth(duration: 0.12) : nil, value: focused)
-            .animation(motion ? Self.zoomAnimation : nil, value: zoomed)
+            .animation(motion.animation(.glide), value: root)
+            .animation(motion.animation(.glide), value: focused)
+            .animation(motion.animation(.glide), value: zoomed)
     }
 
     private func render(_ node: PaneNode, path: [Int], hidden: Bool) -> AnyView {
@@ -50,7 +57,20 @@ public struct PaneLayoutView<Leaf: View>: View {
                 leaf(id, content)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
-                    .overlay { PaneFocusRing(active: showsFocus && zoomed == nil && focused == id) }
+                    .overlay {
+                        // Resting panes sit under an 18% veil (§6.3).
+                        theme.background.opacity(showsFocus && zoomed == nil && focused != id ? 0.18 : 0)
+                            .allowsHitTesting(false)
+                            .animation(motion.animation(.soft), value: focused)
+                    }
+                    .overlay {
+                        if showsFocus && zoomed == nil && focused == id {
+                            FocusLight(radius: 4)
+                                .padding(1)
+                                .matchedGeometryEffect(id: "focus", in: focusSpace)
+                                .accessibilityHidden(true)
+                        }
+                    }
                     // Hidden by zoom: moved out of the window (no clicks,
                     // scrolls, drops or hovers reach it) without a resize,
                     // so nothing reflows; the move itself never animates.
@@ -116,7 +136,7 @@ struct PaneSplitStack: View {
     let onResize: ([Int], Int, Double) -> Void
     let child: (Int) -> AnyView
 
-    @Environment(\.lumiMotion) private var motion
+    @Environment(\.lumiMotionPolicy) private var motion
 
     var body: some View {
         GeometryReader { geo in
@@ -129,9 +149,13 @@ struct PaneSplitStack: View {
                         .frame(width: f.width, height: f.height)
                         .offset(x: f.minX, y: f.minY)
                         .zIndex(zoomIndex == i ? 1 : 0)
-                        .transition(motion
-                            ? .opacity.combined(with: .move(edge: axis == .vertical ? .trailing : .bottom))
-                            : .identity)
+                        // A new pane unfolds from its divider; a closing
+                        // one leaves at exit speed.
+                        .transition(motion.transition(.asymmetric(
+                            insertion: .modifier(active: MotionFromEffect(from: .unfold(edge: axis == .vertical ? .trailing : .bottom), p: 0),
+                                                 identity: MotionFromEffect(from: .unfold(edge: axis == .vertical ? .trailing : .bottom), p: 1)),
+                            removal: .opacity.animation(motion.exit)
+                        )))
                 }
                 ForEach(Array(frames.dividers.enumerated()), id: \.offset) { i, d in
                     PaneDivider(axis: axis, path: path) { location in

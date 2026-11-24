@@ -36,6 +36,14 @@ extension AppState {
         switch ctx {
         case .explorer, .reader, .preview, .sidebar, .home, .hover, .books:
             var items = CommandLegend.shellItems(ctx, pending: shellPending, pane: ctx == .sidebar ? nil : paneLegendItem)
+            // A focused canvas / board: its own keys first (`-` stays the
+            // explorer; zoom is + = zi / _ zo / 0 zf).
+            if ctx == .reader, shellPending.isEmpty, !paneView(focusedLeaf).isEditing, structuredKeySinks[focusedLeaf] != nil {
+                let canvas = panePath(focusedLeaf).map(NoteKind.isCanvasPath) ?? false
+                let extra = canvas ? CommandLegend.canvasItems : CommandLegend.boardItems
+                items.removeAll { item in extra.contains { $0.keys == item.keys } }
+                items.insert(contentsOf: extra, at: 0)
+            }
             if isSplit, ctx == .reader || ctx == .preview, shellPending.isEmpty {
                 items.insert(zoomLegendItem, at: min(items.count, 8))
             }
@@ -98,9 +106,11 @@ extension AppState {
     var floatingStat: String? {
         if floatingLevel == .books {
             let groups = bookGroups
-            guard groups.indices.contains(booksGroupCursor) else { return nil }
-            let n = groups[booksGroupCursor].books.count
-            return n == 0 ? "0 books" : "\(min(booksCursor, n - 1) + 1)/\(n)"
+            let sizes = groups.map(\.books.count)
+            let total = sizes.reduce(0, +)
+            guard total > 0 else { return "0 livros" }
+            if booksColumn == 0 { return "\(booksGroupCursor + 1)/\(groups.count) contas" }
+            return "\(BooksShelf.flatIndex(sizes, shelfCursor) + 1)/\(total)"
         }
         let n = explorer.nav.entries.count
         return n == 0 ? "0 items" : "\(explorer.nav.cursor + 1)/\(n)"

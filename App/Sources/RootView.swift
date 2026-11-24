@@ -147,6 +147,9 @@ struct ShellMain: View {
             }
             ShellStatusLine()
         }
+        // Depth: what is behind the floating explorer recedes (smaller,
+        // softer, a touch desaturated) — it reads as *behind*, not gone.
+        .lumiRecede(appState.showFloatingExplorer || appState.showPalette)
         .background(theme.background)
         .coordinateSpace(.named(shellHintSpace))
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(shellHintSpace)) } action: { frame in
@@ -158,8 +161,13 @@ struct ShellMain: View {
         .overlay {
             // The floating explorer: the navigation (SPEC-PARTE2 §2).
             if appState.showFloatingExplorer {
+                // The panel springs in from its trigger (FloatingPanel);
+                // the exit is a short ease, faster than the entrance.
                 FloatingExplorerOverlay()
-                    .transition(appState.transition(.scale(scale: 0.96).combined(with: .opacity)))
+                    .transition(appState.transition(.asymmetric(
+                        insertion: .identity,
+                        removal: .opacity.combined(with: .scale(scale: 0.98)).animation(appState.motionPolicy.exit)
+                    )))
             }
         }
         .overlay {
@@ -208,7 +216,11 @@ struct ShellMain: View {
                 if appState.showPalette {
                     CommandPalette()
                         .padding(.top, 90)
-                        .transition(appState.transition(.scale(scale: 0.97, anchor: .top).combined(with: .opacity)))
+                        .lumiEnter(.overlay(from: .top), spring: .bouncy)
+                        .transition(appState.transition(.asymmetric(
+                            insertion: .identity,
+                            removal: .opacity.combined(with: .scale(scale: 0.98, anchor: .top)).animation(appState.motionPolicy.exit)
+                        )))
                 } else if appState.showHelp {
                     KeymapHelpOverlay()
                         .padding(.top, 70)
@@ -220,7 +232,8 @@ struct ShellMain: View {
         .animation(appState.animation(.fast), value: appState.showHelp)
         .animation(appState.animation(.fast), value: appState.hintSession != nil)
         .animation(appState.animation(.standard), value: appState.preferences.showKeybindsBar)
-        .environment(\.lumiMotion, appState.motionEnabled)
+        .lumiMotion(appState.motionPolicy)
+        .environment(\.lumiDensity, appState.preferences.density)
         #if !os(macOS)
         .focusable()
         .onKeyPress(phases: [.down, .repeat]) { press in

@@ -32,7 +32,7 @@ extension NSAttributedString.Key {
 /// Rounded background for an inline run. Value-equal so attribute
 /// dictionaries stay uniquable (see `MarkdownDecoration`).
 final class MarkdownPill: NSObject {
-    enum Kind: Equatable { case code, kbd, mark }
+    enum Kind: Equatable { case code, kbd, mark, tag }
     let kind: Kind
     let fill: MarkdownPlatformColor
     let stroke: MarkdownPlatformColor?

@@ -39,7 +39,7 @@ struct BookStatusDot: View {
                     // Breathes while syncing (still under Reduce Motion).
                     .opacity(breathing ? 0.3 : 1)
                     .scaleEffect(breathing && motion ? 0.85 : 1)
-                    .animation(motion ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true) : nil, value: breathing)
+                    .animation(motion ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true) : nil, value: breathing)
                     .onAppear { breathing = motion }
             case .upToDate:
                 Circle().fill(Color.green.opacity(0.85)).frame(width: size, height: size)
@@ -59,8 +59,8 @@ struct BookStatusDot: View {
             guard motion else { return }
             ring = 1
             ringOpacity = 0.8
-            withAnimation(.easeOut(duration: 0.6)) {
-                ring = 2.6
+            withAnimation(.easeOut(duration: LumiDuration.flash)) {
+                ring = 2.8
                 ringOpacity = 0
             }
         }

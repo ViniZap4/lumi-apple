@@ -113,6 +113,9 @@ struct NoteDetailView: View {
                 )
                 .environment(\.markdownLinkHover, appState.linkHover(from: appState.primaryLeaf))
             }
+            // Note content resolves in by bands, top first, 70 ms after
+            // the old page left (sequential, never a cross-fade of text).
+            .lumiReveal(trigger: entry.relativePath)
             // Per-note identity: new entry → fresh scroll-host coord,
             // fresh stagger cascade for the header / blocks inside the
             // reader. Combined with `.animation(value: entry.relativePath)`
@@ -138,6 +141,12 @@ struct NoteDetailView: View {
             }
             .environment(\.vimControllerSink) { appState.adoptEditor($0) }
             .environment(\.markdownLinkHover, appState.linkHover(from: appState.primaryLeaf))
+            // The vim mode colour sweeps down the editor's left edge.
+            .overlay(alignment: .leading) {
+                if appState.preferences.vimEnabled {
+                    ModeEdge(color: appState.liveVimMode.chromeColor(theme))
+                }
+            }
             .id(entry.relativePath)
             .transition(appState.transition(.opacity))
         case let .custom(mode):

@@ -29,7 +29,7 @@ final class MarkdownAttributedBuilder {
 
     init(style: MarkdownRenderStyle) {
         self.style = style
-        self.palette = MarkdownPalette(style.theme)
+        self.palette = MarkdownPalette.shared(style.theme)
         self.fonts = MarkdownFontBook(family: style.fontFamily)
     }
 
@@ -147,7 +147,7 @@ final class MarkdownAttributedBuilder {
             let out = stack(blocks, ctx: inner, gap: style.rhythm)
             wrap(out, in: MarkdownDecoration(
                 kind: .quote, indent: ctx.indent, padding: style.quotePadding,
-                fill: .clear, stroke: palette.quoteBar, labelColor: palette.dim
+                fill: palette.quoteFill, stroke: palette.quoteBar, labelColor: palette.dim
             ))
             return out
 
@@ -162,7 +162,7 @@ final class MarkdownAttributedBuilder {
 
         case .thematicBreak:
             let m = max(0, 2.4 * style.em - style.rhythm)
-            return rule(ctx: ctx, color: palette.rule, before: m, after: m, fade: true)
+            return rule(ctx: ctx, color: palette.hrStart, end: palette.hrEnd, before: m, after: m, fade: true)
 
         case let .media(ref):
             var source = "![\(ref.alt)](\(ref.url.absoluteString)"
@@ -183,12 +183,7 @@ final class MarkdownAttributedBuilder {
 
     private func heading(level: Int, inline: [InlineNode], ctx: Context) -> NSMutableAttributedString {
         let size = style.headingSize(level)
-        let color: MarkdownPlatformColor
-        switch level {
-        case 5: color = palette.dim
-        case 6: color = palette.marker
-        default: color = ctx.textColor
-        }
+        let color = palette.heading(level)
         let nodes = level >= 5 ? uppercased(inline) : inline
         let run = NSMutableAttributedString(attributedString: inlineText(nodes, base: InlineBase(
             size: size, weight: level == 1 ? .bold : .semibold, color: color,
@@ -207,7 +202,7 @@ final class MarkdownAttributedBuilder {
         if level == 2 {
             wrap(out, in: MarkdownDecoration(
                 kind: .headingRule, indent: ctx.indent, padding: 0.4 * size,
-                fill: palette.rule, stroke: palette.rule, labelColor: palette.rule
+                fill: MarkdownPalette.mix(palette.heading(2), palette.background, 0.35), stroke: palette.rule, labelColor: palette.rule
             ), pad: false)
         }
         return out
@@ -249,7 +244,7 @@ final class MarkdownAttributedBuilder {
 
     private func callout(_ c: MarkdownCallout, ctx: Context) -> NSMutableAttributedString {
         let color = palette.callout(c.kind)
-        let titleColor = MarkdownPalette.mix(color, palette.text, 0.72)
+        let titleColor = palette.calloutTitle(c.kind)
         let titleSize = 0.95 * style.em
         let foldable = c.fold != .none
         let open = c.fold != .closed
@@ -394,8 +389,8 @@ final class MarkdownAttributedBuilder {
         } else if ordered {
             let size = 0.94 * style.em
             out.append(NSAttributedString(string: "\(number).", attributes: [
-                .font: MarkdownPlatformFont.monospacedDigitSystemFont(ofSize: size, weight: .regular),
-                .foregroundColor: palette.marker,
+                .font: MarkdownPlatformFont.monospacedDigitSystemFont(ofSize: size, weight: .medium),
+                .foregroundColor: palette.listMarker,
             ]))
         } else {
             let glyph: String
@@ -406,7 +401,7 @@ final class MarkdownAttributedBuilder {
             }
             out.append(NSAttributedString(string: glyph, attributes: [
                 .font: font,
-                .foregroundColor: palette.marker,
+                .foregroundColor: depth == 0 ? palette.listMarker : MarkdownPalette.mix(palette.listMarker, palette.background, 0.7),
             ]))
         }
         out.append(NSAttributedString(string: "\t", attributes: [.font: font]))
@@ -423,7 +418,7 @@ final class MarkdownAttributedBuilder {
         let side = (1.02 * font.pointSize).rounded()
         attachment.image = Self.checkboxImage(
             checked: checked, side: side,
-            border: palette.text.withAlphaComponent(0.38), fill: palette.primary, check: palette.background
+            border: palette.checkBorder, fill: palette.primary, check: palette.background
         )
         #if canImport(UIKit)
         attachment.accessibilityLabel = checked ? "checked" : "unchecked"
@@ -470,11 +465,11 @@ final class MarkdownAttributedBuilder {
 
     // MARK: Rules, attachments, footnotes
 
-    private func rule(ctx: Context, color: MarkdownPlatformColor, before: CGFloat, after: CGFloat, fade: Bool) -> NSMutableAttributedString {
+    private func rule(ctx: Context, color: MarkdownPlatformColor, end: MarkdownPlatformColor? = nil, before: CGFloat, after: CGFloat, fade: Bool) -> NSMutableAttributedString {
         let run = NSAttributedString(string: "\u{00A0}", attributes: [.font: fonts.font(size: 4)])
         let out = paragraph(run, ctx: ctx, before: before, after: after)
         let deco = MarkdownDecoration(kind: .rule, indent: ctx.indent, padding: fade ? 1 : 0,
-                                      fill: color, stroke: color, labelColor: color)
+                                      fill: color, stroke: end ?? color, labelColor: color)
         wrap(out, in: deco)
         out.addAttribute(.lumiSourceText, value: "---", range: NSRange(location: 0, length: 1))
         return out
@@ -535,12 +530,12 @@ final class MarkdownAttributedBuilder {
         for (i, item) in items.enumerated() {
             let line = NSMutableAttributedString(string: "\t", attributes: [.font: font])
             line.append(NSAttributedString(string: "\(item.number).", attributes: [
-                .font: MarkdownPlatformFont.monospacedDigitSystemFont(ofSize: size, weight: .regular),
-                .foregroundColor: palette.marker,
+                .font: MarkdownPlatformFont.monospacedDigitSystemFont(ofSize: size, weight: .medium),
+                .foregroundColor: palette.footnote,
             ]))
             line.append(NSAttributedString(string: "\t", attributes: [.font: font]))
             line.append(inlineText(item.inline, base: InlineBase(size: size, weight: .regular, color: palette.dim)))
-            var back: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: palette.primary]
+            var back: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: palette.footnote]
             if let url = URL(string: "lumi-fn://back/\(item.id)") { back[.link] = url }
             line.append(NSAttributedString(string: " ", attributes: [.font: font]))
             line.append(NSAttributedString(string: "\u{21A9}\u{FE0E}", attributes: back))
@@ -590,30 +585,33 @@ final class MarkdownAttributedBuilder {
         for node in nodes {
             switch node {
             case let .text(s):
-                out.append(NSAttributedString(string: s, attributes: textAttributes(state)))
+                appendText(s, state: state, into: out)
             case let .strong(children):
                 var next = state
                 next.bold = true
+                if next.color == palette.text { next.color = palette.strong }
                 appendInline(children, state: next, into: out)
             case let .emphasis(children):
                 var next = state
                 next.italic = true
+                if next.color == palette.text { next.color = palette.emphasis }
                 appendInline(children, state: next, into: out)
             case let .strikethrough(children):
                 var next = state
                 next.strike = true
-                next.color = palette.dim
+                next.color = palette.strikeText
                 appendInline(children, state: next, into: out)
             case let .mark(children):
                 var next = state
                 next.marked = true
+                if next.link == nil { next.color = palette.markText }
                 appendInline(children, state: next, into: out)
             case let .code(s):
                 var attrs = textAttributes(state)
                 let size = 0.86 * state.size
                 attrs[.font] = fonts.font(size: size, weight: state.bold ? .semibold : .regular, monospaced: true)
-                attrs[.foregroundColor] = state.link == nil ? palette.text : palette.primary
-                attrs[.lumiPill] = MarkdownPill(kind: .code, fill: palette.inlineBackground)
+                attrs[.foregroundColor] = state.link == nil ? palette.inlineCodeText : palette.link
+                attrs[.lumiPill] = MarkdownPill(kind: .code, fill: palette.inlineBackground, stroke: palette.inlineCodeStroke)
                 attrs.removeValue(forKey: .kern)
                 appendPadded(s, attrs: attrs, pad: 0.4 * size, into: out)
             case let .kbd(s):
@@ -629,7 +627,7 @@ final class MarkdownAttributedBuilder {
                 let size = 0.72 * state.size
                 attrs[.font] = MarkdownPlatformFont.monospacedDigitSystemFont(ofSize: size, weight: .semibold)
                 attrs[.baselineOffset] = 0.42 * state.size
-                attrs[.foregroundColor] = palette.primary
+                attrs[.foregroundColor] = palette.footnote
                 attrs.removeValue(forKey: .underlineStyle)
                 if let url = URL(string: "lumi-fn://ref/\(id)") { attrs[.link] = url }
                 attrs[.lumiAnchor] = "fnref-\(id)"
@@ -638,7 +636,7 @@ final class MarkdownAttributedBuilder {
             case let .link(destination, children):
                 var next = state
                 next.link = Self.url(from: destination)
-                next.color = palette.primary
+                next.color = palette.link
                 appendInline(children, state: next, into: out)
             case let .image(_, alt):
                 var attrs = textAttributes(state)
@@ -656,6 +654,38 @@ final class MarkdownAttributedBuilder {
             }
         }
     }
+
+    /// Body text, with inline `#tags` drawn as chips (Obsidian syntax:
+    /// `#` after a space or line start, then letters/digits/`_-/`, at
+    /// least one non-digit).
+    private func appendText(_ s: String, state: InlineBase, into out: NSMutableAttributedString) {
+        guard state.link == nil, s.contains("#"),
+              let regex = Self.tagRegex else {
+            out.append(NSAttributedString(string: s, attributes: textAttributes(state)))
+            return
+        }
+        let ns = s as NSString
+        var cursor = 0
+        for m in regex.matches(in: s, range: NSRange(location: 0, length: ns.length)) {
+            let r = m.range(at: 1)
+            if r.location > cursor {
+                out.append(NSAttributedString(string: ns.substring(with: NSRange(location: cursor, length: r.location - cursor)), attributes: textAttributes(state)))
+            }
+            var attrs = textAttributes(state)
+            let size = 0.86 * state.size
+            attrs[.font] = fonts.font(size: size, weight: .medium)
+            attrs[.foregroundColor] = palette.tagText
+            attrs[.lumiPill] = MarkdownPill(kind: .tag, fill: palette.tagFill)
+            attrs.removeValue(forKey: .kern)
+            appendPadded(ns.substring(with: r), attrs: attrs, pad: 0.42 * size, into: out)
+            cursor = NSMaxRange(r)
+        }
+        if cursor < ns.length {
+            out.append(NSAttributedString(string: ns.substring(from: cursor), attributes: textAttributes(state)))
+        }
+    }
+
+    static let tagRegex = try? NSRegularExpression(pattern: "(?:^|(?<=\\s))(#(?=[\\p{L}\\p{N}_/-]*[\\p{L}_/-])[\\p{L}\\p{N}_/-]+)")
 
     /// Append a pill run with `pad` of breathing room on both sides
     /// (kern on the previous character and on the run's last one), so
@@ -682,7 +712,7 @@ final class MarkdownAttributedBuilder {
         if s.tracking != 0 { attrs[.kern] = s.tracking }
         if s.strike {
             attrs[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
-            attrs[.strikethroughColor] = s.link == nil ? palette.marker : palette.linkLine
+            attrs[.strikethroughColor] = s.link == nil ? palette.strikeLine : palette.linkLine
         }
         if s.marked {
             attrs[.lumiPill] = MarkdownPill(kind: .mark, fill: palette.markBackground)

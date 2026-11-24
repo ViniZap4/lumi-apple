@@ -260,8 +260,8 @@ extension AppState {
         keymap.ctrlHJKLPanes = preferences.ctrlHJKLPanes
         let now = ProcessInfo.processInfo.systemUptime
         // The focused pane's Board / Canvas takes its keys first
-        // (SPEC-PARTE2 §5–6): on a canvas `-` zooms out; elsewhere it is
-        // the floating explorer.
+        // (SPEC-PARTE2 §5–6). `-` is never taken by them: it falls
+        // through to the floating explorer, as everywhere (§5b).
         // `⌃w` stays the shell's window prefix (⌃w f / ⏎ reach the canvas
         // through `followLinkInFocusedPane`).
         if isNoteOpen, focusedPane != .preview, !paneView(focusedLeaf).isEditing,

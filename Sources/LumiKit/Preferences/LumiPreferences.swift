@@ -61,7 +61,34 @@ public final class LumiPreferences {
     /// App-level Reduce Motion (on top of the system setting): no
     /// transforms or fades, only instant state changes (SPEC-PARTE2 §1).
     public var reduceMotion: Bool {
-        didSet { store.set(Keys.reduceMotion, reduceMotion) }
+        didSet {
+            store.set(Keys.reduceMotion, reduceMotion)
+            if reduceMotion, motionLevel != .reduced { motionLevel = .reduced }
+            if !reduceMotion, motionLevel == .reduced { motionLevel = .full }
+        }
+    }
+
+    /// "Movimento: completo | suave | reduzido". `reduced` keeps
+    /// `reduceMotion` in sync (older builds read that key).
+    public var motionLevel: MotionLevel {
+        didSet {
+            store.set(Keys.motionLevel, motionLevel.rawValue)
+            let reduced = motionLevel == .reduced
+            if reduceMotion != reduced { reduceMotion = reduced }
+        }
+    }
+
+    /// "Largura de leitura": drives `readingWidth`.
+    public var readingMeasure: ReadingMeasure {
+        didSet {
+            store.set(Keys.readingMeasure, readingMeasure.rawValue)
+            if readingWidth != readingMeasure.points { readingWidth = readingMeasure.points }
+        }
+    }
+
+    /// "Densidade" of the explorer and lists.
+    public var density: ShellDensity {
+        didSet { store.set(Keys.density, density.rawValue) }
     }
 
     /// Show gutter line numbers in the vim editor.
@@ -164,10 +191,10 @@ public final class LumiPreferences {
 
     /// Maximum body width (in pt) for the read pane. Lets users pick a
     /// narrow newspaper-column measure or a wider editor-style layout.
-    /// Clamped 520…1100.
+    /// Clamped 520…1100, or `ReadingMeasure.fullWidth` (fill the pane).
     public var readingWidth: Double {
         didSet {
-            let clamped = max(520, min(1100, readingWidth))
+            let clamped = readingWidth >= ReadingMeasure.fullWidth ? ReadingMeasure.fullWidth : max(520, min(1100, readingWidth))
             if clamped != readingWidth {
                 readingWidth = clamped
                 return
@@ -318,7 +345,14 @@ public final class LumiPreferences {
         let rawFamily = store.string(Keys.readingFontFamily) ?? ReadingFontFamily.system.rawValue
         self.readingFontFamily = ReadingFontFamily(rawValue: rawFamily) ?? .system
         self.readingScale = store.double(Keys.readingScale) ?? 1.0
-        self.readingWidth = store.double(Keys.readingWidth) ?? 760
+        let measure = store.string(Keys.readingMeasure).flatMap(ReadingMeasure.init(rawValue:))
+            ?? store.double(Keys.readingWidth).map(ReadingMeasure.nearest(to:))
+            ?? .medium
+        self.readingMeasure = measure
+        self.readingWidth = measure.points
+        self.density = ShellDensity(rawValue: store.string(Keys.density) ?? "") ?? .comfortable
+        self.motionLevel = MotionLevel(rawValue: store.string(Keys.motionLevel) ?? "")
+            ?? ((store.bool(Keys.reduceMotion) ?? false) ? .reduced : .full)
         self.escapeSequences = EscapeSequences.decode(store.string(Keys.escapeSequences))
         self.escapeTimeoutMs = EscapeSequences.clampTimeout(store.int(Keys.escapeTimeout) ?? EscapeSequences.defaultTimeoutMs)
         self.lineWrapping = store.bool(Keys.lineWrapping) ?? true
@@ -397,6 +431,9 @@ public final class LumiPreferences {
         static let previewReturnMovesCursor = "preview_return_moves_cursor"
         static let editMode = "edit_mode"
         static let reduceMotion = "reduce_motion"
+        static let motionLevel = "motion_level"
+        static let readingMeasure = "reading_measure"
+        static let density = "density"
     }
 
     /// UserDefaults keys used by builds <= F.36. Kept here only for the

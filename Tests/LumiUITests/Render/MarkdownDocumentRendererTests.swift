@@ -108,7 +108,7 @@ struct MarkdownDocumentRendererTests {
 
             let linkIndex = (storage.string as NSString).range(of: "link").location
             #expect(storage.attribute(.link, at: linkIndex, effectiveRange: nil) as? URL == URL(string: "https://x.y"))
-            #expect(storage.attribute(.foregroundColor, at: linkIndex, effectiveRange: nil) as? NSColor == palette.primary)
+            #expect(storage.attribute(.foregroundColor, at: linkIndex, effectiveRange: nil) as? NSColor == palette.link)
 
             // Fenced code is a hosted block (header, copy, wrap toggle).
             var code: MarkdownBlockAttachment?

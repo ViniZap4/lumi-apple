@@ -194,6 +194,12 @@ struct SecondaryNotePane: View {
                           onClose: { appState.closeLeaf(leaf) })
             content(resolution?.route ?? .reader, resolved: resolution?.view ?? view)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay(alignment: .leading) {
+                    // Vim mode colour on the editing pane's edge (§6.7).
+                    if focused, appState.paneView(leaf).isEditing, appState.preferences.vimEnabled {
+                        ModeEdge(color: (appState.paneVim[leaf]?.mode ?? .normal).chromeColor(theme))
+                    }
+                }
                 .clipped()
                 .id("\(path)#\(resolution?.view.rawValue ?? "")")
                 .transition(appState.transition(.opacity))
@@ -245,6 +251,7 @@ struct SecondaryNotePane: View {
                     onInAppLink: { url in appState.routeReaderURL(url, from: leaf) },
                     onToggleTask: canEdit ? { appState.togglePaneTask($0, leaf: leaf, path: path) } : nil
                 )
+                .lumiReveal(trigger: path)
                 .environment(\.markdownScrollViewSink, MarkdownScrollViewSink { scroll in
                     reader.attach(scrollView: scroll)
                     appState.paneReaders[leaf] = reader

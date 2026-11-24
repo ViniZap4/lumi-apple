@@ -24,6 +24,8 @@ struct KeymapHelpOverlay: View {
             ("j k  d u", "scroll"), ("gg  G", "top / bottom"), ("y", "copy selection"),
             (":q  :wq", "leave / close the pane"), ("\\p  :preview split", "preview beside source"),
             ("board / canvas: e i ⌘E", "Reading → Edit"), ("board / canvas: ⎋ q", "Edit → Reading"),
+            ("canvas: +  =  zi  ⌘+", "zoom in"), ("canvas: _  zo  ⌘-", "zoom out"), ("canvas: 0  zf", "fit"),
+            ("board / canvas: -", "explorer (as everywhere)"),
         ]),
         ("Splits", [
             ("⌃w v  :vsplit [note]", "split side by side"), ("⌃w s  :split [note]", "split stacked"),

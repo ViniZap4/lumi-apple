@@ -21,6 +21,13 @@ public struct KanbanBoardView: View {
     @FocusState private var filterFocused: Bool
 
     static let laneWidth: CGFloat = 272
+    /// Lane width: fills the board's width (space pass) between 260 and 400.
+    @State private var laneW: CGFloat = 272
+    /// Horizontal drag velocity → the dragged card leans (≤ 7°).
+    @State private var lean: Double = 0
+    /// Bumped per card when it lands: the drop bounce.
+    @State private var landed: [String: Int] = [:]
+    @Environment(\.lumiMotionPolicy) private var policy
     static let space = "kanban-board"
 
     public init(model: KanbanBoardModel, title: String = "", status: String? = nil, motion: Bool = true, onSource: (() -> Void)? = nil) {
@@ -54,6 +61,12 @@ public struct KanbanBoardView: View {
                     .animation(StructuredStyle.animation(animates), value: model.laneOrder.map { $0?.id })
                 }
                 .scrollIndicators(.automatic)
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { w in
+                    // Columns fill the width: n lanes + the add column.
+                    let n = CGFloat(max(1, model.lanes.count))
+                    let room = w - 32 - 12 * n - 140
+                    laneW = max(260, min(400, room / n))
+                }
                 .onChange(of: model.cur) { _, c in
                     guard model.lanes.indices.contains(c.lane) else { return }
                     withAnimation(StructuredStyle.animation(animates)) { proxy.scrollTo(model.lanes[c.lane].id) }
@@ -140,9 +153,12 @@ public struct KanbanBoardView: View {
                     case let .card(vm):
                         cardView(vm, lane: li, index: pos)
                     case let .placeholder(h):
+                        // The slot the card will land in breathes.
                         RoundedRectangle(cornerRadius: 8)
-                            .strokeBorder(theme.accent.opacity(0.7), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
-                            .background(RoundedRectangle(cornerRadius: 8).fill(theme.accent.opacity(0.08)))
+                            .strokeBorder(theme.ramp.accentLine, style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+                            .background(RoundedRectangle(cornerRadius: 8).fill(theme.ramp.accentWash))
+                            .shadow(color: theme.ramp.accentGlow, radius: 10)
+                            .lumiBreathing(low: 0.6, period: LumiDuration.breath)
                             .frame(height: h)
                             .transition(.opacity)
                     }
@@ -168,7 +184,7 @@ public struct KanbanBoardView: View {
             .padding(.horizontal, 4)
         }
         .padding(10)
-        .frame(width: Self.laneWidth, alignment: .top)
+        .frame(width: laneW, alignment: .top)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(theme.overlayBackground.opacity(theme.isDark ? 0.55 : 0.75))
@@ -219,7 +235,7 @@ public struct KanbanBoardView: View {
     private var lanePlaceholder: some View {
         RoundedRectangle(cornerRadius: 12, style: .continuous)
             .strokeBorder(theme.accent.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, dash: [6, 5]))
-            .frame(width: Self.laneWidth, height: max(120, model.drag?.size.height ?? 200))
+            .frame(width: laneW, height: max(120, model.drag?.size.height ?? 200))
     }
 
     private var addLaneColumn: some View {
@@ -232,7 +248,7 @@ public struct KanbanBoardView: View {
                     .onSubmit { model.commitEdit() }
                     .onKeyPress(.escape) { model.cancelEdit(); return .handled }
                     .padding(12)
-                    .frame(width: Self.laneWidth, alignment: .leading)
+                    .frame(width: laneW, alignment: .leading)
                     .background(RoundedRectangle(cornerRadius: 12).fill(theme.overlayBackground))
             } else {
                 Button { model.startNewLane() } label: {
@@ -275,6 +291,10 @@ public struct KanbanBoardView: View {
                 .onTapGesture(count: 2) { model.setCursor(KanbanCursor(lane: li, card: ci)); model.startEdit(vm) }
                 .onTapGesture { model.setCursor(KanbanCursor(lane: li, card: ci)); focused = true }
                 .gesture(cardDrag(vm, lane: li, index: ci))
+                .lumiHoverLift(1)
+                // Cards pop in on open (a ripple) and bounce when they land.
+                .lumiEnter(MotionFrom(scale: 1.04, y: -3, opacity: landed[vm.id] == nil ? 0 : 1), spring: .bouncy,
+                           delay: landed[vm.id] == nil ? policy.stagger(ci + li * 2) : 0, trigger: landed[vm.id] ?? 0)
                 .transition(.opacity)
         }
     }
@@ -284,15 +304,21 @@ public struct KanbanBoardView: View {
             .onChanged { v in
                 if model.drag == nil {
                     model.setCursor(KanbanCursor(lane: li, card: ci))
-                    let f = model.cardFrames[vm.id] ?? CGRect(origin: v.startLocation, size: CGSize(width: Self.laneWidth - 20, height: 48))
+                    let f = model.cardFrames[vm.id] ?? CGRect(origin: v.startLocation, size: CGSize(width: laneW - 20, height: 48))
                     model.beginDrag(.init(kind: .card, key: vm.id, fromLane: li, fromIndex: ci, size: f.size,
                                           grab: CGPoint(x: v.startLocation.x - f.minX, y: v.startLocation.y - f.minY),
                                           location: v.location))
                 }
                 withAnimation(StructuredStyle.animation(animates)) { model.updateDrag(to: v.location) }
+                // Lean with horizontal velocity (≤ 7°), settle upright.
+                let vx = Double(v.velocity.width)
+                withAnimation(policy.animation(.glide)) { lean = max(-7, min(7, vx / 260)) }
             }
             .onEnded { _ in
+                let key = model.drag?.key
                 withAnimation(StructuredStyle.animation(animates)) { model.endDrag() }
+                withAnimation(policy.animation(.glide)) { lean = 0 }
+                if let key { landed[key, default: 0] += 1 }
                 focused = true
             }
     }
@@ -302,7 +328,7 @@ public struct KanbanBoardView: View {
             .onChanged { v in
                 if model.drag == nil {
                     model.setCursor(KanbanCursor(lane: li, card: model.cur.lane == li ? model.cur.card : 0))
-                    let f = model.laneFrames[lane.id] ?? CGRect(origin: v.startLocation, size: CGSize(width: Self.laneWidth, height: 200))
+                    let f = model.laneFrames[lane.id] ?? CGRect(origin: v.startLocation, size: CGSize(width: laneW, height: 200))
                     model.beginDrag(.init(kind: .lane, key: lane.id, fromLane: li, fromIndex: li, size: f.size,
                                           grab: CGPoint(x: v.startLocation.x - f.minX, y: v.startLocation.y - f.minY),
                                           location: v.location))
@@ -333,9 +359,14 @@ public struct KanbanBoardView: View {
                         .background(RoundedRectangle(cornerRadius: 12).fill(theme.overlayBackground))
                 }
             }
-            .shadow(color: .black.opacity(theme.isDark ? 0.45 : 0.18), radius: 14, y: 6)
-            .rotationEffect(.degrees(animates ? 1.5 : 0))
-            .scaleEffect(animates ? 1.03 : 1)
+            // Lifted: scale 1.035, elevation 4, accent rim + under-glow,
+            // leaning with the pointer's velocity.
+            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(theme.ramp.accentLine, lineWidth: 1))
+            .shadow(color: theme.ramp.accentGlow, radius: 16, y: 2)
+            .lumiElevation(.floating, radius: 9, ramp: theme.ramp)
+            .rotationEffect(.degrees(animates ? lean + 1 : 0), anchor: UnitPoint(x: d.grab.x / max(1, d.size.width), y: 0.2))
+            .scaleEffect(animates ? 1.035 : 1)
+            .lumiEnter(MotionFrom(scale: 0.98), spring: .bouncy, trigger: d.key)
             .offset(x: d.location.x - d.grab.x, y: d.location.y - d.grab.y)
             .allowsHitTesting(false)
         }
@@ -396,7 +427,7 @@ struct KanbanCardView: View {
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(theme.background)
-                .shadow(color: .black.opacity(theme.isDark ? 0.25 : 0.06), radius: focused ? 6 : 1.5, y: 1)
+                .lumiElevation(focused ? .hovered : .raised, radius: 8, ramp: theme.ramp)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)

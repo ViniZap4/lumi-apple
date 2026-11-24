@@ -271,7 +271,8 @@ final class MarkdownAttachmentOverlays {
 /// Horizontal text inset that centres a `readingWidth` column, matching
 /// the old `.frame(maxWidth: readingWidth).padding(.horizontal, 48)`.
 func markdownHorizontalInset(viewWidth: CGFloat, readingWidth: CGFloat) -> CGFloat {
-    let gutter: CGFloat = viewWidth < 520 ? 20 : 48
+    // Phone 16, narrow pane / iPad portrait 28, wide 48 (space pass).
+    let gutter: CGFloat = viewWidth < 520 ? 16 : viewWidth < 900 ? 28 : 48
     let column = min(viewWidth, max(readingWidth, 2 * gutter + 1))
     return max(gutter, (viewWidth - column) / 2 + gutter)
 }

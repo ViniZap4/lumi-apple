@@ -34,6 +34,7 @@ struct PaletteItem: Identifiable {
 struct CommandPalette: View {
     @Environment(AppState.self) private var appState
     @Environment(\.theme) private var theme
+    @Namespace private var slab
     @State private var query = ""
     @State private var selection = 0
     @FocusState private var focused: Bool
@@ -80,6 +81,8 @@ struct CommandPalette: View {
                             ForEach(Array(items.enumerated()), id: \.element.id) { i, item in
                                 row(item, selected: i == selection)
                                     .id(item.id)
+                                    // Results ripple in (and again per query).
+                                    .staggerIn(i, active: appState.motionEnabled)
                                     .contentShape(Rectangle())
                                     .onTapGesture {
                                         selection = i
@@ -88,6 +91,8 @@ struct CommandPalette: View {
                             }
                         }
                         .padding(6)
+                        .environment(\.lumiSlab, slab)
+                        .animation(appState.animation(.travel), value: selection)
                     }
                     .frame(maxHeight: 400)
                     .onChange(of: selection) { _, s in
@@ -96,9 +101,8 @@ struct CommandPalette: View {
                 }
             }
         }
-        .frame(width: 620)
-        .background(ElevatedSurface())
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .frame(width: 640)
+        .lumiGlass(theme: theme, radius: LumiRadius.xl)
         .onAppear {
             query = appState.paletteSeed
             appState.paletteSeed = ""
@@ -130,11 +134,14 @@ struct CommandPalette: View {
         }
         .padding(.horizontal, 12)
         .frame(height: 32)
-        .background(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(selected ? theme.primary.opacity(theme.isDark ? 0.18 : 0.12) : Color.clear)
-        )
-        .animation(appState.animation(.fast), value: selected)
+        .background {
+            // The selection slab glides between results.
+            if selected {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(theme.primary.opacity(theme.isDark ? 0.18 : 0.12))
+                    .matchedGeometryEffect(id: "palette-slab", in: slab)
+            }
+        }
     }
 
     private func move(_ d: Int, _ n: Int) {
@@ -246,6 +253,17 @@ struct CommandPalette: View {
             }
             cmd("lumi-link", "Copy lumi:// link to this note", aliases: "deep link url share open copy") { appState.copyLumiLink() }
             cmd("edit", appState.noteViewMode == .reading ? "Edit mode" : "Read mode", "⌘E", aliases: "toggle reading") { appState.toggleEditing() }
+            if appState.openNoteKind == .canvas {
+                cmd("canvas-zoom-in", "Canvas: zoom in", "+ = zi ⌘+", aliases: "magnify bigger") {
+                    _ = appState.structuredKeySinks[appState.focusedLeaf]?(StructuredKey("+"))
+                }
+                cmd("canvas-zoom-out", "Canvas: zoom out", "_ zo ⌘-", aliases: "smaller") {
+                    _ = appState.structuredKeySinks[appState.focusedLeaf]?(StructuredKey("_"))
+                }
+                cmd("canvas-fit", "Canvas: fit", "0 zf", aliases: "zoom fit all reset") {
+                    _ = appState.structuredKeySinks[appState.focusedLeaf]?(StructuredKey("0"))
+                }
+            }
             if appState.openNoteKind != .markdown {
                 cmd("structured-reading", "Reading (read-only \(appState.openNoteKind == .canvas ? "canvas" : "board"))", "q",
                     aliases: "view mode read only navigate") { appState.setNoteViewMode(.reading) }
