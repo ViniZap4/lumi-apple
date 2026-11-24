@@ -55,8 +55,16 @@ struct RootView: View {
         .task { await appState.bootstrapBooks(legacyRecords: legacySnapshots()) }
         .onChange(of: scenePhase) { _, phase in
             // Pick up books.yaml edits made by the TUI while we were away.
-            if phase == .active { appState.books.reload() }
+            if phase == .active {
+                appState.books.reload()
+                appState.accounts.reload()
+            }
         }
+        .onChange(of: appState.accounts.revision) { _, _ in
+            // accounts.yaml changed (here or in the TUI): feeds + links.
+            Task { await appState.sharedAccountsChanged() }
+        }
+        .modifier(DeviceLinkPrompts())
         .onChange(of: appState.preferences.ctrlHJKLPanes) { _, on in
             appState.activeEditor?.paneKeys.ctrlHJKL = on
         }

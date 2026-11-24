@@ -294,6 +294,20 @@ struct CommandPalette: View {
                 appState.requestSignOut(acc.key)
             }
         }
+        for acc in appState.accounts.accounts where appState.accounts.state(acc.key).isSignedIn {
+            cmd("signout-mac-" + acc.key.description, "Sign out \(acc.key.description) on this Mac (app + Terminal)",
+                aliases: "logout account everywhere terminal tui sair neste mac") {
+                appState.requestSignOutEverywhere(acc.key)
+            }
+        }
+        #if os(macOS)
+        for acc in appState.accounts.accounts where !appState.accounts.state(acc.key).isSignedIn {
+            cmd("link-terminal-" + acc.key.description, "Link \(acc.key.description) from the Terminal (lumi)",
+                aliases: "sign in login account tui terminal ligar") {
+                appState.linkFromTerminal(acc.key)
+            }
+        }
+        #endif
         for acc in appState.accounts.accounts where !appState.accounts.state(acc.key).isSignedIn {
             cmd("signin-" + acc.key.description, "Sign in \(acc.key.description)", aliases: "login account") {
                 appState.signInPrefill = acc.key

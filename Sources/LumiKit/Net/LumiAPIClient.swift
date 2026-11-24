@@ -110,6 +110,29 @@ public actor LumiAPIClient {
         let _: EmptyResponse = try await request(method: "POST", path: "/api/auth/logout", body: EmptyBody(), requireToken: true)
     }
 
+    /// `POST /api/auth/logout {"scope": …}` (SPEC-LIVROS §8.1). `.device`
+    /// also ends every session linked to this one on the server ("Sair
+    /// neste Mac").
+    public func logout(scope: LogoutScope) async throws(LumiAPIError) {
+        let _: EmptyResponse = try await request(method: "POST", path: "/api/auth/logout",
+                                                 body: LogoutRequest(scope: scope.rawValue), requireToken: true)
+    }
+
+    /// `POST /api/auth/device-links` (authenticated): a one-time code bound
+    /// to the requester's PKCE challenge (SPEC-LIVROS §8.4).
+    public func issueDeviceLink(challenge: String, label: String) async throws(LumiAPIError) -> DeviceLinkCode {
+        try await request(method: "POST", path: "/api/auth/device-links",
+                          body: DeviceLinkIssueRequest(challenge: challenge, label: label), requireToken: true)
+    }
+
+    /// `POST /api/auth/device-links/redeem` (public): exchanges the code and
+    /// the PKCE verifier for a new session of this client. A refused code
+    /// answers 401 `invalid_link` (surfaced as `.unauthorized`).
+    public func redeemDeviceLink(code: String, verifier: String, label: String) async throws(LumiAPIError) -> SessionResponse {
+        try await request(method: "POST", path: "/api/auth/device-links/redeem",
+                          body: DeviceLinkRedeemRequest(code: code, verifier: verifier, label: label), requireToken: false)
+    }
+
     /// `GET /api/users/me` — validates the current token and returns the user.
     public func currentUser() async throws(LumiAPIError) -> UserDTO {
         try await request(method: "GET", path: "/api/users/me", body: nil as EmptyBody?, requireToken: true)
@@ -525,6 +548,54 @@ public actor LumiAPIClient {
 }
 
 // MARK: - DTOs
+
+public enum LogoutScope: String, Sendable {
+    case session
+    case device
+}
+
+struct LogoutRequest: Codable, Sendable {
+    let scope: String
+}
+
+struct DeviceLinkIssueRequest: Codable, Sendable {
+    let challenge: String
+    let label: String
+}
+
+struct DeviceLinkRedeemRequest: Codable, Sendable {
+    let code: String
+    let verifier: String
+    let label: String
+}
+
+/// Answer of `POST /api/auth/device-links`.
+public struct DeviceLinkCode: Codable, Sendable, Equatable {
+    public let code: String
+    public let expiresAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case code
+        case expiresAt = "expires_at"
+    }
+
+    public init(code: String, expiresAt: Date?) {
+        self.code = code
+        self.expiresAt = expiresAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        code = try c.decode(String.self, forKey: .code)
+        expiresAt = try c.decodeIfPresent(String.self, forKey: .expiresAt).flatMap(SessionResponse.parseISO8601)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(code, forKey: .code)
+        try c.encodeIfPresent(expiresAt.map(BooksFile.timestamp), forKey: .expiresAt)
+    }
+}
 
 public struct LoginRequest: Codable, Sendable {
     public let username: String

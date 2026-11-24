@@ -244,7 +244,7 @@ public enum BooksFile {
 
     /// Split `key: value` and unquote the value. Returns nil value for YAML
     /// null spellings. Returns nil for lines that aren't key/value.
-    private static func splitKV(_ s: String, line: Int) throws(DecodeError) -> (String, String?)? {
+    static func splitKV(_ s: String, line: Int) throws(DecodeError) -> (String, String?)? {
         guard let colon = s.firstIndex(of: ":") else { return nil }
         let key = s[..<colon].trimmingCharacters(in: .whitespaces)
         guard !key.isEmpty else { return nil }
@@ -252,7 +252,7 @@ public enum BooksFile {
         return (key, try scalar(rest, line: line))
     }
 
-    private static func scalar(_ raw: String, line: Int) throws(DecodeError) -> String? {
+    static func scalar(_ raw: String, line: Int) throws(DecodeError) -> String? {
         if raw.hasPrefix("\"") { return try doubleQuoted(raw, line: line) }
         if raw.hasPrefix("'") {
             var inner = raw.dropFirst()

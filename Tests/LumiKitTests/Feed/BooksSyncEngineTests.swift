@@ -27,7 +27,7 @@ struct BooksSyncEngineTests {
         let tokens = InMemoryTokenStore(["\(server)#alice": "tok"])
         let acc = Account(serverURL: server, username: "alice", userID: "1", displayName: "A", addedAt: Date())
         defaults.set(try JSONEncoder.accounts.encode([acc]), forKey: AccountsStore.defaultsKey)
-        let accounts = AccountsStore(defaults: defaults, tokens: tokens, urlSession: HostRoutedURLProtocol.session)
+        let accounts = AccountsStore(fileURL: tempAccountsURL(), defaults: defaults, tokens: tokens, urlSession: HostRoutedURLProtocol.session)
         accounts.load()
         let registry = BooksRegistry(fileURL: tempDir().appendingPathComponent("books.yaml"), defaults: defaults,
                                      bookmarks: InMemoryBookmarkStore())
