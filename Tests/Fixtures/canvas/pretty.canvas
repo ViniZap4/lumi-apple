@@ -1,0 +1,52 @@
+{
+  "edges": [
+    {
+      "id": "f5a6b7c8d9e0f1a2",
+      "fromNode": "b1c2d3e4f5a6b7c8",
+      "fromSide": "right",
+      "toNode": "c2d3e4f5a6b7c8d9",
+      "toSide": "left",
+      "label": "informs"
+    },
+    {
+      "id": "a6b7c8d9e0f1a2b3",
+      "fromNode": "b1c2d3e4f5a6b7c8",
+      "fromSide": "bottom",
+      "toNode": "d3e4f5a6b7c8d9e0",
+      "toSide": "top",
+      "color": "1",
+      "toEnd": "arrow"
+    },
+    {
+      "id": "b7c8d9e0f1a2b3c4",
+      "fromNode": "c2d3e4f5a6b7c8d9",
+      "toNode": "e4f5a6b7c8d9e0f1",
+      "fromEnd": "arrow",
+      "toEnd": "none"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "b1c2d3e4f5a6b7c8",
+      "type": "text",
+      "text": "# Goals\n\n- Ship **kanban**\n- Ship canvas",
+      "x": -380,
+      "y": -200,
+      "width": 300,
+      "height": 180
+    },
+    {
+      "id": "c2d3e4f5a6b7c8d9",
+      "type": "file",
+      "file": "Projects/Roadmap.md",
+      "x": 40,
+      "y": -200,
+      "width": 360,
+      "height": 220,
+      "color": "4"
+    }
+  ],
+  "metadata": {
+    "version": "1.0"
+  }
+}
