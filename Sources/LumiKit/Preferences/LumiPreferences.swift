@@ -47,6 +47,23 @@ public final class LumiPreferences {
         public var label: String { self == .view ? "Read mode" : "Edit mode" }
     }
 
+    /// How the editor shows a note: Live Preview (default, web parity)
+    /// or Source. Remembered: whatever the user picks last sticks.
+    public var editMode: EditMode {
+        didSet { store.set(Keys.editMode, editMode.rawValue) }
+    }
+    public enum EditMode: String, CaseIterable, Identifiable, Sendable {
+        case live, source
+        public var id: String { rawValue }
+        public var label: String { self == .live ? "Live Preview" : "Source" }
+    }
+
+    /// App-level Reduce Motion (on top of the system setting): no
+    /// transforms or fades, only instant state changes (SPEC-PARTE2 §1).
+    public var reduceMotion: Bool {
+        didSet { store.set(Keys.reduceMotion, reduceMotion) }
+    }
+
     /// Show gutter line numbers in the vim editor.
     public var showLineNumbers: Bool {
         didSet { store.set(Keys.showLineNumbers, showLineNumbers) }
@@ -281,6 +298,8 @@ public final class LumiPreferences {
         self.jkScrollInView = store.bool(Keys.jkScroll) ?? true
         let raw = store.string(Keys.defaultOpenMode) ?? DefaultOpenMode.view.rawValue
         self.defaultOpenMode = DefaultOpenMode(rawValue: raw) ?? .view
+        self.editMode = EditMode(rawValue: store.string(Keys.editMode) ?? "") ?? .live
+        self.reduceMotion = store.bool(Keys.reduceMotion) ?? false
         self.showLineNumbers = store.bool(Keys.showLineNumbers) ?? false
         self.relativeLineNumbers = store.bool(Keys.relativeLineNumbers) ?? false
         self.editorFontSize = store.double(Keys.editorFontSize) ?? 14
@@ -368,6 +387,8 @@ public final class LumiPreferences {
         static let splitPreviewRatio = "split_preview_ratio"
         static let ctrlHJKLPanes = "ctrl_hjkl_panes"
         static let previewReturnMovesCursor = "preview_return_moves_cursor"
+        static let editMode = "edit_mode"
+        static let reduceMotion = "reduce_motion"
     }
 
     /// UserDefaults keys used by builds <= F.36. Kept here only for the

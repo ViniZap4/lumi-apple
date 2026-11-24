@@ -93,6 +93,10 @@ extension VimEngine {
             fx = .host(args.isEmpty ? "preview" : "preview " + args)
         case "settings":
             fx = .host("settings")
+        case "live":
+            fx = .host("live")
+        case "source":
+            fx = .host("source")
 
         case "s", "su", "sub", "substitute":
             substitute(range: range, args: argsRaw, &st, &b)

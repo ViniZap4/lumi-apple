@@ -27,6 +27,12 @@ public enum PaneCommand: Sendable, Hashable {
     case next
     case previous
     case last
+    /// `⌃w q` / `⌃w c`: close the pane (the last one closes the note).
+    case close
+    /// `⌃w o`: keep only the focused pane.
+    case only
+    /// `⌃w =`: equal sizes.
+    case equalize
 }
 
 /// What is on screen, as far as pane focus is concerned.
@@ -113,6 +119,9 @@ public enum PaneGraph {
             guard visible.count > 1, let i = visible.firstIndex(of: from) else { return nil }
             let step = command == .next ? 1 : -1
             return PaneTarget(visible[(i + step + visible.count) % visible.count])
+        case .close, .only, .equalize:
+            // Layout commands: the pane tree handles them, not focus.
+            return nil
         case .last:
             guard let previous, previous != from else { return nil }
             if visible.contains(previous) { return PaneTarget(previous) }
@@ -243,6 +252,9 @@ public struct EditorPaneKeys: Sendable {
             case "w": return .next
             case "W": return .previous
             case "p": return .last
+            case "q", "c": return .close
+            case "o": return .only
+            case "=": return .equalize
             default: return nil
             }
         default:
@@ -251,6 +263,8 @@ public struct EditorPaneKeys: Sendable {
             switch c {
             case "w": return .next
             case "p": return .last
+            case "q", "c": return .close
+            case "o": return .only
             default: return nil
             }
         }

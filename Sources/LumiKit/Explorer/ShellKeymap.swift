@@ -325,6 +325,9 @@ public struct ShellKeymap: Sendable {
         case "w": return .next
         case "W": return .previous
         case "p": return .last
+        case "q", "c": return .close
+        case "o": return .only
+        case "=": return .equalize
         default: return nil
         }
     }

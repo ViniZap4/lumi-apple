@@ -57,7 +57,8 @@ public enum CommandLegend {
     static let shellZ: [LegendItem] = [.init("zp", "preview"), .init("zh", "book root")]
     /// After `⌃w` (shell or editor).
     public static let windowCommands: [LegendItem] = [
-        .init("h j k l", "pane that way"), .init("w W", "next/prev pane"), .init("p", "last pane"), .init("Esc", "cancel"),
+        .init("h j k l", "pane that way"), .init("w W", "next/prev pane"), .init("p", "last pane"),
+        .init("q", "close pane"), .init("o", "only this pane"), .init("=", "equal sizes"), .init("Esc", "cancel"),
     ]
     static let headingChord: [LegendItem] = [.init("[[", "prev heading"), .init("]]", "next heading")]
 
